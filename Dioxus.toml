@@ -10,3 +10,10 @@ style = ["assets/style.css"]
 
 [desktop]
 # icon = "assets/icon.png"  # Uncomment when icon is available
+
+[desktop.window]
+title = "Synchronicity Engine"
+width = 1200
+height = 800
+resizable = true
+decorations = true
