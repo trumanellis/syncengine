@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use dioxus::prelude::*;
 use syncengine_core::{RealmId, RealmInfo, SyncEngine, Task};
 
-use crate::components::{FieldState, FieldStatus};
+use crate::components::{FieldState, FieldStatus, TaskList};
 
 /// Get the data directory for the application.
 fn get_data_dir() -> PathBuf {
@@ -24,7 +24,6 @@ pub fn Field() -> Element {
     let mut realms: Signal<Vec<RealmInfo>> = use_signal(Vec::new);
     let mut selected_realm: Signal<Option<RealmId>> = use_signal(|| None);
     let mut tasks: Signal<Vec<Task>> = use_signal(Vec::new);
-    let mut new_task_title: Signal<String> = use_signal(String::new);
     let mut new_realm_name: Signal<String> = use_signal(String::new);
     let mut loading: Signal<bool> = use_signal(|| true);
     let mut error: Signal<Option<String>> = use_signal(|| None);
@@ -113,9 +112,8 @@ pub fn Field() -> Element {
         });
     };
 
-    // Handler for adding a new task
-    let add_task = move |_| {
-        let title = new_task_title.read().clone();
+    // Handler for adding a new task (receives title from ManifestInput)
+    let add_task = move |title: String| {
         if title.trim().is_empty() {
             return;
         }
@@ -133,7 +131,6 @@ pub fn Field() -> Element {
                         match eng.list_tasks(&realm_id) {
                             Ok(task_list) => {
                                 tasks.set(task_list);
-                                new_task_title.set(String::new());
                             }
                             Err(e) => {
                                 error.set(Some(format!("Failed to refresh tasks: {}", e)));
@@ -194,37 +191,6 @@ pub fn Field() -> Element {
                 }
             }
         });
-    };
-
-    // Handler for key press on task input
-    let on_task_keydown = move |evt: KeyboardEvent| {
-        if evt.key() == Key::Enter {
-            let title = new_task_title.read().clone();
-            if title.trim().is_empty() {
-                return;
-            }
-
-            let realm_id = match selected_realm() {
-                Some(id) => id,
-                None => return,
-            };
-
-            spawn(async move {
-                if let Some(ref mut eng) = *engine.write() {
-                    match eng.add_task(&realm_id, &title).await {
-                        Ok(_) => {
-                            if let Ok(task_list) = eng.list_tasks(&realm_id) {
-                                tasks.set(task_list);
-                                new_task_title.set(String::new());
-                            }
-                        }
-                        Err(e) => {
-                            error.set(Some(format!("Failed to add task: {}", e)));
-                        }
-                    }
-                }
-            });
-        }
     };
 
     // Handler for key press on realm input
@@ -351,58 +317,11 @@ pub fn Field() -> Element {
                     // Task list
                     main { class: "task-area",
                         if selected_realm().is_some() {
-                            // Task input
-                            div { class: "manifest-input",
-                                input {
-                                    class: "input-field",
-                                    placeholder: "manifest new intention...",
-                                    value: "{new_task_title}",
-                                    oninput: move |e| new_task_title.set(e.value()),
-                                    onkeydown: on_task_keydown
-                                }
-                                button {
-                                    class: "btn-primary",
-                                    onclick: add_task,
-                                    "manifest"
-                                }
-                            }
-
-                            // Task list
-                            div { class: "intention-list",
-                                if tasks().is_empty() {
-                                    p { class: "empty-state",
-                                        "No intentions yet. Manifest your first intention above."
-                                    }
-                                } else {
-                                    for task in tasks() {
-                                        {
-                                            let task_id = task.id.clone();
-                                            let task_id_for_delete = task.id.clone();
-                                            rsx! {
-                                                div { class: "intention-item",
-                                                    button {
-                                                        class: "intention-toggle",
-                                                        onclick: move |_| toggle_task(task_id.clone()),
-                                                        span {
-                                                            class: if task.completed { "check completed" } else { "check" },
-                                                            if task.completed { "\u{2713}" } else { "\u{25CB}" }
-                                                        }
-                                                    }
-                                                    span {
-                                                        class: if task.completed { "intention-title completed" } else { "intention-title" },
-                                                        "{task.title}"
-                                                    }
-                                                    button {
-                                                        class: "intention-delete",
-                                                        onclick: move |_| delete_task(task_id_for_delete.clone()),
-                                                        title: "dissolve",
-                                                        "\u{00D7}"
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
+                            TaskList {
+                                tasks: tasks(),
+                                on_toggle: move |id| toggle_task(id),
+                                on_delete: move |id| delete_task(id),
+                                on_add: move |title| add_task(title),
                             }
                         } else {
                             div { class: "no-realm-selected",

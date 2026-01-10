@@ -134,7 +134,7 @@ impl RealmInfo {
 /// Task in a realm
 ///
 /// Represents a single task item that can be synchronized between peers.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Task {
     /// Unique identifier for the task
     pub id: TaskId,
