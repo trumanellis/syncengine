@@ -617,6 +617,283 @@ body {
   box-shadow: 0 0 10px rgba(124, 184, 124, 0.2);
 }
 
+/* === Invite Panel === */
+.invite-panel {
+  background: #111111;
+  border: 1px solid var(--void-border);
+  border-radius: 8px;
+  padding: 1.5rem;
+  margin-top: 1rem;
+}
+
+.invite-panel-header {
+  font-family: var(--font-serif);
+  font-size: var(--text-lg);
+  font-weight: 400;
+  margin-bottom: 1rem;
+  color: var(--text-primary);
+}
+
+.invite-generate-btn {
+  width: 100%;
+}
+
+.invite-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2rem;
+}
+
+.loading-text {
+  color: var(--text-secondary);
+  font-style: italic;
+  animation: breathe 2s ease-in-out infinite;
+}
+
+.invite-display {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1rem;
+}
+
+.invite-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.5rem 0.75rem;
+  background: rgba(255, 51, 102, 0.1);
+  border: 1px solid var(--danger);
+  border-radius: 4px;
+  margin-bottom: 1rem;
+  font-size: var(--text-sm);
+  color: var(--danger);
+}
+
+/* === QR Code Display === */
+.qr-code-container {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  background: var(--void-black);
+  border: 1px solid var(--void-border);
+  border-radius: 4px;
+}
+
+.qr-code-image {
+  display: block;
+  max-width: 100%;
+  height: auto;
+}
+
+.qr-code-fallback {
+  padding: 1rem;
+  text-align: center;
+  background: var(--void-lighter);
+  border: 1px solid var(--void-border);
+  border-radius: 4px;
+}
+
+.qr-fallback-label {
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  margin-bottom: 0.5rem;
+}
+
+.qr-fallback-text {
+  font-size: var(--text-xs);
+  color: var(--cyan);
+  word-break: break-all;
+  display: block;
+  max-width: 200px;
+}
+
+/* === Invite Ticket Display === */
+.invite-ticket-container {
+  width: 100%;
+  max-width: 280px;
+}
+
+.invite-ticket-text {
+  background: var(--void-black);
+  border: 1px solid var(--void-border);
+  border-radius: 4px;
+  padding: 0.75rem;
+  overflow: hidden;
+}
+
+.invite-ticket-code {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--cyan);
+  word-break: break-all;
+  display: block;
+  max-height: 80px;
+  overflow-y: auto;
+}
+
+.invite-copy-btn {
+  width: 100%;
+  max-width: 280px;
+  transition: all 0.3s ease;
+}
+
+.invite-copy-btn.copied {
+  background: rgba(124, 184, 124, 0.2);
+  border-color: var(--moss-glow);
+  color: var(--moss-glow);
+}
+
+.invite-expiry {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+.expiry-label {
+  color: var(--text-muted);
+}
+
+.expiry-countdown {
+  color: var(--warning);
+  font-family: var(--font-mono);
+}
+
+.invite-realm-name {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+.invite-new-btn {
+  margin-top: 0.5rem;
+}
+
+/* === Modal Overlay === */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(10, 10, 10, 0.85);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 2rem;
+}
+
+.modal-content {
+  background: #111111;
+  border: 1px solid var(--void-border);
+  border-radius: 8px;
+  max-width: 480px;
+  width: 100%;
+  max-height: 90vh;
+  overflow-y: auto;
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 1.5rem;
+  border-bottom: 1px solid var(--void-border);
+}
+
+.modal-close-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-size: var(--text-xl);
+  cursor: pointer;
+  padding: 0.25rem 0.5rem;
+  transition: color 0.2s ease;
+}
+
+.modal-close-btn:hover {
+  color: var(--text-primary);
+}
+
+.modal-body {
+  padding: 1.5rem;
+}
+
+.modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.75rem;
+  padding: 1rem 1.5rem;
+  border-top: 1px solid var(--void-border);
+}
+
+/* === Join Realm Modal === */
+.join-realm-modal {
+  /* Additional styling specific to join modal */
+}
+
+.join-input {
+  width: 100%;
+  min-height: 100px;
+  resize: vertical;
+}
+
+.join-error {
+  padding: 0.75rem;
+  background: rgba(255, 51, 102, 0.1);
+  border: 1px solid var(--danger);
+  border-radius: 4px;
+  margin-bottom: 1rem;
+  color: var(--danger);
+  font-size: var(--text-sm);
+}
+
+.join-success {
+  padding: 0.75rem;
+  background: rgba(124, 184, 124, 0.1);
+  border: 1px solid var(--moss-glow);
+  border-radius: 4px;
+  margin-bottom: 1rem;
+  color: var(--moss-glow);
+  font-size: var(--text-sm);
+  text-align: center;
+}
+
+/* === Sacred Button === */
+.btn-sacred {
+  padding: 0.75rem 2rem;
+  background: transparent;
+  border: 1px solid var(--gold);
+  border-radius: 4px;
+  color: var(--gold);
+  font-family: var(--font-mono);
+  font-size: var(--text-base);
+  cursor: pointer;
+  transition: all 0.3s ease;
+}
+
+.btn-sacred:hover {
+  border-color: var(--gold);
+  box-shadow: 0 0 20px var(--gold-glow);
+  text-shadow: 0 0 10px var(--gold-glow);
+}
+
+/* === Ghost Button === */
+.btn-ghost {
+  padding: 0.75rem 2rem;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: var(--text-base);
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.btn-ghost:hover {
+  color: var(--text-primary);
+  border-color: var(--void-border);
+}
+
 /* === Accessibility === */
 *:focus-visible {
   outline: 2px solid var(--cyan);
