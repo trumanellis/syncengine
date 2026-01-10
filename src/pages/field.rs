@@ -5,7 +5,7 @@
 use dioxus::prelude::*;
 use syncengine_core::{RealmId, RealmInfo, Task};
 
-use crate::components::{FieldState, FieldStatus, RealmSelector, TaskList};
+use crate::components::{FieldState, FieldStatus, InvitePanel, JoinRealmModal, RealmSelector, TaskList};
 use crate::context::{use_engine, use_engine_ready};
 
 /// Main application view component.
@@ -21,6 +21,10 @@ pub fn Field() -> Element {
     let mut tasks: Signal<Vec<Task>> = use_signal(Vec::new);
     let mut error: Signal<Option<String>> = use_signal(|| None);
     let mut field_state: Signal<FieldState> = use_signal(|| FieldState::Listening);
+
+    // Invite UI state
+    let mut show_join_modal: Signal<bool> = use_signal(|| false);
+    let mut show_invite_panel: Signal<bool> = use_signal(|| false);
 
     // Load realms when engine becomes ready
     use_effect(move || {
@@ -193,12 +197,44 @@ pub fn Field() -> Element {
         });
     };
 
+    // Handler for joining a realm via invite
+    let join_realm = move |invite_string: String| {
+        spawn(async move {
+            let shared = engine();
+            let mut guard = shared.write().await;
+            if let Some(ref mut eng) = *guard {
+                match eng.join_realm(&invite_string).await {
+                    Ok(realm_id) => {
+                        // Refresh realm list and select the joined realm
+                        let realm_list = eng.list_realms().await.unwrap_or_default();
+                        realms.set(realm_list);
+                        selected_realm.set(Some(realm_id));
+                        show_join_modal.set(false);
+                    }
+                    Err(e) => {
+                        error.set(Some(format!("Failed to join realm: {}", e)));
+                    }
+                }
+            }
+        });
+    };
+
     // Render
     rsx! {
         div { class: "app-shell",
             // Header
             header { class: "app-header",
                 h1 { class: "app-title", "The Field" }
+
+                // Header actions
+                div { class: "header-actions",
+                    button {
+                        class: "header-btn join-btn",
+                        onclick: move |_| show_join_modal.set(true),
+                        "Join Realm"
+                    }
+                }
+
                 FieldStatus { status: field_state() }
             }
 
@@ -232,9 +268,18 @@ pub fn Field() -> Element {
                         on_create: create_realm,
                     }
 
-                    // Task list
+                    // Task list (center)
                     main { class: "task-area",
                         if selected_realm().is_some() {
+                            // Task area header with invite toggle
+                            div { class: "task-area-header",
+                                button {
+                                    class: if show_invite_panel() { "invite-toggle-btn active" } else { "invite-toggle-btn" },
+                                    onclick: move |_| show_invite_panel.set(!show_invite_panel()),
+                                    if show_invite_panel() { "Hide Invite" } else { "Summon Others" }
+                                }
+                            }
+
                             TaskList {
                                 tasks: tasks(),
                                 on_toggle: move |id| toggle_task(id),
@@ -248,6 +293,26 @@ pub fn Field() -> Element {
                                     span { class: "sacred-term", "realm" }
                                     " to view intentions, or manifest a new one."
                                 }
+                                p { class: "body-text hint-text",
+                                    "Or "
+                                    button {
+                                        class: "inline-link-btn",
+                                        onclick: move |_| show_join_modal.set(true),
+                                        "join an existing realm"
+                                    }
+                                    " with an invite sigil."
+                                }
+                            }
+                        }
+                    }
+
+                    // Invite panel (right sidebar, shown when toggled)
+                    if show_invite_panel() {
+                        if let Some(realm_id) = selected_realm() {
+                            aside { class: "invite-sidebar",
+                                InvitePanel {
+                                    realm_id: realm_id,
+                                }
                             }
                         }
                     }
@@ -257,6 +322,13 @@ pub fn Field() -> Element {
             // Footer
             footer { class: "app-footer",
                 span { class: "app-footer-message", "synchronicities are forming" }
+            }
+
+            // Join Realm Modal (overlay)
+            JoinRealmModal {
+                show: show_join_modal(),
+                on_close: move |_| show_join_modal.set(false),
+                on_join: join_realm,
             }
         }
     }

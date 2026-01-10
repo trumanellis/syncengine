@@ -894,6 +894,105 @@ body {
   border-color: var(--void-border);
 }
 
+/* === Header Actions === */
+.header-actions {
+  display: flex;
+  gap: 0.75rem;
+  margin-left: auto;
+  margin-right: 1rem;
+}
+
+.header-btn {
+  padding: 0.5rem 1rem;
+  background: transparent;
+  border: 1px solid var(--moss);
+  border-radius: 4px;
+  color: var(--moss-glow);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.header-btn:hover {
+  border-color: var(--moss-glow);
+  box-shadow: 0 0 10px rgba(124, 184, 124, 0.3);
+}
+
+.join-btn {
+  border-color: var(--cyan);
+  color: var(--cyan);
+}
+
+.join-btn:hover {
+  border-color: var(--cyan);
+  box-shadow: 0 0 10px var(--cyan-glow);
+}
+
+/* === Task Area Header === */
+.task-area-header {
+  display: flex;
+  justify-content: flex-end;
+  padding: 0.5rem 0;
+  margin-bottom: 0.5rem;
+  border-bottom: 1px solid var(--void-border);
+}
+
+.invite-toggle-btn {
+  padding: 0.5rem 1rem;
+  background: transparent;
+  border: 1px solid var(--gold);
+  border-radius: 4px;
+  color: var(--gold);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.invite-toggle-btn:hover {
+  box-shadow: 0 0 10px var(--gold-glow);
+}
+
+.invite-toggle-btn.active {
+  background: rgba(212, 175, 55, 0.1);
+  box-shadow: 0 0 10px var(--gold-glow);
+}
+
+/* === Invite Sidebar === */
+.invite-sidebar {
+  width: 320px;
+  min-width: 280px;
+  background: var(--void-lighter);
+  border-left: 1px solid var(--void-border);
+  padding: 1rem;
+  overflow-y: auto;
+}
+
+/* === Inline Link Button === */
+.inline-link-btn {
+  background: none;
+  border: none;
+  color: var(--cyan);
+  font-family: var(--font-mono);
+  font-size: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+  padding: 0;
+}
+
+.inline-link-btn:hover {
+  color: var(--cyan);
+  text-shadow: 0 0 10px var(--cyan-glow);
+}
+
+/* === Hint Text === */
+.hint-text {
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  margin-top: 1rem;
+}
+
 /* === Accessibility === */
 *:focus-visible {
   outline: 2px solid var(--cyan);
