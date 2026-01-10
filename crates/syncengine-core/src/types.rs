@@ -107,7 +107,7 @@ impl std::fmt::Display for TaskId {
 /// Basic realm information
 ///
 /// Contains metadata about a realm without the full task list.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RealmInfo {
     /// Unique identifier for the realm
     pub id: RealmId,
