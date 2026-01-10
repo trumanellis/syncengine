@@ -38,8 +38,10 @@ use crate::identity::{Did, HybridKeypair, HybridPublicKey};
 use crate::invite::InviteTicket;
 use crate::realm::RealmDoc;
 use crate::storage::Storage;
-use crate::sync::{GossipSync, SyncEnvelope, SyncMessage, TopicHandle};
+use crate::sync::{GossipSync, SyncEnvelope, SyncEvent, SyncMessage, SyncStatus, TopicHandle};
 use crate::types::{RealmId, RealmInfo, Task, TaskId};
+
+use tokio::sync::broadcast;
 
 /// Internal state for an open realm
 struct RealmState {
@@ -68,6 +70,9 @@ struct RealmState {
 /// engine.add_task(&realm_id, "Build solar dehydrator").await?;
 /// engine.start_sync(&realm_id).await?;
 /// ```
+/// Default capacity for event broadcast channel
+const EVENT_CHANNEL_CAPACITY: usize = 256;
+
 pub struct SyncEngine {
     /// Persistent storage for realms, documents, and keys
     storage: Storage,
@@ -79,6 +84,10 @@ pub struct SyncEngine {
     data_dir: PathBuf,
     /// Identity keypair (lazy-initialized)
     identity: Option<HybridKeypair>,
+    /// Per-realm sync status tracking
+    sync_status: HashMap<RealmId, SyncStatus>,
+    /// Event broadcast channel for notifying listeners of realm changes
+    event_tx: broadcast::Sender<SyncEvent>,
 }
 
 impl SyncEngine {
@@ -102,12 +111,16 @@ impl SyncEngine {
         let db_path = data_dir.join("syncengine.redb");
         let storage = Storage::new(&db_path)?;
 
+        let (event_tx, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
+
         Ok(Self {
             storage,
             gossip: None,
             realms: HashMap::new(),
             data_dir,
             identity: None,
+            sync_status: HashMap::new(),
+            event_tx,
         })
     }
 
@@ -572,7 +585,8 @@ impl SyncEngine {
     /// Start syncing a realm with peers via gossip
     ///
     /// Subscribes to the realm's gossip topic and begins sending/receiving
-    /// sync messages.
+    /// sync messages. This method can be called for multiple realms concurrently
+    /// without blocking.
     ///
     /// # Errors
     ///
@@ -591,6 +605,14 @@ impl SyncEngine {
 
         info!(%realm_id, "Starting sync");
 
+        // Update status to Connecting
+        self.sync_status
+            .insert(realm_id.clone(), SyncStatus::Connecting);
+        let _ = self.event_tx.send(SyncEvent::StatusChanged {
+            realm_id: realm_id.clone(),
+            status: SyncStatus::Connecting,
+        });
+
         // Initialize gossip
         let gossip = self.ensure_gossip().await?;
 
@@ -602,6 +624,14 @@ impl SyncEngine {
         if let Some(state) = self.realms.get_mut(realm_id) {
             state.topic_handle = Some(handle);
         }
+
+        // Update status to Syncing
+        self.sync_status
+            .insert(realm_id.clone(), SyncStatus::Syncing { peer_count: 0 });
+        let _ = self.event_tx.send(SyncEvent::StatusChanged {
+            realm_id: realm_id.clone(),
+            status: SyncStatus::Syncing { peer_count: 0 },
+        });
 
         debug!(%realm_id, "Sync started");
         Ok(())
@@ -622,12 +652,133 @@ impl SyncEngine {
 
         if state.topic_handle.is_some() {
             state.topic_handle = None;
+
+            // Update status to Idle
+            self.sync_status.insert(realm_id.clone(), SyncStatus::Idle);
+            let _ = self.event_tx.send(SyncEvent::StatusChanged {
+                realm_id: realm_id.clone(),
+                status: SyncStatus::Idle,
+            });
+
             info!(%realm_id, "Sync stopped");
         } else {
             debug!(%realm_id, "Not syncing");
         }
 
         Ok(())
+    }
+
+    /// Get the sync status for a realm
+    ///
+    /// Returns `SyncStatus::Idle` if the realm is not syncing or not found.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let status = engine.sync_status(&realm_id);
+    /// match status {
+    ///     SyncStatus::Syncing { peer_count } => println!("Syncing with {} peers", peer_count),
+    ///     SyncStatus::Idle => println!("Not syncing"),
+    ///     _ => {}
+    /// }
+    /// ```
+    pub fn sync_status(&self, realm_id: &RealmId) -> SyncStatus {
+        self.sync_status
+            .get(realm_id)
+            .cloned()
+            .unwrap_or(SyncStatus::Idle)
+    }
+
+    /// Subscribe to sync events
+    ///
+    /// Returns a receiver that will receive events when:
+    /// - Remote changes arrive for a realm
+    /// - Peer connects or disconnects
+    /// - Sync status changes
+    /// - Errors occur
+    ///
+    /// Multiple subscribers can exist; events are broadcast to all.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut events = engine.subscribe_events();
+    ///
+    /// tokio::spawn(async move {
+    ///     while let Ok(event) = events.recv().await {
+    ///         match event {
+    ///             SyncEvent::RealmChanged { realm_id, .. } => {
+    ///                 println!("Realm {} changed!", realm_id);
+    ///             }
+    ///             SyncEvent::StatusChanged { realm_id, status } => {
+    ///                 println!("Realm {} status: {:?}", realm_id, status);
+    ///             }
+    ///             _ => {}
+    ///         }
+    ///     }
+    /// });
+    /// ```
+    pub fn subscribe_events(&self) -> broadcast::Receiver<SyncEvent> {
+        self.event_tx.subscribe()
+    }
+
+    /// Register a callback for realm changes
+    ///
+    /// This is a convenience method that spawns a background task to listen
+    /// for `SyncEvent::RealmChanged` events and calls the provided callback.
+    ///
+    /// # Arguments
+    ///
+    /// * `callback` - Function to call when remote changes arrive for any realm
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// engine.on_realm_change(|realm_id| {
+    ///     println!("Realm {} was updated by a peer!", realm_id);
+    /// });
+    /// ```
+    pub fn on_realm_change<F>(&self, callback: F)
+    where
+        F: Fn(RealmId) + Send + 'static,
+    {
+        let mut receiver = self.event_tx.subscribe();
+
+        tokio::spawn(async move {
+            while let Ok(event) = receiver.recv().await {
+                if let SyncEvent::RealmChanged { realm_id, .. } = event {
+                    callback(realm_id);
+                }
+            }
+        });
+    }
+
+    /// Get the list of realms currently syncing
+    pub fn syncing_realms(&self) -> Vec<RealmId> {
+        self.sync_status
+            .iter()
+            .filter_map(|(realm_id, status)| {
+                if !matches!(status, SyncStatus::Idle) {
+                    Some(realm_id.clone())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// Get the count of realms currently syncing
+    pub fn syncing_count(&self) -> usize {
+        self.sync_status
+            .values()
+            .filter(|s| !matches!(s, SyncStatus::Idle))
+            .count()
+    }
+
+    /// Emit a sync event (internal helper)
+    #[allow(dead_code)]
+    fn emit_event(&self, event: SyncEvent) {
+        let _ = self.event_tx.send(event);
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -1900,5 +2051,247 @@ mod tests {
         assert!(titles.contains(&"Local task"));
         assert!(titles.contains(&"Remote task 1"));
         assert!(titles.contains(&"Remote task 2"));
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Multi-Realm Sync Tests
+    // ═══════════════════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    async fn test_sync_status_returns_idle_for_unsynced_realm() {
+        let (engine, _temp) = create_test_engine().await;
+        let realm_id = RealmId::new();
+
+        assert_eq!(engine.sync_status(&realm_id), SyncStatus::Idle);
+    }
+
+    #[tokio::test]
+    async fn test_sync_status_changes_when_sync_starts() {
+        let (mut engine, _temp) = create_test_engine().await;
+
+        let realm_id = engine.create_realm("Status Test").await.unwrap();
+
+        // Initially idle
+        assert_eq!(engine.sync_status(&realm_id), SyncStatus::Idle);
+
+        // Start sync
+        engine.start_sync(&realm_id).await.unwrap();
+
+        // Should be syncing now
+        let status = engine.sync_status(&realm_id);
+        assert!(matches!(status, SyncStatus::Syncing { .. }));
+
+        engine.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_sync_status_returns_idle_after_stop() {
+        let (mut engine, _temp) = create_test_engine().await;
+
+        let realm_id = engine.create_realm("Stop Status Test").await.unwrap();
+
+        // Start and stop sync
+        engine.start_sync(&realm_id).await.unwrap();
+        assert!(matches!(engine.sync_status(&realm_id), SyncStatus::Syncing { .. }));
+
+        engine.stop_sync(&realm_id).await.unwrap();
+        assert_eq!(engine.sync_status(&realm_id), SyncStatus::Idle);
+
+        engine.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_multiple_realms_can_sync_concurrently() {
+        let (mut engine, _temp) = create_test_engine().await;
+
+        // Create multiple realms
+        let realm1 = engine.create_realm("Realm 1").await.unwrap();
+        let realm2 = engine.create_realm("Realm 2").await.unwrap();
+        let realm3 = engine.create_realm("Realm 3").await.unwrap();
+
+        // Start syncing all three
+        engine.start_sync(&realm1).await.unwrap();
+        engine.start_sync(&realm2).await.unwrap();
+        engine.start_sync(&realm3).await.unwrap();
+
+        // All should be syncing
+        assert!(engine.is_realm_syncing(&realm1));
+        assert!(engine.is_realm_syncing(&realm2));
+        assert!(engine.is_realm_syncing(&realm3));
+
+        // Check status for each
+        assert!(matches!(engine.sync_status(&realm1), SyncStatus::Syncing { .. }));
+        assert!(matches!(engine.sync_status(&realm2), SyncStatus::Syncing { .. }));
+        assert!(matches!(engine.sync_status(&realm3), SyncStatus::Syncing { .. }));
+
+        // Verify syncing_count
+        assert_eq!(engine.syncing_count(), 3);
+
+        // Verify syncing_realms
+        let syncing = engine.syncing_realms();
+        assert!(syncing.contains(&realm1));
+        assert!(syncing.contains(&realm2));
+        assert!(syncing.contains(&realm3));
+
+        engine.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_start_sync_multiple_realms_without_blocking() {
+        let (mut engine, _temp) = create_test_engine().await;
+
+        // Create realms
+        let realm1 = engine.create_realm("Realm A").await.unwrap();
+        let realm2 = engine.create_realm("Realm B").await.unwrap();
+
+        // Measure time for starting both syncs
+        let start = std::time::Instant::now();
+
+        engine.start_sync(&realm1).await.unwrap();
+        engine.start_sync(&realm2).await.unwrap();
+
+        let elapsed = start.elapsed();
+
+        // Should complete quickly (not blocking)
+        assert!(elapsed.as_millis() < 5000, "start_sync took too long: {:?}", elapsed);
+
+        // Both should be syncing
+        assert!(engine.is_realm_syncing(&realm1));
+        assert!(engine.is_realm_syncing(&realm2));
+
+        engine.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_stop_one_realm_does_not_affect_others() {
+        let (mut engine, _temp) = create_test_engine().await;
+
+        let realm1 = engine.create_realm("Keep Syncing").await.unwrap();
+        let realm2 = engine.create_realm("Stop Syncing").await.unwrap();
+
+        engine.start_sync(&realm1).await.unwrap();
+        engine.start_sync(&realm2).await.unwrap();
+
+        // Stop only realm2
+        engine.stop_sync(&realm2).await.unwrap();
+
+        // realm1 should still be syncing
+        assert!(engine.is_realm_syncing(&realm1));
+        assert!(!engine.is_realm_syncing(&realm2));
+
+        assert!(matches!(engine.sync_status(&realm1), SyncStatus::Syncing { .. }));
+        assert_eq!(engine.sync_status(&realm2), SyncStatus::Idle);
+
+        engine.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_subscribe_events_receives_status_changes() {
+        let (mut engine, _temp) = create_test_engine().await;
+
+        let realm_id = engine.create_realm("Event Test").await.unwrap();
+
+        // Subscribe before starting sync
+        let mut events = engine.subscribe_events();
+
+        // Start sync - should emit events
+        engine.start_sync(&realm_id).await.unwrap();
+
+        // Try to receive events (with timeout to avoid hanging)
+        let mut found_connecting = false;
+        let mut found_syncing = false;
+
+        // Use a short timeout for testing
+        for _ in 0..10 {
+            match tokio::time::timeout(
+                std::time::Duration::from_millis(100),
+                events.recv()
+            ).await {
+                Ok(Ok(SyncEvent::StatusChanged { status: SyncStatus::Connecting, .. })) => {
+                    found_connecting = true;
+                }
+                Ok(Ok(SyncEvent::StatusChanged { status: SyncStatus::Syncing { .. }, .. })) => {
+                    found_syncing = true;
+                }
+                _ => break,
+            }
+        }
+
+        // Should have received at least the connecting or syncing event
+        assert!(found_connecting || found_syncing, "Should receive status change events");
+
+        engine.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_syncing_realms_returns_only_active() {
+        let (mut engine, _temp) = create_test_engine().await;
+
+        let realm1 = engine.create_realm("Active 1").await.unwrap();
+        let realm2 = engine.create_realm("Active 2").await.unwrap();
+        let realm3 = engine.create_realm("Inactive").await.unwrap();
+
+        // Start syncing only realm1 and realm2
+        engine.start_sync(&realm1).await.unwrap();
+        engine.start_sync(&realm2).await.unwrap();
+
+        let syncing = engine.syncing_realms();
+        assert_eq!(syncing.len(), 2);
+        assert!(syncing.contains(&realm1));
+        assert!(syncing.contains(&realm2));
+        assert!(!syncing.contains(&realm3));
+
+        engine.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_syncing_count_tracks_active_syncs() {
+        let (mut engine, _temp) = create_test_engine().await;
+
+        assert_eq!(engine.syncing_count(), 0);
+
+        let realm1 = engine.create_realm("Count 1").await.unwrap();
+        let realm2 = engine.create_realm("Count 2").await.unwrap();
+
+        engine.start_sync(&realm1).await.unwrap();
+        assert_eq!(engine.syncing_count(), 1);
+
+        engine.start_sync(&realm2).await.unwrap();
+        assert_eq!(engine.syncing_count(), 2);
+
+        engine.stop_sync(&realm1).await.unwrap();
+        assert_eq!(engine.syncing_count(), 1);
+
+        engine.stop_sync(&realm2).await.unwrap();
+        assert_eq!(engine.syncing_count(), 0);
+
+        engine.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_can_add_tasks_while_syncing_multiple_realms() {
+        let (mut engine, _temp) = create_test_engine().await;
+
+        let realm1 = engine.create_realm("Tasks Realm 1").await.unwrap();
+        let realm2 = engine.create_realm("Tasks Realm 2").await.unwrap();
+
+        // Start syncing both
+        engine.start_sync(&realm1).await.unwrap();
+        engine.start_sync(&realm2).await.unwrap();
+
+        // Add tasks to both realms while syncing
+        let task1 = engine.add_task(&realm1, "Task in Realm 1").await.unwrap();
+        let task2 = engine.add_task(&realm2, "Task in Realm 2").await.unwrap();
+
+        // Verify tasks were added
+        let tasks1 = engine.list_tasks(&realm1).unwrap();
+        let tasks2 = engine.list_tasks(&realm2).unwrap();
+
+        assert_eq!(tasks1.len(), 1);
+        assert_eq!(tasks2.len(), 1);
+        assert_eq!(tasks1[0].id, task1);
+        assert_eq!(tasks2[0].id, task2);
+
+        engine.shutdown().await.unwrap();
     }
 }

@@ -21,6 +21,11 @@
 //! │  TopicHandle (per-realm connection)                            │
 //! │  ├── sender (broadcast messages)                               │
 //! │  └── receiver (incoming messages)                              │
+//! │                                                                 │
+//! │  SyncManager (background sync orchestration)                   │
+//! │  ├── Manages multiple realm syncs concurrently                 │
+//! │  ├── Tracks per-realm SyncStatus                               │
+//! │  └── Emits SyncEvents for UI updates                           │
 //! └─────────────────────────────────────────────────────────────────┘
 //! ```
 //!
@@ -58,9 +63,13 @@
 //! ```
 
 pub mod envelope;
+pub mod events;
 pub mod gossip;
+pub mod manager;
 pub mod protocol;
 
 pub use envelope::{SyncEnvelope, ENVELOPE_VERSION};
+pub use events::{SyncEvent, SyncStatus};
 pub use gossip::{GossipMessage, GossipSync, TopicHandle};
+pub use manager::SyncManager;
 pub use protocol::{SyncMessage, WireMessage};
