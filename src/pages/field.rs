@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use dioxus::prelude::*;
 use syncengine_core::{RealmId, RealmInfo, SyncEngine, Task};
 
-use crate::components::{FieldState, FieldStatus, TaskList};
+use crate::components::{FieldState, FieldStatus, RealmSelector, TaskList};
 
 /// Get the data directory for the application.
 fn get_data_dir() -> PathBuf {
@@ -24,10 +24,8 @@ pub fn Field() -> Element {
     let mut realms: Signal<Vec<RealmInfo>> = use_signal(Vec::new);
     let mut selected_realm: Signal<Option<RealmId>> = use_signal(|| None);
     let mut tasks: Signal<Vec<Task>> = use_signal(Vec::new);
-    let mut new_realm_name: Signal<String> = use_signal(String::new);
     let mut loading: Signal<bool> = use_signal(|| true);
     let mut error: Signal<Option<String>> = use_signal(|| None);
-    let mut show_new_realm_input: Signal<bool> = use_signal(|| false);
     let mut field_state: Signal<FieldState> = use_signal(|| FieldState::Listening);
 
     // Initialize engine on mount
@@ -85,9 +83,8 @@ pub fn Field() -> Element {
         });
     };
 
-    // Handler for creating a new realm
-    let create_realm = move |_| {
-        let name = new_realm_name.read().clone();
+    // Handler for creating a new realm (receives name from RealmSelector component)
+    let create_realm = move |name: String| {
         if name.trim().is_empty() {
             return;
         }
@@ -99,8 +96,6 @@ pub fn Field() -> Element {
                         // Refresh realm list
                         let realm_list = eng.list_realms().await.unwrap_or_default();
                         realms.set(realm_list);
-                        new_realm_name.set(String::new());
-                        show_new_realm_input.set(false);
                         // Select the new realm
                         selected_realm.set(Some(realm_id));
                     }
@@ -193,36 +188,6 @@ pub fn Field() -> Element {
         });
     };
 
-    // Handler for key press on realm input
-    let on_realm_keydown = move |evt: KeyboardEvent| {
-        if evt.key() == Key::Enter {
-            let name = new_realm_name.read().clone();
-            if name.trim().is_empty() {
-                return;
-            }
-
-            spawn(async move {
-                if let Some(ref mut eng) = *engine.write() {
-                    match eng.create_realm(&name).await {
-                        Ok(realm_id) => {
-                            let realm_list = eng.list_realms().await.unwrap_or_default();
-                            realms.set(realm_list);
-                            new_realm_name.set(String::new());
-                            show_new_realm_input.set(false);
-                            selected_realm.set(Some(realm_id));
-                        }
-                        Err(e) => {
-                            error.set(Some(format!("Failed to create realm: {}", e)));
-                        }
-                    }
-                }
-            });
-        } else if evt.key() == Key::Escape {
-            show_new_realm_input.set(false);
-            new_realm_name.set(String::new());
-        }
-    };
-
     // Render
     rsx! {
         div { class: "app-shell",
@@ -254,64 +219,12 @@ pub fn Field() -> Element {
             // Main content
             else {
                 div { class: "field-content",
-                    // Realm selector sidebar
-                    aside { class: "realm-sidebar",
-                        h2 { class: "section-header", "Realms" }
-
-                        div { class: "realm-list",
-                            for realm in realms() {
-                                {
-                                    let realm_id = realm.id.clone();
-                                    let realm_id_for_check = realm.id.clone();
-                                    let is_selected = selected_realm() == Some(realm_id_for_check);
-                                    rsx! {
-                                        button {
-                                            class: if is_selected { "realm-item selected" } else { "realm-item" },
-                                            onclick: move |_| select_realm(realm_id.clone()),
-                                            span { class: "realm-name", "{realm.name}" }
-                                            if realm.is_shared {
-                                                span { class: "realm-shared-badge", "shared" }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        // New realm input
-                        if show_new_realm_input() {
-                            div { class: "new-realm-input",
-                                input {
-                                    class: "input-field",
-                                    placeholder: "realm name...",
-                                    value: "{new_realm_name}",
-                                    oninput: move |e| new_realm_name.set(e.value()),
-                                    onkeydown: on_realm_keydown,
-                                    autofocus: true
-                                }
-                                div { class: "new-realm-actions",
-                                    button {
-                                        class: "btn-small",
-                                        onclick: create_realm,
-                                        "manifest"
-                                    }
-                                    button {
-                                        class: "btn-small btn-cancel",
-                                        onclick: move |_| {
-                                            show_new_realm_input.set(false);
-                                            new_realm_name.set(String::new());
-                                        },
-                                        "release"
-                                    }
-                                }
-                            }
-                        } else {
-                            button {
-                                class: "btn-badge",
-                                onclick: move |_| show_new_realm_input.set(true),
-                                "+ manifest realm"
-                            }
-                        }
+                    // Realm selector sidebar component
+                    RealmSelector {
+                        realms: realms(),
+                        selected: selected_realm(),
+                        on_select: select_realm,
+                        on_create: create_realm,
                     }
 
                     // Task list
