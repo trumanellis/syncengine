@@ -13,7 +13,7 @@ use tempfile::TempDir;
 
 /// Create a CLI command with a temporary data directory
 fn cli_cmd(data_dir: &TempDir) -> Command {
-    let mut cmd = Command::cargo_bin("syncengine").unwrap();
+    let mut cmd = Command::cargo_bin("syncengine").expect("Failed to find syncengine binary");
     cmd.arg("--data-dir").arg(data_dir.path());
     cmd
 }
@@ -671,11 +671,12 @@ fn test_missing_required_args() {
 fn test_help_works() {
     let data_dir = TempDir::new().unwrap();
 
+    // --help shows long_about which mentions "peer-to-peer task sharing"
     cli_cmd(&data_dir)
         .arg("--help")
         .assert()
         .success()
-        .stdout(predicate::str::contains("Synchronicity Engine"));
+        .stdout(predicate::str::contains("task sharing"));
 
     cli_cmd(&data_dir)
         .args(["realm", "--help"])
