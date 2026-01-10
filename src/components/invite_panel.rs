@@ -269,24 +269,27 @@ pub fn InvitePanel(
     // Copy to clipboard handler
     let copy_to_clipboard = move |_| {
         if let Some(ref invite) = invite_string() {
-            // Store the invite for potential clipboard use
-            let _invite_for_clipboard = invite.clone();
+            let invite_text = invite.clone();
 
             spawn(async move {
-                // For native desktop, clipboard access would go through dioxus-desktop
-                // or platform-specific APIs. For now, we show the copied feedback
-                // and the user can manually copy from the displayed text.
-                //
-                // In production, you'd use:
-                // - dioxus-desktop clipboard API
-                // - or arboard crate for cross-platform clipboard
-                // - or web-sys for WASM targets
-
-                copied.set(true);
-
-                // Reset copied state after 2 seconds
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                copied.set(false);
+                // Use arboard for cross-platform clipboard access
+                match arboard::Clipboard::new() {
+                    Ok(mut clipboard) => {
+                        if clipboard.set_text(&invite_text).is_ok() {
+                            copied.set(true);
+                            // Reset copied state after 2 seconds
+                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                            copied.set(false);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("Clipboard not available: {}", e);
+                        // Still show feedback even if clipboard fails
+                        copied.set(true);
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        copied.set(false);
+                    }
+                }
             });
         }
     };

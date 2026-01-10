@@ -27,10 +27,9 @@ use tokio::sync::RwLock;
 pub type SharedEngine = Arc<RwLock<Option<SyncEngine>>>;
 
 /// Get the data directory for the application.
+/// Uses the global data dir set from command line args.
 pub fn get_data_dir() -> PathBuf {
-    dirs::data_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("syncengine")
+    crate::get_data_dir()
 }
 
 /// Hook to access the SyncEngine from context.
