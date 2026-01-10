@@ -15,6 +15,8 @@ use dioxus::prelude::*;
 use dioxus::events::MouseData;
 use syncengine_core::{InviteTicket, RealmId};
 
+use crate::context::use_engine;
+
 /// Generate QR code data URL from a string.
 ///
 /// Returns a base64-encoded PNG data URL that can be used as an img src.
@@ -210,6 +212,9 @@ pub fn InvitePanel(
     let mut copied: Signal<bool> = use_signal(|| false);
     let mut expiry_seconds: Signal<Option<i64>> = use_signal(|| None);
 
+    // Get shared engine from context
+    let engine = use_engine();
+
     // Generate invite handler
     let generate_invite = move |_| {
         let realm_id = realm_id.clone();
@@ -219,45 +224,42 @@ pub fn InvitePanel(
             loading.set(true);
             error.set(None);
 
-            // Get engine from context - we need to access the engine
-            // For now, we'll use the context pattern from field.rs
-            let data_dir = crate::context::get_data_dir();
+            // Use shared engine from context
+            let shared = engine();
+            let mut guard = shared.write().await;
 
-            match syncengine_core::SyncEngine::new(&data_dir).await {
-                Ok(mut engine) => {
-                    match engine.generate_invite(&realm_id).await {
-                        Ok(ticket) => {
-                            // Calculate expiry if set
-                            if let Some(exp) = ticket.expires_at {
-                                let now = chrono::Utc::now().timestamp();
-                                expiry_seconds.set(Some(exp - now));
-                            }
-
-                            // Encode the ticket
-                            match ticket.encode() {
-                                Ok(encoded) => {
-                                    invite_string.set(Some(encoded));
-
-                                    // Call callback if provided
-                                    if let Some(handler) = &on_created {
-                                        handler.call(ticket.clone());
-                                    }
-
-                                    invite_ticket.set(Some(ticket));
-                                }
-                                Err(e) => {
-                                    error.set(Some(format!("Failed to encode sigil: {}", e)));
-                                }
-                            }
+            if let Some(ref mut eng) = *guard {
+                match eng.generate_invite(&realm_id).await {
+                    Ok(ticket) => {
+                        // Calculate expiry if set
+                        if let Some(exp) = ticket.expires_at {
+                            let now = chrono::Utc::now().timestamp();
+                            expiry_seconds.set(Some(exp - now));
                         }
-                        Err(e) => {
-                            error.set(Some(format!("Failed to summon sigil: {}", e)));
+
+                        // Encode the ticket
+                        match ticket.encode() {
+                            Ok(encoded) => {
+                                invite_string.set(Some(encoded));
+
+                                // Call callback if provided
+                                if let Some(handler) = &on_created {
+                                    handler.call(ticket.clone());
+                                }
+
+                                invite_ticket.set(Some(ticket));
+                            }
+                            Err(e) => {
+                                error.set(Some(format!("Failed to encode sigil: {}", e)));
+                            }
                         }
                     }
+                    Err(e) => {
+                        error.set(Some(format!("Failed to summon sigil: {}", e)));
+                    }
                 }
-                Err(e) => {
-                    error.set(Some(format!("Failed to connect to engine: {}", e)));
-                }
+            } else {
+                error.set(Some("Engine not initialized".to_string()));
             }
 
             loading.set(false);
