@@ -1,0 +1,15 @@
+[package]
+name = "syncengine-ui"
+version = "0.1.0"
+edition = "2021"
+description = "Synchronicity Engine - Dioxus UI components"
+license = "MIT"
+
+[dependencies]
+syncengine-core = { path = "../syncengine-core" }
+dioxus = { version = "0.6", features = ["desktop"] }
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros"] }

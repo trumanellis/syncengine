@@ -1,0 +1,72 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[package]
+name = "syncengine"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "syncengine-desktop"
+path = "src/main.rs"
+
+[dependencies]
+dioxus.workspace = true
+syncengine-core = { path = "crates/syncengine-core" }
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+dirs = "5.0"
+
+[workspace.dependencies]
+# UI Framework
+dioxus = { version = "0.6", features = ["desktop", "router"] }
+
+# Core iroh (matching iroh-examples versions)
+iroh = { version = "0.95", features = ["default", "discovery-local-network"] }
+iroh-gossip = { version = "0.95", default-features = false, features = ["net"] }
+n0-future = "0.3"
+
+# Automerge + Repository
+automerge = "0.7"
+
+# Storage
+redb = "2"
+
+# Async runtime
+tokio = { version = "1.47", features = ["full"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+
+# Serialization
+postcard = { version = "1.1", features = ["alloc"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Utilities
+anyhow = "1.0"
+thiserror = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+bytes = "1.10"
+clap = { version = "4.5", features = ["derive"] }
+
+# Crypto
+chacha20poly1305 = { version = "0.10", features = ["std"] }
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+pqcrypto-dilithium = "0.5"
+pqcrypto-traits = "0.3"
+rand = "0.9"
+getrandom = "0.2"
+blake3 = "1.5"
+bs58 = "0.5"
+hex = "0.4"
+ulid = { version = "1.1", features = ["serde"] }
+chrono = "0.4"
+
+# Concurrency
+parking_lot = "0.12"
+futures = "0.3"
+
+# Testing
+tempfile = "3.14"

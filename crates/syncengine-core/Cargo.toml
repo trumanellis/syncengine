@@ -1,0 +1,40 @@
+[package]
+name = "syncengine-core"
+version = "0.1.0"
+edition = "2021"
+description = "Synchronicity Engine - P2P task sharing with gossip-based sync"
+license = "MIT"
+
+[dependencies]
+iroh.workspace = true
+iroh-gossip.workspace = true
+n0-future.workspace = true
+automerge.workspace = true
+redb.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+postcard.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+bytes.workspace = true
+chacha20poly1305.workspace = true
+ed25519-dalek.workspace = true
+rand.workspace = true
+blake3.workspace = true
+bs58.workspace = true
+pqcrypto-dilithium.workspace = true
+pqcrypto-traits.workspace = true
+getrandom.workspace = true
+hex.workspace = true
+ulid.workspace = true
+chrono.workspace = true
+parking_lot.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros"] }
+tempfile.workspace = true
+tracing-subscriber.workspace = true
+futures.workspace = true

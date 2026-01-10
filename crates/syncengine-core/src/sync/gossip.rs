@@ -1,0 +1,645 @@
+//! Gossip-based P2P networking using iroh-gossip
+//!
+//! Provides multi-peer broadcast synchronization for realms.
+
+use std::sync::Arc;
+
+use iroh::protocol::Router;
+use iroh::{Endpoint, EndpointAddr, PublicKey, SecretKey};
+use iroh_gossip::net::{Gossip, GOSSIP_ALPN};
+use iroh_gossip::proto::TopicId;
+use tokio::sync::Mutex;
+use tracing::{debug, info, warn};
+
+use crate::error::{SyncError, SyncResult};
+use crate::invite::{InviteTicket, NodeAddrBytes};
+use crate::types::RealmId;
+
+/// Message received from a gossip topic
+#[derive(Debug, Clone)]
+pub struct GossipMessage {
+    /// The sender's public key
+    pub from: PublicKey,
+    /// The raw message content
+    pub content: Vec<u8>,
+}
+
+/// Handle to a subscribed gossip topic
+///
+/// Allows sending and receiving messages on a specific topic.
+pub struct TopicHandle {
+    sender: Arc<Mutex<iroh_gossip::api::GossipSender>>,
+    receiver: Arc<Mutex<iroh_gossip::api::GossipReceiver>>,
+    topic_id: TopicId,
+}
+
+impl TopicHandle {
+    /// Broadcast a message to all peers on this topic
+    pub async fn broadcast(&self, msg: impl Into<Vec<u8>>) -> SyncResult<()> {
+        let data: Vec<u8> = msg.into();
+        debug!(topic = ?self.topic_id, len = data.len(), "Broadcasting message");
+
+        self.sender
+            .lock()
+            .await
+            .broadcast(data.into())
+            .await
+            .map_err(|e| SyncError::Gossip(format!("Failed to broadcast: {}", e)))?;
+
+        Ok(())
+    }
+
+    /// Receive the next message from peers
+    ///
+    /// Returns None if the topic subscription is closed.
+    pub async fn recv(&self) -> Option<GossipMessage> {
+        use iroh_gossip::api::Event;
+        use n0_future::StreamExt;
+
+        let mut receiver = self.receiver.lock().await;
+
+        loop {
+            match receiver.try_next().await {
+                Ok(Some(event)) => {
+                    match event {
+                        Event::Received(msg) => {
+                            debug!(topic = ?self.topic_id, from = ?msg.delivered_from, "Received message");
+                            return Some(GossipMessage {
+                                from: msg.delivered_from,
+                                content: msg.content.to_vec(),
+                            });
+                        }
+                        Event::NeighborUp(peer) => {
+                            info!(topic = ?self.topic_id, ?peer, "Neighbor joined");
+                            // Continue waiting for actual messages
+                        }
+                        Event::NeighborDown(peer) => {
+                            info!(topic = ?self.topic_id, ?peer, "Neighbor left");
+                            // Continue waiting for actual messages
+                        }
+                        Event::Lagged => {
+                            warn!(topic = ?self.topic_id, "Lagged behind on topic");
+                            // Continue waiting for actual messages
+                        }
+                    }
+                }
+                Ok(None) => {
+                    debug!(topic = ?self.topic_id, "Topic subscription closed");
+                    return None;
+                }
+                Err(e) => {
+                    warn!(topic = ?self.topic_id, error = ?e, "Error receiving from topic");
+                    return None;
+                }
+            }
+        }
+    }
+
+    /// Check if we have joined the topic swarm
+    pub async fn is_joined(&self) -> bool {
+        self.receiver.lock().await.is_joined()
+    }
+
+    /// Get the topic ID this handle is subscribed to
+    pub fn topic_id(&self) -> TopicId {
+        self.topic_id
+    }
+}
+
+/// Main gossip synchronization engine
+///
+/// Manages an iroh endpoint with gossip protocol support,
+/// allowing subscription to multiple topics for multi-realm sync.
+#[derive(Debug)]
+pub struct GossipSync {
+    endpoint: Endpoint,
+    gossip: Gossip,
+    router: Router,
+    #[allow(dead_code)]
+    secret_key: SecretKey,
+}
+
+impl GossipSync {
+    /// Create a new gossip sync instance
+    ///
+    /// Spawns an iroh endpoint with gossip protocol support.
+    /// The endpoint will be reachable by other peers.
+    pub async fn new() -> SyncResult<Self> {
+        Self::with_secret_key(None).await
+    }
+
+    /// Create a new gossip sync instance with a specific secret key
+    ///
+    /// Useful for persistent identity across restarts.
+    pub async fn with_secret_key(secret_key: Option<SecretKey>) -> SyncResult<Self> {
+        let secret_key = secret_key.unwrap_or_else(|| SecretKey::generate(&mut rand::rng()));
+
+        // Build the endpoint
+        let endpoint = Endpoint::builder()
+            .secret_key(secret_key.clone())
+            .alpns(vec![GOSSIP_ALPN.to_vec()])
+            .bind()
+            .await
+            .map_err(|e| SyncError::Network(format!("Failed to bind endpoint: {}", e)))?;
+
+        let endpoint_id = endpoint.id();
+        info!(%endpoint_id, "Endpoint bound");
+
+        // Spawn gossip protocol handler
+        let gossip = Gossip::builder().spawn(endpoint.clone());
+        info!("Gossip spawned");
+
+        // Build router to accept incoming gossip connections
+        let router = Router::builder(endpoint.clone())
+            .accept(GOSSIP_ALPN, gossip.clone())
+            .spawn();
+        info!("Router spawned");
+
+        Ok(Self {
+            endpoint,
+            gossip,
+            router,
+            secret_key,
+        })
+    }
+
+    /// Get this node's endpoint ID
+    ///
+    /// This is the public identifier other peers use to connect.
+    pub fn endpoint_id(&self) -> iroh::EndpointId {
+        self.endpoint.id()
+    }
+
+    /// Get this node's public key
+    pub fn public_key(&self) -> PublicKey {
+        self.endpoint.id()
+    }
+
+    /// Subscribe to a gossip topic
+    ///
+    /// # Arguments
+    /// * `topic_id` - The topic to subscribe to (typically derived from a realm ID)
+    /// * `bootstrap_peers` - Initial peers to connect to (can be empty for first node)
+    pub async fn subscribe(
+        &self,
+        topic_id: TopicId,
+        bootstrap_peers: Vec<iroh::EndpointId>,
+    ) -> SyncResult<TopicHandle> {
+        info!(
+            ?topic_id,
+            peer_count = bootstrap_peers.len(),
+            "Subscribing to topic"
+        );
+
+        let gossip_topic = self
+            .gossip
+            .subscribe(topic_id, bootstrap_peers)
+            .await
+            .map_err(|e| SyncError::Gossip(format!("Failed to subscribe: {}", e)))?;
+
+        let (sender, receiver) = gossip_topic.split();
+
+        Ok(TopicHandle {
+            sender: Arc::new(Mutex::new(sender)),
+            receiver: Arc::new(Mutex::new(receiver)),
+            topic_id,
+        })
+    }
+
+    /// Get a reference to the underlying endpoint
+    ///
+    /// Useful for advanced operations like direct peer connections.
+    pub fn endpoint(&self) -> &Endpoint {
+        &self.endpoint
+    }
+
+    /// Get this node's current EndpointAddr
+    ///
+    /// Returns the full addressing information including relay URLs and
+    /// direct IP addresses that can be used by other peers to connect.
+    pub fn endpoint_addr(&self) -> EndpointAddr {
+        self.endpoint.addr()
+    }
+
+    /// Join a gossip topic using an invite ticket
+    ///
+    /// This extracts bootstrap peer information from the invite and subscribes
+    /// to the topic. The invite's realm key can be used separately for
+    /// encrypting/decrypting realm data.
+    ///
+    /// # Arguments
+    ///
+    /// * `invite` - An `InviteTicket` received from another peer
+    ///
+    /// # Returns
+    ///
+    /// A `TopicHandle` for sending and receiving messages on the topic.
+    ///
+    /// # Errors
+    ///
+    /// Returns `SyncError::InvalidInvite` if the invite is expired or has invalid
+    /// bootstrap peer addresses.
+    /// Returns `SyncError::Gossip` if subscription fails.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let invite = InviteTicket::decode(&invite_string)?;
+    /// let handle = gossip.join_via_invite(&invite).await?;
+    ///
+    /// // Now we can send/receive messages
+    /// handle.broadcast(b"Hello!").await?;
+    /// ```
+    pub async fn join_via_invite(&self, invite: &InviteTicket) -> SyncResult<TopicHandle> {
+        // Check expiration
+        if invite.is_expired() {
+            return Err(SyncError::InvalidInvite("Invite has expired".to_string()));
+        }
+
+        let topic_id = invite.topic_id();
+        info!(?topic_id, peers = invite.bootstrap_peers.len(), "Joining via invite");
+
+        // Convert bootstrap peers from NodeAddrBytes to EndpointId
+        // Note: We extract just the endpoint IDs for gossip subscription.
+        // The iroh discovery service will handle finding the actual addresses
+        // of these peers. In the future, we could use a StaticProvider to
+        // pre-populate known addresses for faster connection.
+        let mut bootstrap_ids = Vec::with_capacity(invite.bootstrap_peers.len());
+
+        for peer_bytes in &invite.bootstrap_peers {
+            // Convert to EndpointAddr to extract the ID
+            let endpoint_addr = peer_bytes.to_endpoint_addr()?;
+            bootstrap_ids.push(endpoint_addr.id);
+
+            debug!(
+                peer = %endpoint_addr.id,
+                relay = ?peer_bytes.relay_url,
+                addrs = peer_bytes.direct_addresses.len(),
+                "Adding bootstrap peer"
+            );
+        }
+
+        // Subscribe to the topic with bootstrap peers
+        // Gossip will use iroh's discovery to find peer addresses
+        self.subscribe(topic_id, bootstrap_ids).await
+    }
+
+    /// Generate an invite ticket for a realm we're subscribed to
+    ///
+    /// Creates an invite that includes this node as a bootstrap peer,
+    /// allowing other nodes to join the realm's gossip topic.
+    ///
+    /// # Arguments
+    ///
+    /// * `realm_id` - The realm to generate an invite for
+    /// * `realm_key` - The ChaCha20-Poly1305 encryption key for the realm
+    ///
+    /// # Returns
+    ///
+    /// An `InviteTicket` that can be encoded and shared with other peers.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let invite = gossip.generate_invite(&realm_id, realm_key)?;
+    /// let invite_string = invite.encode()?;
+    /// // Share invite_string via QR code, link, etc.
+    /// ```
+    pub fn generate_invite(
+        &self,
+        realm_id: &RealmId,
+        realm_key: [u8; 32],
+    ) -> SyncResult<InviteTicket> {
+        // Get our current endpoint address
+        let our_addr = self.endpoint_addr();
+
+        // Convert to NodeAddrBytes for serialization
+        let our_node_addr = NodeAddrBytes::from_endpoint_addr(&our_addr);
+
+        info!(
+            realm = %realm_id,
+            node_id = ?our_addr.id,
+            relay = ?our_node_addr.relay_url,
+            addrs = our_node_addr.direct_addresses.len(),
+            "Generating invite"
+        );
+
+        // Create the invite with us as the only bootstrap peer
+        let invite = InviteTicket::new(realm_id, realm_key, vec![our_node_addr]);
+
+        Ok(invite)
+    }
+
+    /// Generate an invite with additional bootstrap peers
+    ///
+    /// Like `generate_invite`, but allows including additional known peers
+    /// as bootstrap nodes for better connectivity.
+    ///
+    /// # Arguments
+    ///
+    /// * `realm_id` - The realm to generate an invite for
+    /// * `realm_key` - The encryption key for the realm
+    /// * `additional_peers` - Other peers to include as bootstrap nodes
+    pub fn generate_invite_with_peers(
+        &self,
+        realm_id: &RealmId,
+        realm_key: [u8; 32],
+        additional_peers: Vec<NodeAddrBytes>,
+    ) -> SyncResult<InviteTicket> {
+        // Get our current endpoint address
+        let our_addr = self.endpoint_addr();
+        let our_node_addr = NodeAddrBytes::from_endpoint_addr(&our_addr);
+
+        // Combine our address with additional peers
+        let mut bootstrap_peers = vec![our_node_addr];
+        bootstrap_peers.extend(additional_peers);
+
+        info!(
+            realm = %realm_id,
+            peers = bootstrap_peers.len(),
+            "Generating invite with peers"
+        );
+
+        let invite = InviteTicket::new(realm_id, realm_key, bootstrap_peers);
+
+        Ok(invite)
+    }
+
+    /// Gracefully shutdown the gossip sync engine
+    pub async fn shutdown(self) -> SyncResult<()> {
+        info!("Shutting down gossip sync");
+
+        // Shutdown the router first
+        if let Err(e) = self.router.shutdown().await {
+            warn!(error = ?e, "Failed to shutdown router cleanly");
+        }
+
+        // Close the endpoint
+        self.endpoint.close().await;
+        info!("Gossip sync shutdown complete");
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_gossip_sync_creates() {
+        let result = GossipSync::new().await;
+        assert!(result.is_ok(), "Failed to create GossipSync: {:?}", result);
+
+        let gossip = result.unwrap();
+        // Verify we have a valid endpoint ID
+        let id = gossip.endpoint_id();
+        assert!(!id.to_string().is_empty());
+
+        // Clean shutdown
+        let shutdown_result = gossip.shutdown().await;
+        assert!(shutdown_result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_gossip_sync_with_secret_key() {
+        let secret_key = SecretKey::generate(&mut rand::rng());
+        let expected_public = secret_key.public();
+
+        let gossip = GossipSync::with_secret_key(Some(secret_key))
+            .await
+            .expect("Failed to create GossipSync with secret key");
+
+        // Verify the public key matches
+        assert_eq!(gossip.public_key(), expected_public);
+
+        gossip.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_subscribe_to_topic() {
+        let gossip = GossipSync::new()
+            .await
+            .expect("Failed to create GossipSync");
+
+        // Create a random topic
+        let topic_id = TopicId::from_bytes(rand::random());
+
+        // Subscribe without bootstrap peers (we're the first node)
+        let handle = gossip
+            .subscribe(topic_id, vec![])
+            .await
+            .expect("Failed to subscribe to topic");
+
+        // Verify the topic ID matches
+        assert_eq!(handle.topic_id(), topic_id);
+
+        gossip.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_broadcast_on_topic() {
+        let gossip = GossipSync::new()
+            .await
+            .expect("Failed to create GossipSync");
+
+        let topic_id = TopicId::from_bytes(rand::random());
+        let handle = gossip
+            .subscribe(topic_id, vec![])
+            .await
+            .expect("Failed to subscribe to topic");
+
+        // Broadcasting without peers should still succeed (message just won't go anywhere)
+        let result = handle.broadcast(b"test message".to_vec()).await;
+        assert!(result.is_ok());
+
+        gossip.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_topic_id_from_realm() {
+        // Verify we can create TopicId from our RealmId bytes
+        use crate::types::RealmId;
+
+        let realm = RealmId::new();
+        let topic_id = TopicId::from_bytes(*realm.as_bytes());
+
+        // Topic ID should be valid
+        assert_eq!(topic_id.as_bytes(), realm.as_bytes());
+    }
+
+    #[tokio::test]
+    async fn test_generate_invite_includes_self_as_bootstrap() {
+        let gossip = GossipSync::new()
+            .await
+            .expect("Failed to create GossipSync");
+
+        let realm_id = RealmId::new();
+        let realm_key = [42u8; 32];
+
+        // Generate an invite
+        let invite = gossip
+            .generate_invite(&realm_id, realm_key)
+            .expect("Failed to generate invite");
+
+        // Verify the invite contains our node as a bootstrap peer
+        assert_eq!(invite.bootstrap_peers.len(), 1);
+
+        // The bootstrap peer should have our node ID
+        let our_public_key = gossip.public_key();
+        assert_eq!(
+            invite.bootstrap_peers[0].node_id,
+            *our_public_key.as_bytes()
+        );
+
+        // The topic should match the realm
+        assert_eq!(invite.topic, *realm_id.as_bytes());
+        assert_eq!(invite.realm_key, realm_key);
+
+        gossip.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_generate_invite_with_peers_includes_all_peers() {
+        let gossip = GossipSync::new()
+            .await
+            .expect("Failed to create GossipSync");
+
+        let realm_id = RealmId::new();
+        let realm_key = [42u8; 32];
+
+        // Create some additional peer addresses
+        let additional_peer = NodeAddrBytes {
+            node_id: [1u8; 32],
+            relay_url: Some("https://other-relay.example.com".to_string()),
+            direct_addresses: vec!["10.0.0.1:1234".to_string()],
+        };
+
+        // Generate an invite with additional peers
+        let invite = gossip
+            .generate_invite_with_peers(&realm_id, realm_key, vec![additional_peer.clone()])
+            .expect("Failed to generate invite");
+
+        // Verify we have both our node and the additional peer
+        assert_eq!(invite.bootstrap_peers.len(), 2);
+
+        // First peer should be us
+        let our_public_key = gossip.public_key();
+        assert_eq!(
+            invite.bootstrap_peers[0].node_id,
+            *our_public_key.as_bytes()
+        );
+
+        // Second peer should be the additional one
+        assert_eq!(invite.bootstrap_peers[1].node_id, additional_peer.node_id);
+        assert_eq!(invite.bootstrap_peers[1].relay_url, additional_peer.relay_url);
+
+        gossip.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_join_via_invite_connects_to_topic() {
+        // Create the host node
+        let host = GossipSync::new()
+            .await
+            .expect("Failed to create host GossipSync");
+
+        let realm_id = RealmId::new();
+        let realm_key = [42u8; 32];
+
+        // Host subscribes to the topic first
+        let topic_id = TopicId::from_bytes(*realm_id.as_bytes());
+        let _host_handle = host
+            .subscribe(topic_id, vec![])
+            .await
+            .expect("Failed to subscribe to topic");
+
+        // Generate an invite from the host
+        let invite = host
+            .generate_invite(&realm_id, realm_key)
+            .expect("Failed to generate invite");
+
+        // Create a joining node
+        let joiner = GossipSync::new()
+            .await
+            .expect("Failed to create joiner GossipSync");
+
+        // Join via the invite
+        let joiner_handle = joiner
+            .join_via_invite(&invite)
+            .await
+            .expect("Failed to join via invite");
+
+        // Verify the joiner is subscribed to the correct topic
+        assert_eq!(joiner_handle.topic_id(), topic_id);
+
+        // Clean up
+        joiner.shutdown().await.unwrap();
+        host.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_join_via_invite_rejects_expired() {
+        let gossip = GossipSync::new()
+            .await
+            .expect("Failed to create GossipSync");
+
+        let realm_id = RealmId::new();
+        let realm_key = [42u8; 32];
+
+        // Create an expired invite
+        let expired_invite = InviteTicket::new(&realm_id, realm_key, vec![
+            NodeAddrBytes {
+                node_id: *gossip.public_key().as_bytes(),
+                relay_url: None,
+                direct_addresses: vec![],
+            }
+        ])
+        .with_expiry(0); // Unix epoch = already expired
+
+        // Attempt to join should fail
+        let result = gossip.join_via_invite(&expired_invite).await;
+        assert!(result.is_err());
+
+        // Use match to avoid needing Debug on TopicHandle
+        match result {
+            Err(SyncError::InvalidInvite(msg)) => {
+                assert!(msg.contains("expired"), "Expected 'expired' in error message, got: {}", msg);
+            }
+            Err(other) => panic!("Expected InvalidInvite error, got: {:?}", other),
+            Ok(_) => panic!("Expected error, but got Ok"),
+        }
+
+        gossip.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_invite_roundtrip_encode_decode() {
+        let gossip = GossipSync::new()
+            .await
+            .expect("Failed to create GossipSync");
+
+        let realm_id = RealmId::new();
+        let realm_key = [42u8; 32];
+
+        // Generate an invite
+        let invite = gossip
+            .generate_invite(&realm_id, realm_key)
+            .expect("Failed to generate invite");
+
+        // Encode and decode
+        let encoded = invite.encode().expect("Failed to encode");
+        let decoded = InviteTicket::decode(&encoded).expect("Failed to decode");
+
+        // Verify the decoded invite matches
+        assert_eq!(decoded.topic, invite.topic);
+        assert_eq!(decoded.realm_key, invite.realm_key);
+        assert_eq!(decoded.bootstrap_peers.len(), 1);
+        assert_eq!(
+            decoded.bootstrap_peers[0].node_id,
+            invite.bootstrap_peers[0].node_id
+        );
+
+        gossip.shutdown().await.unwrap();
+    }
+}

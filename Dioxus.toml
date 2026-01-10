@@ -1,0 +1,12 @@
+[application]
+name = "syncengine"
+default_platform = "desktop"
+
+[web.app]
+title = "Synchronicity Engine"
+
+[web.resource]
+style = ["assets/style.css"]
+
+[desktop]
+# icon = "assets/icon.png"  # Uncomment when icon is available

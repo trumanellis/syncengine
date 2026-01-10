@@ -1,0 +1,468 @@
+/*
+ * Synchronicity Engine - Design System Stylesheet
+ *
+ * Aesthetic: Cyber-Mystical Terminal
+ * Sacred geometry meets terminal elegance
+ */
+
+/* === CSS VARIABLES === */
+:root {
+  /* Void (Backgrounds) */
+  --void-black: #0a0a0a;
+  --void-lighter: #0a0e0f;
+  --void-border: #1a1a1a;
+
+  /* Moss Green (Nature, Growth, Status) */
+  --moss: #5a7a5a;
+  --moss-glow: #7cb87c;
+  --moss-bright: #39ff14;
+
+  /* Cyan (Technology, Links, Input) */
+  --cyan: #00d4aa;
+  --cyan-glow: rgba(0, 212, 170, 0.3);
+
+  /* Gold (Sacred, Important, Titles) */
+  --gold: #d4af37;
+  --gold-glow: rgba(212, 175, 55, 0.3);
+
+  /* Text */
+  --text-primary: #f5f5f5;
+  --text-secondary: rgba(245, 245, 245, 0.7);
+  --text-muted: rgba(245, 245, 245, 0.5);
+
+  /* Semantic */
+  --danger: #ff3366;
+  --warning: #ff9f00;
+  --info: #5f8fff;
+  --lilac: #c4a7d7;
+
+  /* Typography */
+  --font-serif: 'Cormorant Garamond', Georgia, serif;
+  --font-mono: 'JetBrains Mono', 'SF Mono', 'Consolas', monospace;
+
+  /* Type Scale */
+  --text-xs: 0.75rem;
+  --text-sm: 0.875rem;
+  --text-base: 1rem;
+  --text-lg: 1.125rem;
+  --text-xl: 1.5rem;
+  --text-2xl: 2rem;
+  --text-3xl: 3rem;
+
+  /* Transitions */
+  --transition-fast: 150ms ease;
+  --transition-normal: 300ms ease;
+  --transition-slow: 500ms ease;
+  --transition-meditative: 1s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* === BASE STYLES === */
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: var(--void-black);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: var(--text-base);
+  line-height: 1.7;
+  min-height: 100vh;
+}
+
+/* === FIELD STATUS === */
+.field-status {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--moss);
+  flex-shrink: 0;
+}
+
+.status-dot.active {
+  background: var(--moss-glow);
+  box-shadow: 0 0 10px var(--moss-glow);
+  animation: pulse 2s ease-in-out infinite;
+}
+
+.status-label {
+  font-style: italic;
+}
+
+/* === CATEGORY PILLS === */
+.category-pills {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.pill {
+  padding: 0.375rem 0.75rem;
+  border: 1px solid var(--moss);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  cursor: pointer;
+  transition: all var(--transition-normal);
+}
+
+.pill:hover {
+  border-color: var(--moss-glow);
+  color: var(--text-primary);
+}
+
+.pill.selected {
+  background: var(--moss);
+  border-color: var(--moss-glow);
+  color: var(--text-primary);
+}
+
+/* === INPUT FIELDS === */
+.form-field {
+  margin-bottom: 1.25rem;
+}
+
+.input-label {
+  display: block;
+  margin-bottom: 0.5rem;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+}
+
+.input-hint {
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+}
+
+.input-field {
+  width: 100%;
+  padding: 0.75rem 1rem;
+  background: transparent;
+  border: 1px solid var(--void-border);
+  border-radius: 4px;
+  color: var(--cyan);
+  font-family: var(--font-mono);
+  font-size: var(--text-base);
+  transition: all var(--transition-normal);
+}
+
+.input-field::placeholder {
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.input-field:focus {
+  outline: none;
+  border-color: var(--cyan);
+  box-shadow: 0 0 0 1px var(--cyan), 0 0 20px var(--cyan-glow);
+}
+
+.input-field:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.textarea {
+  min-height: 100px;
+  resize: vertical;
+}
+
+/* Search input */
+.search-input-wrapper {
+  position: relative;
+}
+
+.search-icon {
+  position: absolute;
+  left: 0.75rem;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--text-muted);
+  pointer-events: none;
+}
+
+.search-input {
+  padding-left: 2.5rem;
+}
+
+/* === BUTTONS === */
+.btn-primary {
+  padding: 0.75rem 2rem;
+  background: transparent;
+  border: 1px solid var(--moss);
+  border-radius: 4px;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: var(--text-base);
+  cursor: pointer;
+  transition: all var(--transition-normal);
+}
+
+.btn-primary:hover {
+  border-color: var(--moss-glow);
+  box-shadow: 0 0 20px rgba(124, 184, 124, 0.3);
+  transform: translateY(-1px);
+}
+
+.btn-primary:active {
+  transform: translateY(0);
+}
+
+.btn-primary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.btn-badge {
+  padding: 0.375rem 0.75rem;
+  background: transparent;
+  border: 1px solid var(--moss);
+  border-radius: 4px;
+  color: var(--cyan);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.btn-badge:hover {
+  border-color: var(--cyan);
+}
+
+.btn-enter {
+  padding: 1rem 3rem;
+  background: transparent;
+  border: 1px solid var(--moss);
+  border-radius: 4px;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: var(--text-lg);
+  cursor: pointer;
+  transition: all var(--transition-normal);
+}
+
+.btn-enter:hover {
+  border-color: var(--moss-glow);
+  box-shadow: 0 0 30px rgba(124, 184, 124, 0.2);
+}
+
+.btn-sacred {
+  padding: 0.75rem 2rem;
+  background: transparent;
+  border: 1px solid var(--gold);
+  border-radius: 4px;
+  color: var(--gold);
+  font-family: var(--font-mono);
+  font-size: var(--text-base);
+  cursor: pointer;
+  transition: all var(--transition-normal);
+}
+
+.btn-sacred:hover {
+  box-shadow: 0 0 20px var(--gold-glow);
+}
+
+.btn-ghost {
+  padding: 0.5rem 1rem;
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  cursor: pointer;
+  transition: color var(--transition-fast);
+}
+
+.btn-ghost:hover {
+  color: var(--text-primary);
+}
+
+/* Icon buttons */
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-size: var(--text-lg);
+  cursor: pointer;
+  transition: color var(--transition-fast);
+}
+
+.icon-btn:hover {
+  color: var(--text-primary);
+}
+
+.close-btn {
+  font-size: var(--text-xl);
+}
+
+/* === INTENTION ITEM === */
+.intention-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.intention-item {
+  border-left: 2px solid var(--moss);
+  margin-left: 1rem;
+}
+
+.intention-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem;
+  width: 100%;
+  background: transparent;
+  border: none;
+  color: var(--cyan);
+  font-family: var(--font-mono);
+  font-size: var(--text-base);
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--transition-fast);
+}
+
+.intention-header:hover {
+  background: rgba(0, 212, 170, 0.05);
+}
+
+.intention-text {
+  display: flex;
+  flex-direction: column;
+  gap: 0.125rem;
+}
+
+.intention-title {
+  color: var(--cyan);
+}
+
+.intention-title.completed {
+  color: var(--text-muted);
+  text-decoration: line-through;
+}
+
+.intention-subtitle {
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}
+
+.check-icon {
+  color: var(--moss);
+  font-size: var(--text-lg);
+  width: 1.5em;
+  text-align: center;
+}
+
+.check-icon.completed {
+  color: var(--moss-glow);
+}
+
+.expand-btn {
+  padding: 0.5rem;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+}
+
+.expand-icon {
+  color: var(--moss-glow);
+  font-size: var(--text-sm);
+}
+
+.intention-content {
+  padding: 0.5rem 1rem 1rem 1.5rem;
+}
+
+.no-matches {
+  color: var(--text-muted);
+  font-style: italic;
+  font-size: var(--text-sm);
+}
+
+/* === TYPOGRAPHY === */
+.page-title {
+  font-family: var(--font-serif);
+  font-size: var(--text-3xl);
+  font-weight: 400;
+  color: var(--gold);
+  text-shadow: 0 0 30px var(--gold-glow);
+  letter-spacing: 0.1em;
+}
+
+.section-header {
+  font-family: var(--font-serif);
+  font-size: var(--text-xl);
+  font-weight: 400;
+  font-style: italic;
+  color: var(--gold);
+}
+
+.body-text {
+  font-family: var(--font-mono);
+  font-size: var(--text-base);
+  font-weight: 400;
+  color: var(--text-primary);
+  line-height: 1.7;
+}
+
+.tech-term {
+  color: var(--cyan);
+}
+
+.sacred-term {
+  color: var(--gold);
+  font-style: italic;
+}
+
+/* === ANIMATIONS === */
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes breathe {
+  0%, 100% { opacity: 0.5; }
+  50% { opacity: 1; }
+}
+
+/* === ACCESSIBILITY === */
+*:focus-visible {
+  outline: 2px solid var(--cyan);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
