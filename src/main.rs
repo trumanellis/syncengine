@@ -33,7 +33,11 @@ struct Args {
     #[arg(short, long)]
     data_dir: Option<PathBuf>,
 
-    /// Instance number (shorthand for --data-dir with suffix)
+    /// Instance name (creates data dir: syncengine-<name>)
+    #[arg(short, long)]
+    name: Option<String>,
+
+    /// Instance number (shorthand for --name with number)
     #[arg(short, long)]
     instance: Option<u8>,
 }
@@ -43,40 +47,44 @@ fn main() {
 
     let args = Args::parse();
 
-    // Determine data directory
-    let data_dir = if let Some(dir) = args.data_dir {
-        dir
+    // Determine data directory and display name
+    let (data_dir, display_name) = if let Some(dir) = args.data_dir {
+        (dir.clone(), dir.file_name().and_then(|n| n.to_str()).unwrap_or("custom").to_string())
+    } else if let Some(ref name) = args.name {
+        let base = dirs::data_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(format!("syncengine-{}", name));
+        (base, name.clone())
     } else if let Some(instance) = args.instance {
+        let base = dirs::data_dir()
+            .unwrap_or_else(|| PathBuf::from("."));
+        if instance == 1 {
+            (base.join("syncengine"), format!("Instance {}", instance))
+        } else {
+            (base.join(format!("syncengine-{}", instance)), format!("Instance {}", instance))
+        }
+    } else {
         let base = dirs::data_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join("syncengine");
-        if instance == 1 {
-            base
-        } else {
-            base.with_file_name(format!("syncengine-{}", instance))
-        }
-    } else {
-        dirs::data_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("syncengine")
+        (base, String::new())
     };
 
     // Store data directory globally
     let _ = DATA_DIR.set(data_dir.clone());
 
-    // Get screen dimensions for half-width window
-    // Default to reasonable size, will be adjusted by window manager
-    let window_width = 700.0;  // Half of typical 1400px screen
-    let window_height = 900.0; // Nearly full height
+    // Window size: half width, nearly full height
+    let window_width = 700.0;
+    let window_height = 900.0;
 
-    // Window title with instance indicator
-    let title = if let Some(instance) = args.instance {
-        format!("Synchronicity Engine (Instance {})", instance)
+    // Window title with instance name
+    let title = if !display_name.is_empty() {
+        format!("Synchronicity Engine - {}", display_name)
     } else {
         "Synchronicity Engine".to_string()
     };
 
-    tracing::info!("Starting with data dir: {:?}", data_dir);
+    tracing::info!("Starting '{}' with data dir: {:?}", display_name, data_dir);
 
     // Configure desktop window
     let config = Config::new()

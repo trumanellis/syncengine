@@ -68,13 +68,13 @@ pub fn RealmSelector(props: RealmSelectorProps) -> Element {
                 for realm in props.realms.iter() {
                     {
                         let realm_id = realm.id.clone();
-                        let realm_id_for_check = realm.id.clone();
-                        let is_selected = props.selected.as_ref() == Some(&realm_id_for_check);
+                        let realm_id_key = realm_id.to_string(); // For rsx key
+                        let is_selected = props.selected.as_ref() == Some(&realm_id);
                         let on_select = props.on_select; // Callback is Copy
 
                         rsx! {
                             RealmItem {
-                                key: "{realm_id}",
+                                key: "{realm_id_key}",
                                 name: realm.name.clone(),
                                 is_shared: realm.is_shared,
                                 is_selected: is_selected,

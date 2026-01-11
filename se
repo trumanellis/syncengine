@@ -1,0 +1,78 @@
+#!/bin/bash
+# Launch multiple Synchronicity Engine instances
+# Usage: ./se <name1> [name2] [name3] ...
+#
+# Each instance gets its own data directory and window title.
+# Examples:
+#   ./se love           # Single instance named "love"
+#   ./se love joy       # Two instances side by side
+#   ./se alice bob eve  # Three instances for testing sync
+
+set -e
+
+# Colors for output
+CYAN='\033[0;36m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m'
+
+if [ $# -eq 0 ]; then
+    echo "Usage: ./se <name1> [name2] [name3] ..."
+    echo ""
+    echo "Examples:"
+    echo "  ./se love           # Single instance"
+    echo "  ./se love joy       # Two instances"
+    echo "  ./se alice bob eve  # Three instances"
+    echo ""
+    echo "Each instance gets its own data directory:"
+    echo "  ~/Library/Application Support/syncengine-<name>/"
+    exit 1
+fi
+
+# Build first (only once)
+echo -e "${CYAN}Building Synchronicity Engine...${NC}"
+cargo build --bin syncengine-desktop --release 2>&1 | grep -E "(Compiling|Finished|error)" || true
+echo -e "${GREEN}Build complete.${NC}"
+echo ""
+
+# Get the binary path
+BINARY="./target/release/syncengine-desktop"
+
+if [ ! -f "$BINARY" ]; then
+    echo "Binary not found at $BINARY"
+    echo "Trying debug build..."
+    BINARY="./target/debug/syncengine-desktop"
+fi
+
+# Launch each instance
+PIDS=()
+for name in "$@"; do
+    echo -e "${CYAN}Launching instance: ${YELLOW}$name${NC}"
+
+    # Launch in background
+    "$BINARY" --name "$name" &
+    PIDS+=($!)
+
+    # Small delay between launches to avoid race conditions
+    sleep 0.5
+done
+
+echo ""
+echo -e "${GREEN}Launched ${#PIDS[@]} instance(s): $@${NC}"
+echo ""
+echo "Press Ctrl+C to stop all instances"
+
+# Wait for all instances (or Ctrl+C)
+cleanup() {
+    echo ""
+    echo -e "${YELLOW}Stopping all instances...${NC}"
+    for pid in "${PIDS[@]}"; do
+        kill "$pid" 2>/dev/null || true
+    done
+    exit 0
+}
+
+trap cleanup SIGINT SIGTERM
+
+# Wait for any instance to exit
+wait
