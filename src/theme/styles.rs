@@ -1008,4 +1008,85 @@ body {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* === Responsive Layout for Narrow Windows === */
+@media (max-width: 900px) {
+  .app-shell {
+    padding: 1rem;
+  }
+
+  .realm-sidebar {
+    width: 180px;
+    min-width: 160px;
+    padding-right: 1rem;
+  }
+
+  .invite-sidebar {
+    width: 260px;
+    min-width: 220px;
+    padding: 0.75rem;
+  }
+
+  .invite-panel {
+    padding: 1rem;
+  }
+
+  .qr-code-container {
+    padding: 0.5rem;
+  }
+
+  .qr-code-image {
+    max-width: 150px;
+    max-height: 150px;
+  }
+
+  .invite-ticket-container {
+    max-width: 220px;
+  }
+
+  .invite-copy-btn {
+    max-width: 220px;
+    padding: 0.5rem 1rem;
+    font-size: var(--text-sm);
+  }
+
+  .modal-content {
+    max-width: 90%;
+    margin: 1rem;
+  }
+}
+
+@media (max-width: 700px) {
+  .field-content {
+    flex-direction: column;
+    gap: 1rem;
+  }
+
+  .realm-sidebar {
+    width: 100%;
+    min-width: unset;
+    border-right: none;
+    border-bottom: 1px solid var(--void-border);
+    padding-right: 0;
+    padding-bottom: 1rem;
+  }
+
+  .invite-sidebar {
+    width: 100%;
+    min-width: unset;
+    border-left: none;
+    border-top: 1px solid var(--void-border);
+    padding-top: 1rem;
+  }
+
+  .app-header {
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+
+  .header-actions {
+    margin-left: 0;
+    margin-right: 0;
+  }
+}
 "#;

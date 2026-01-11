@@ -430,6 +430,9 @@ pub fn JoinRealmModal(
     let mut error: Signal<Option<String>> = use_signal(|| None);
     let mut success: Signal<bool> = use_signal(|| false);
 
+    // Get shared engine from context
+    let engine = use_engine();
+
     // Core join logic - shared between button click and Enter key
     let mut do_join = move || {
         let ticket_str = invite_input.read().clone();
@@ -452,27 +455,26 @@ pub fn JoinRealmModal(
                         return;
                     }
 
-                    // Try to join the realm
-                    let data_dir = crate::context::get_data_dir();
-                    match syncengine_core::SyncEngine::new(&data_dir).await {
-                        Ok(mut engine) => {
-                            match engine.join_via_invite(&ticket).await {
-                                Ok(_realm_id) => {
-                                    success.set(true);
+                    // Use shared engine from context
+                    let shared = engine();
+                    let mut guard = shared.write().await;
 
-                                    // Wait a moment to show success, then close
-                                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    if let Some(ref mut eng) = *guard {
+                        match eng.join_via_invite(&ticket).await {
+                            Ok(_realm_id) => {
+                                success.set(true);
 
-                                    on_join.call(ticket_str);
-                                }
-                                Err(e) => {
-                                    error.set(Some(format!("Failed to join realm: {}", e)));
-                                }
+                                // Wait a moment to show success, then close
+                                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+                                on_join.call(ticket_str);
+                            }
+                            Err(e) => {
+                                error.set(Some(format!("Failed to join realm: {}", e)));
                             }
                         }
-                        Err(e) => {
-                            error.set(Some(format!("Failed to connect to engine: {}", e)));
-                        }
+                    } else {
+                        error.set(Some("Engine not initialized".to_string()));
                     }
                 }
                 Err(e) => {
