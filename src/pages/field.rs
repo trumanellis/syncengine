@@ -3,7 +3,7 @@
 //! Where intentions manifest and synchronicities form.
 
 use dioxus::prelude::*;
-use syncengine_core::{RealmId, RealmInfo, Task};
+use syncengine_core::{RealmId, RealmInfo, SyncEvent, Task};
 
 use crate::components::{FieldState, FieldStatus, InvitePanel, JoinRealmModal, RealmSelector, TaskList};
 use crate::context::{use_engine, use_engine_ready};
@@ -66,6 +66,39 @@ pub fn Field() -> Element {
             }
         } else {
             tasks.set(vec![]);
+        }
+    });
+
+    // Listen for sync events and refresh tasks when changes arrive
+    use_effect(move || {
+        if engine_ready() {
+            spawn(async move {
+                let shared = engine();
+                let guard = shared.read().await;
+                if let Some(ref eng) = *guard {
+                    let mut events = eng.subscribe_events();
+                    drop(guard); // Release lock before waiting
+
+                    loop {
+                        match events.recv().await {
+                            Ok(SyncEvent::RealmChanged { realm_id, .. }) => {
+                                // Refresh tasks if this is the selected realm
+                                if selected_realm() == Some(realm_id.clone()) {
+                                    let shared = engine();
+                                    let guard = shared.read().await;
+                                    if let Some(ref eng) = *guard {
+                                        if let Ok(task_list) = eng.list_tasks(&realm_id) {
+                                            tasks.set(task_list);
+                                        }
+                                    }
+                                }
+                            }
+                            Ok(_) => {} // Ignore other events
+                            Err(_) => break, // Channel closed
+                        }
+                    }
+                }
+            });
         }
     });
 

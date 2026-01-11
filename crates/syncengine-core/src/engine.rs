@@ -445,6 +445,11 @@ impl SyncEngine {
         // Auto-save
         self.save_realm(realm_id).await?;
 
+        // Broadcast changes to peers if syncing
+        if let Err(e) = self.broadcast_changes(realm_id).await {
+            debug!(%realm_id, error = %e, "Failed to broadcast task addition (may not be syncing)");
+        }
+
         debug!(%realm_id, %task_id, title, "Task added");
         Ok(task_id)
     }
@@ -504,6 +509,11 @@ impl SyncEngine {
         // Auto-save
         self.save_realm(realm_id).await?;
 
+        // Broadcast changes to peers if syncing
+        if let Err(e) = self.broadcast_changes(realm_id).await {
+            debug!(%realm_id, error = %e, "Failed to broadcast task toggle (may not be syncing)");
+        }
+
         debug!(%realm_id, %task_id, "Task toggled");
         Ok(())
     }
@@ -533,6 +543,11 @@ impl SyncEngine {
 
         // Auto-save
         self.save_realm(realm_id).await?;
+
+        // Broadcast changes to peers if syncing
+        if let Err(e) = self.broadcast_changes(realm_id).await {
+            debug!(%realm_id, error = %e, "Failed to broadcast task deletion (may not be syncing)");
+        }
 
         debug!(%realm_id, %task_id, "Task deleted");
         Ok(())
