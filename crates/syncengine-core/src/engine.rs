@@ -1123,8 +1123,22 @@ impl SyncEngine {
         let realm_id = invite.realm_id();
         info!(%realm_id, "Joining realm via invite");
 
+        // Debug: Log existing realms for troubleshooting
+        let existing_realms = self.storage.list_realms()?;
+        debug!(
+            joining_realm = %realm_id,
+            joining_base58 = %realm_id.to_base58(),
+            existing_count = existing_realms.len(),
+            existing_ids = ?existing_realms.iter().map(|r| r.id.to_base58()).collect::<Vec<_>>(),
+            "Checking membership before join"
+        );
+
         // Check if we already have this realm
         if self.storage.load_realm(&realm_id)?.is_some() {
+            warn!(
+                %realm_id,
+                "Join rejected: realm already exists in storage"
+            );
             return Err(SyncError::InvalidInvite(
                 "Already a member of this realm".into(),
             ));
