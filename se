@@ -46,11 +46,20 @@ fi
 
 # Launch each instance
 PIDS=()
+FIRST=true
 for name in "$@"; do
-    echo -e "${CYAN}Launching instance: ${YELLOW}$name${NC}"
+    # First instance on left, others on right
+    if [ "$FIRST" = true ]; then
+        POSITION="left"
+        FIRST=false
+    else
+        POSITION="right"
+    fi
 
-    # Launch in background
-    "$BINARY" --name "$name" &
+    echo -e "${CYAN}Launching instance: ${YELLOW}$name${NC} (${POSITION})"
+
+    # Launch in background with position
+    "$BINARY" --name "$name" --position "$POSITION" &
     PIDS+=($!)
 
     # Small delay between launches to avoid race conditions

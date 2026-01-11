@@ -9,11 +9,18 @@ mod theme;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-use clap::Parser;
-use dioxus::desktop::{Config, WindowBuilder};
+use clap::{Parser, ValueEnum};
+use dioxus::desktop::{Config, LogicalPosition, WindowBuilder};
 
 /// Global data directory, set from command line
 static DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+/// Window position on screen
+#[derive(Debug, Clone, ValueEnum)]
+enum WindowPosition {
+    Left,
+    Right,
+}
 
 /// Get the data directory (set from command line or default)
 pub fn get_data_dir() -> PathBuf {
@@ -40,6 +47,10 @@ struct Args {
     /// Instance number (shorthand for --name with number)
     #[arg(short, long)]
     instance: Option<u8>,
+
+    /// Window position (left or right half of screen)
+    #[arg(short, long, value_enum)]
+    position: Option<WindowPosition>,
 }
 
 fn main() {
@@ -86,14 +97,24 @@ fn main() {
 
     tracing::info!("Starting '{}' with data dir: {:?}", display_name, data_dir);
 
+    // Determine window position
+    let window_x = match args.position {
+        Some(WindowPosition::Right) => window_width as i32,
+        _ => 0, // Left or default
+    };
+
     // Configure desktop window
-    let config = Config::new()
-        .with_window(
-            WindowBuilder::new()
-                .with_title(&title)
-                .with_inner_size(dioxus::desktop::LogicalSize::new(window_width, window_height))
-                .with_resizable(true)
-        );
+    let mut window_builder = WindowBuilder::new()
+        .with_title(&title)
+        .with_inner_size(dioxus::desktop::LogicalSize::new(window_width, window_height))
+        .with_resizable(true);
+
+    // Set position if specified
+    if args.position.is_some() {
+        window_builder = window_builder.with_position(LogicalPosition::new(window_x, 0));
+    }
+
+    let config = Config::new().with_window(window_builder);
 
     dioxus::LaunchBuilder::desktop()
         .with_cfg(config)
