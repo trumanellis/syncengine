@@ -7,10 +7,35 @@ mod pages;
 mod theme;
 
 use std::path::PathBuf;
+use std::process::Command;
 use std::sync::OnceLock;
 
 use clap::{Parser, ValueEnum};
 use dioxus::desktop::{Config, LogicalPosition, WindowBuilder};
+
+/// Get the primary screen dimensions on macOS
+fn get_screen_size() -> (f64, f64) {
+    // Try to get screen size using osascript on macOS
+    if let Ok(output) = Command::new("osascript")
+        .args(["-e", "tell application \"Finder\" to get bounds of window of desktop"])
+        .output()
+    {
+        if let Ok(stdout) = String::from_utf8(output.stdout) {
+            // Output format: "0, 0, 1440, 900" (x1, y1, x2, y2)
+            let parts: Vec<&str> = stdout.trim().split(", ").collect();
+            if parts.len() == 4 {
+                if let (Ok(width), Ok(height)) = (
+                    parts[2].parse::<f64>(),
+                    parts[3].parse::<f64>(),
+                ) {
+                    return (width, height);
+                }
+            }
+        }
+    }
+    // Fallback to common MacBook resolution
+    (1440.0, 900.0)
+}
 
 /// Global data directory, set from command line
 static DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
@@ -84,9 +109,12 @@ fn main() {
     // Store data directory globally
     let _ = DATA_DIR.set(data_dir.clone());
 
-    // Window size: half width, nearly full height
-    let window_width = 700.0;
-    let window_height = 900.0;
+    // Get screen dimensions and calculate window size
+    let (screen_width, screen_height) = get_screen_size();
+
+    // Window size: exactly half screen width, full height minus menu bar (~25px)
+    let window_width = screen_width / 2.0;
+    let window_height = screen_height - 25.0;
 
     // Window title with instance name
     let title = if !display_name.is_empty() {
@@ -95,9 +123,12 @@ fn main() {
         "Synchronicity Engine".to_string()
     };
 
-    tracing::info!("Starting '{}' with data dir: {:?}", display_name, data_dir);
+    tracing::info!(
+        "Starting '{}' with data dir: {:?}, screen: {}x{}, window: {}x{}",
+        display_name, data_dir, screen_width, screen_height, window_width, window_height
+    );
 
-    // Determine window position
+    // Determine window position (left starts at 0, right starts at half screen)
     let window_x = match args.position {
         Some(WindowPosition::Right) => window_width as i32,
         _ => 0, // Left or default
@@ -109,9 +140,9 @@ fn main() {
         .with_inner_size(dioxus::desktop::LogicalSize::new(window_width, window_height))
         .with_resizable(true);
 
-    // Set position if specified
+    // Set position if specified (y=25 accounts for menu bar)
     if args.position.is_some() {
-        window_builder = window_builder.with_position(LogicalPosition::new(window_x, 0));
+        window_builder = window_builder.with_position(LogicalPosition::new(window_x, 25));
     }
 
     let config = Config::new().with_window(window_builder);
