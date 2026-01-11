@@ -197,24 +197,30 @@ pub fn Field() -> Element {
         });
     };
 
-    // Handler for joining a realm via invite
-    let join_realm = move |invite_string: String| {
+    // Handler called after JoinRealmModal successfully joins
+    // (the modal already called join_via_invite, we just need to refresh the UI)
+    let on_realm_joined = move |_invite_string: String| {
         spawn(async move {
             let shared = engine();
-            let mut guard = shared.write().await;
-            if let Some(ref mut eng) = *guard {
-                match eng.join_realm(&invite_string).await {
-                    Ok(realm_id) => {
-                        // Refresh realm list and select the joined realm
-                        let realm_list = eng.list_realms().await.unwrap_or_default();
-                        realms.set(realm_list);
-                        selected_realm.set(Some(realm_id));
-                        show_join_modal.set(false);
-                    }
-                    Err(e) => {
-                        error.set(Some(format!("Failed to join realm: {}", e)));
-                    }
+            let guard = shared.read().await;
+            if let Some(ref eng) = *guard {
+                // Refresh realm list to show the newly joined realm
+                let realm_list = eng.list_realms().await.unwrap_or_default();
+
+                // Find the most recently added realm (highest created_at)
+                let newest_id = realm_list
+                    .iter()
+                    .max_by_key(|r| r.created_at)
+                    .map(|r| r.id.clone());
+
+                realms.set(realm_list);
+
+                // Select the newly joined realm
+                if let Some(id) = newest_id {
+                    selected_realm.set(Some(id));
                 }
+
+                show_join_modal.set(false);
             }
         });
     };
@@ -328,7 +334,7 @@ pub fn Field() -> Element {
             JoinRealmModal {
                 show: show_join_modal(),
                 on_close: move |_| show_join_modal.set(false),
-                on_join: join_realm,
+                on_join: on_realm_joined,
             }
         }
     }
