@@ -32,6 +32,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::invite::NodeAddrBytes;
 use crate::RealmId;
 
 /// Messages sent over gossip for document sync
@@ -41,11 +42,16 @@ pub enum SyncMessage {
     ///
     /// Sent periodically to inform peers of the current document state.
     /// Peers compare heads to detect if they need to sync.
+    /// Optionally includes sender's network address for peer discovery.
     Announce {
         /// The realm this announcement is for
         realm_id: RealmId,
         /// Automerge ChangeHash bytes for each head
         heads: Vec<Vec<u8>>,
+        /// Optional sender address for peer discovery
+        /// This allows receivers to add the sender to their address book
+        /// for bidirectional communication.
+        sender_addr: Option<NodeAddrBytes>,
     },
 
     /// Request full document sync
@@ -221,6 +227,7 @@ mod tests {
         let msg = SyncMessage::Announce {
             realm_id,
             heads: heads.clone(),
+            sender_addr: None,
         };
 
         let encoded = msg.encode().unwrap();
@@ -280,6 +287,7 @@ mod tests {
         let announce = SyncMessage::Announce {
             realm_id: realm_id.clone(),
             heads: vec![],
+            sender_addr: None,
         };
         assert!(announce.is_announce());
         assert!(!announce.is_sync_request());
@@ -311,6 +319,7 @@ mod tests {
         let msg = SyncMessage::Announce {
             realm_id,
             heads: vec![],
+            sender_addr: None,
         };
         let wire = WireMessage::new(msg);
 
@@ -323,6 +332,7 @@ mod tests {
         let msg = SyncMessage::Announce {
             realm_id,
             heads: vec![],
+            sender_addr: None,
         };
 
         let encoded = msg.encode().unwrap();

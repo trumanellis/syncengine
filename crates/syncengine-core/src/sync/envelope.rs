@@ -335,6 +335,7 @@ mod tests {
         let message = SyncMessage::Announce {
             realm_id,
             heads: vec![vec![0u8; 32]],
+            sender_addr: None,
         };
 
         // Seal with correct key
@@ -388,6 +389,7 @@ mod tests {
         let message = SyncMessage::Announce {
             realm_id,
             heads: vec![],
+            sender_addr: None,
         };
 
         // Seal the envelope
@@ -542,6 +544,7 @@ mod tests {
         let message = SyncMessage::Announce {
             realm_id: realm_id.clone(),
             heads: vec![],
+            sender_addr: None,
         };
 
         let envelope = SyncEnvelope::seal(&message, sender, &realm_key, mock_sign).unwrap();

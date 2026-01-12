@@ -25,7 +25,7 @@ if [ $# -eq 0 ]; then
     echo "  ./se alice bob eve  # Three instances"
     echo ""
     echo "Each instance gets its own data directory:"
-    echo "  ~/Library/Application Support/syncengine-<name>/"
+    echo "  ~/Library/Application Support/instance-<name>/"
     exit 1
 fi
 

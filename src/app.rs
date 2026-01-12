@@ -40,13 +40,19 @@ pub fn App() -> Element {
         spawn(async move {
             let data_dir = get_data_dir();
             match syncengine_core::SyncEngine::new(&data_dir).await {
-                Ok(eng) => {
+                Ok(mut eng) => {
+                    // Initialize identity for signing sync messages
+                    // This is required for P2P sync to work
+                    if let Err(e) = eng.init_identity() {
+                        tracing::error!("Failed to initialize identity: {}", e);
+                    }
+
                     let shared = engine();
                     let mut guard = shared.write().await;
                     *guard = Some(eng);
                     drop(guard);
                     engine_ready.set(true);
-                    tracing::info!("SyncEngine initialized");
+                    tracing::info!("SyncEngine initialized with identity");
                 }
                 Err(e) => {
                     tracing::error!("Failed to initialize SyncEngine: {}", e);

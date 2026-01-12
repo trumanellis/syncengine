@@ -31,24 +31,23 @@ use std::sync::Arc;
 
 use iroh_gossip::proto::TopicId;
 use rand::RngCore;
+use tokio::sync::broadcast;
 use tracing::{debug, info, warn};
 
 use crate::error::SyncError;
 use crate::identity::{Did, HybridKeypair, HybridPublicKey};
-use crate::invite::InviteTicket;
+use crate::invite::{InviteTicket, NodeAddrBytes};
 use crate::realm::RealmDoc;
 use crate::storage::Storage;
-use crate::sync::{GossipSync, SyncEnvelope, SyncEvent, SyncMessage, SyncStatus, TopicHandle};
+use crate::sync::{GossipSync, SyncEnvelope, SyncEvent, SyncMessage, SyncStatus, TopicEvent, TopicSender};
 use crate::types::{RealmId, RealmInfo, Task, TaskId};
-
-use tokio::sync::broadcast;
 
 /// Internal state for an open realm
 struct RealmState {
     /// The Automerge document containing tasks
     doc: RealmDoc,
-    /// Handle to the gossip topic (if syncing)
-    topic_handle: Option<TopicHandle>,
+    /// Sender for the gossip topic (if syncing) - used for broadcasting
+    topic_sender: Option<TopicSender>,
     /// Encryption key for the realm (32 bytes for ChaCha20-Poly1305)
     realm_key: [u8; 32],
 }
@@ -73,6 +72,13 @@ struct RealmState {
 /// Default capacity for event broadcast channel
 const EVENT_CHANNEL_CAPACITY: usize = 256;
 
+/// Incoming sync data from background listener tasks
+struct IncomingSyncData {
+    realm_id: RealmId,
+    /// Raw envelope bytes received from gossip (not yet decrypted)
+    envelope_bytes: Vec<u8>,
+}
+
 pub struct SyncEngine {
     /// Persistent storage for realms, documents, and keys
     storage: Storage,
@@ -88,6 +94,10 @@ pub struct SyncEngine {
     sync_status: HashMap<RealmId, SyncStatus>,
     /// Event broadcast channel for notifying listeners of realm changes
     event_tx: broadcast::Sender<SyncEvent>,
+    /// Receiver for incoming sync data from background listener tasks
+    sync_rx: tokio::sync::mpsc::UnboundedReceiver<IncomingSyncData>,
+    /// Sender for incoming sync data (cloned to background tasks)
+    sync_tx: tokio::sync::mpsc::UnboundedSender<IncomingSyncData>,
 }
 
 impl SyncEngine {
@@ -113,6 +123,8 @@ impl SyncEngine {
 
         let (event_tx, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
 
+        let (sync_tx, sync_rx) = tokio::sync::mpsc::unbounded_channel();
+
         Ok(Self {
             storage,
             gossip: None,
@@ -121,6 +133,8 @@ impl SyncEngine {
             identity: None,
             sync_status: HashMap::new(),
             event_tx,
+            sync_rx,
+            sync_tx,
         })
     }
 
@@ -297,7 +311,7 @@ impl SyncEngine {
             realm_id.clone(),
             RealmState {
                 doc,
-                topic_handle: None,
+                topic_sender: None,
                 realm_key,
             },
         );
@@ -365,7 +379,7 @@ impl SyncEngine {
             realm_id.clone(),
             RealmState {
                 doc,
-                topic_handle: None,
+                topic_sender: None,
                 realm_key,
             },
         );
@@ -412,8 +426,111 @@ impl SyncEngine {
     pub fn is_realm_syncing(&self, realm_id: &RealmId) -> bool {
         self.realms
             .get(realm_id)
-            .map(|s| s.topic_handle.is_some())
+            .map(|s| s.topic_sender.is_some())
             .unwrap_or(false)
+    }
+
+    /// Process any pending sync messages from background listener tasks
+    ///
+    /// This should be called periodically or before reading realm state
+    /// to ensure all received sync data has been applied.
+    ///
+    /// # Returns
+    ///
+    /// The number of messages processed.
+    pub fn process_pending_sync(&mut self) -> usize {
+        let mut processed = 0;
+
+        // Drain all pending messages from the channel
+        loop {
+            match self.sync_rx.try_recv() {
+                Ok(data) => {
+                    // Try to process this message
+                    match self.handle_incoming(&data.realm_id, &data.envelope_bytes) {
+                        Ok(Some(SyncMessage::SyncResponse { document, .. })) => {
+                            // Apply the full document
+                            if let Err(e) = self.apply_sync_changes(&data.realm_id, &document, true) {
+                                warn!(realm_id = %data.realm_id, error = ?e, "Failed to apply sync response");
+                            } else {
+                                debug!(realm_id = %data.realm_id, "Applied sync response (full doc)");
+                                processed += 1;
+                            }
+                        }
+                        Ok(Some(SyncMessage::Changes { data: changes, .. })) => {
+                            // Apply incremental changes
+                            if let Err(e) = self.apply_sync_changes(&data.realm_id, &changes, false) {
+                                warn!(realm_id = %data.realm_id, error = ?e, "Failed to apply incremental changes");
+                            } else {
+                                debug!(realm_id = %data.realm_id, "Applied incremental changes");
+                                processed += 1;
+                            }
+                        }
+                        Ok(Some(SyncMessage::SyncRequest { .. })) => {
+                            // Peer is requesting our state - we should respond
+                            debug!(realm_id = %data.realm_id, "Received sync request (not yet implemented)");
+                        }
+                        Ok(Some(SyncMessage::Announce { sender_addr, .. })) => {
+                            // Peer is announcing their state - we could compare and request sync if needed
+                            debug!(realm_id = %data.realm_id, "Received announce");
+
+                            // If sender included their address, add it to our discovery
+                            // This enables bidirectional communication when joining via invite
+                            if let Some(addr) = sender_addr {
+                                if let Ok(endpoint_addr) = addr.to_endpoint_addr() {
+                                    if let Some(gossip) = self.gossip.as_ref() {
+                                        debug!(
+                                            realm_id = %data.realm_id,
+                                            peer = %endpoint_addr.id,
+                                            "Adding peer address from announce"
+                                        );
+                                        gossip.add_peer_addr(endpoint_addr);
+                                    }
+                                }
+                            }
+                        }
+                        Ok(None) => {
+                            // Message failed verification - ignore
+                            debug!(realm_id = %data.realm_id, "Incoming message failed verification");
+                        }
+                        Err(e) => {
+                            warn!(realm_id = %data.realm_id, error = ?e, "Failed to handle incoming message");
+                        }
+                    }
+                }
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {
+                    // No more messages
+                    break;
+                }
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                    // Channel closed
+                    break;
+                }
+            }
+        }
+
+        processed
+    }
+
+    /// Apply sync changes to a realm document (internal sync version)
+    fn apply_sync_changes(&mut self, realm_id: &RealmId, data: &[u8], is_full_doc: bool) -> Result<(), SyncError> {
+        let state = self
+            .realms
+            .get_mut(realm_id)
+            .ok_or_else(|| SyncError::RealmNotFound(realm_id.to_string()))?;
+
+        if is_full_doc {
+            // Full document - REPLACE entirely, don't merge
+            // When docs are created independently (different actors), merging can cause
+            // conflicts where the wrong value wins. Replacing ensures we get the peer's
+            // exact state. Subsequent incremental changes can be merged properly.
+            state.doc = RealmDoc::load(data)?;
+        } else {
+            // Incremental changes - these work when docs share common history
+            state.doc.apply_sync_message(data)?;
+        }
+
+        debug!(%realm_id, bytes = data.len(), is_full_doc, "Applied sync changes");
+        Ok(())
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -433,21 +550,28 @@ impl SyncEngine {
             self.open_realm(realm_id).await?;
         }
 
-        let task_id = {
+        let (task_id, sync_data) = {
             let state = self
                 .realms
                 .get_mut(realm_id)
                 .ok_or_else(|| SyncError::RealmNotFound(realm_id.to_string()))?;
 
-            state.doc.add_task(title)?
+            let task_id = state.doc.add_task(title)?;
+
+            // Capture incremental changes BEFORE save (save resets the checkpoint)
+            let sync_data = state.doc.generate_sync_message();
+
+            (task_id, sync_data)
         };
 
         // Auto-save
         self.save_realm(realm_id).await?;
 
         // Broadcast changes to peers if syncing
-        if let Err(e) = self.broadcast_changes(realm_id).await {
-            debug!(%realm_id, error = %e, "Failed to broadcast task addition (may not be syncing)");
+        if !sync_data.is_empty() {
+            if let Err(e) = self.broadcast_changes_with_data(realm_id, sync_data).await {
+                debug!(%realm_id, error = %e, "Failed to broadcast task addition (may not be syncing)");
+            }
         }
 
         debug!(%realm_id, %task_id, title, "Task added");
@@ -497,21 +621,26 @@ impl SyncEngine {
             self.open_realm(realm_id).await?;
         }
 
-        {
+        let sync_data = {
             let state = self
                 .realms
                 .get_mut(realm_id)
                 .ok_or_else(|| SyncError::RealmNotFound(realm_id.to_string()))?;
 
             state.doc.toggle_task(task_id)?;
-        }
+
+            // Capture incremental changes BEFORE save
+            state.doc.generate_sync_message()
+        };
 
         // Auto-save
         self.save_realm(realm_id).await?;
 
         // Broadcast changes to peers if syncing
-        if let Err(e) = self.broadcast_changes(realm_id).await {
-            debug!(%realm_id, error = %e, "Failed to broadcast task toggle (may not be syncing)");
+        if !sync_data.is_empty() {
+            if let Err(e) = self.broadcast_changes_with_data(realm_id, sync_data).await {
+                debug!(%realm_id, error = %e, "Failed to broadcast task toggle (may not be syncing)");
+            }
         }
 
         debug!(%realm_id, %task_id, "Task toggled");
@@ -532,21 +661,26 @@ impl SyncEngine {
             self.open_realm(realm_id).await?;
         }
 
-        {
+        let sync_data = {
             let state = self
                 .realms
                 .get_mut(realm_id)
                 .ok_or_else(|| SyncError::RealmNotFound(realm_id.to_string()))?;
 
             state.doc.delete_task(task_id)?;
-        }
+
+            // Capture incremental changes BEFORE save
+            state.doc.generate_sync_message()
+        };
 
         // Auto-save
         self.save_realm(realm_id).await?;
 
         // Broadcast changes to peers if syncing
-        if let Err(e) = self.broadcast_changes(realm_id).await {
-            debug!(%realm_id, error = %e, "Failed to broadcast task deletion (may not be syncing)");
+        if !sync_data.is_empty() {
+            if let Err(e) = self.broadcast_changes_with_data(realm_id, sync_data).await {
+                debug!(%realm_id, error = %e, "Failed to broadcast task deletion (may not be syncing)");
+            }
         }
 
         debug!(%realm_id, %task_id, "Task deleted");
@@ -631,14 +765,76 @@ impl SyncEngine {
         // Initialize gossip
         let gossip = self.ensure_gossip().await?;
 
-        // Subscribe to topic
+        // Subscribe to topic using split API (receiver not wrapped in mutex)
         let topic_id = TopicId::from_bytes(*realm_id.as_bytes());
-        let handle = gossip.subscribe(topic_id, vec![]).await?;
+        let (sender, mut receiver) = gossip.subscribe_split(topic_id, vec![]).await?;
 
-        // Store handle
+        // Store sender for broadcasting
         if let Some(state) = self.realms.get_mut(realm_id) {
-            state.topic_handle = Some(handle);
+            state.topic_sender = Some(sender);
         }
+
+        // Spawn background listener task that owns the receiver directly
+        let listener_realm_id = realm_id.clone();
+        let sync_tx = self.sync_tx.clone();
+        let event_tx = self.event_tx.clone();
+
+        tokio::spawn(async move {
+            debug!(%listener_realm_id, "Sync listener task started");
+            let mut event_count = 0u64;
+            loop {
+                debug!(%listener_realm_id, event_count, "Listener waiting for next event...");
+                match receiver.recv_event().await {
+                    Some(TopicEvent::Message(msg)) => {
+                        event_count += 1;
+                        debug!(
+                            %listener_realm_id,
+                            event_count,
+                            from = ?msg.from,
+                            bytes = msg.content.len(),
+                            "Received sync message"
+                        );
+                        // Send to channel for processing by main engine
+                        if sync_tx
+                            .send(IncomingSyncData {
+                                realm_id: listener_realm_id.clone(),
+                                envelope_bytes: msg.content,
+                            })
+                            .is_err()
+                        {
+                            debug!(%listener_realm_id, "Sync channel closed, stopping listener");
+                            break;
+                        }
+                        // Notify listeners that data arrived
+                        let _ = event_tx.send(SyncEvent::RealmChanged {
+                            realm_id: listener_realm_id.clone(),
+                            changes_applied: 1,
+                        });
+                    }
+                    Some(TopicEvent::NeighborUp(peer)) => {
+                        event_count += 1;
+                        debug!(%listener_realm_id, event_count, ?peer, "Peer connected");
+                        let _ = event_tx.send(SyncEvent::PeerConnected {
+                            realm_id: listener_realm_id.clone(),
+                            peer_id: peer.to_string(),
+                        });
+                    }
+                    Some(TopicEvent::NeighborDown(peer)) => {
+                        event_count += 1;
+                        debug!(%listener_realm_id, event_count, ?peer, "Peer disconnected");
+                        let _ = event_tx.send(SyncEvent::PeerDisconnected {
+                            realm_id: listener_realm_id.clone(),
+                            peer_id: peer.to_string(),
+                        });
+                    }
+                    None => {
+                        debug!(%listener_realm_id, event_count, "Topic subscription closed");
+                        break;
+                    }
+                }
+            }
+            debug!(%listener_realm_id, event_count, "Sync listener task ended");
+        });
 
         // Update status to Syncing
         self.sync_status
@@ -665,8 +861,8 @@ impl SyncEngine {
             .get_mut(realm_id)
             .ok_or_else(|| SyncError::RealmNotFound(realm_id.to_string()))?;
 
-        if state.topic_handle.is_some() {
-            state.topic_handle = None;
+        if state.topic_sender.is_some() {
+            state.topic_sender = None;
 
             // Update status to Idle
             self.sync_status.insert(realm_id.clone(), SyncStatus::Idle);
@@ -821,8 +1017,8 @@ impl SyncEngine {
             .get(realm_id)
             .ok_or_else(|| SyncError::RealmNotFound(realm_id.to_string()))?;
 
-        let topic_handle = state
-            .topic_handle
+        let topic_sender = state
+            .topic_sender
             .as_ref()
             .ok_or_else(|| SyncError::Gossip("Realm is not syncing".to_string()))?;
 
@@ -849,8 +1045,8 @@ impl SyncEngine {
             "Broadcasting sync envelope"
         );
 
-        // Broadcast via topic handle
-        topic_handle.broadcast(envelope_bytes).await?;
+        // Broadcast via topic sender
+        topic_sender.broadcast(envelope_bytes).await?;
 
         Ok(())
     }
@@ -953,10 +1149,15 @@ impl SyncEngine {
                 .collect::<Vec<_>>()
         };
 
-        // Create announce message
+        // Create announce message with our address for peer discovery
+        let sender_addr = self.gossip.as_ref().map(|g| {
+            NodeAddrBytes::from_endpoint_addr(&g.endpoint_addr())
+        });
+
         let message = SyncMessage::Announce {
             realm_id: realm_id.clone(),
             heads,
+            sender_addr,
         };
 
         // Broadcast it
@@ -994,6 +1195,42 @@ impl SyncEngine {
             realm_id: realm_id.clone(),
             data,
         };
+
+        // Broadcast it
+        self.broadcast_sync(realm_id, message).await
+    }
+
+    /// Broadcast pre-captured changes to peers
+    ///
+    /// Use this when you've already captured incremental changes before saving
+    /// (since save() resets the incremental checkpoint).
+    ///
+    /// # Errors
+    ///
+    /// Returns `SyncError::RealmNotFound` if the realm is not open.
+    /// Returns `SyncError::Gossip` if the realm is not syncing.
+    pub async fn broadcast_changes_with_data(
+        &mut self,
+        realm_id: &RealmId,
+        _data: Vec<u8>,
+    ) -> Result<(), SyncError> {
+        // Always broadcast the FULL document instead of incremental changes.
+        // This ensures peers with empty/different docs can properly sync.
+        // Incremental changes only work when docs share a common history.
+        let state = self
+            .realms
+            .get_mut(realm_id)
+            .ok_or_else(|| SyncError::RealmNotFound(realm_id.to_string()))?;
+
+        let full_doc = state.doc.save();
+
+        // Create sync response with full document
+        let message = SyncMessage::SyncResponse {
+            realm_id: realm_id.clone(),
+            document: full_doc,
+        };
+
+        debug!(%realm_id, "Broadcasting full document for sync");
 
         // Broadcast it
         self.broadcast_sync(realm_id, message).await
@@ -1108,11 +1345,17 @@ impl SyncEngine {
             state.realm_key
         };
 
+        // Get realm name for the invite
+        let realm_name = self
+            .storage
+            .load_realm(realm_id)?
+            .map(|info| info.name);
+
         // Ensure gossip is initialized
         let gossip = self.ensure_gossip().await?;
 
-        // Generate invite
-        let invite = gossip.generate_invite(realm_id, realm_key)?;
+        // Generate invite (include realm name so joiners see it)
+        let invite = gossip.generate_invite(realm_id, realm_key, realm_name.as_deref())?;
 
         // Mark realm as shared
         if let Ok(Some(mut info)) = self.storage.load_realm(realm_id) {
@@ -1122,7 +1365,13 @@ impl SyncEngine {
             }
         }
 
-        info!(%realm_id, "Invite generated");
+        // Auto-start sync when sharing a realm
+        // This ensures the creator can send/receive sync messages
+        if !self.is_realm_syncing(realm_id) {
+            self.start_sync(realm_id).await?;
+        }
+
+        info!(%realm_id, "Invite generated and sync started");
         Ok(invite)
     }
 
@@ -1162,8 +1411,70 @@ impl SyncEngine {
         // Initialize gossip
         let gossip = self.ensure_gossip().await?;
 
-        // Join via invite (validates expiry)
-        let handle = gossip.join_via_invite(invite).await?;
+        // Join via invite using split API (receiver not wrapped in mutex)
+        let (sender, mut receiver) = gossip.join_via_invite_split(invite).await?;
+
+        // Spawn background listener task that owns the receiver directly
+        let listener_realm_id = realm_id.clone();
+        let sync_tx = self.sync_tx.clone();
+        let event_tx = self.event_tx.clone();
+
+        tokio::spawn(async move {
+            debug!(%listener_realm_id, "Join sync listener task started");
+            let mut event_count = 0u64;
+            loop {
+                debug!(%listener_realm_id, event_count, "Join listener waiting for next event...");
+                match receiver.recv_event().await {
+                    Some(TopicEvent::Message(msg)) => {
+                        event_count += 1;
+                        debug!(
+                            %listener_realm_id,
+                            event_count,
+                            from = ?msg.from,
+                            bytes = msg.content.len(),
+                            "Received sync message (joined)"
+                        );
+                        // Send to channel for processing by main engine
+                        if sync_tx
+                            .send(IncomingSyncData {
+                                realm_id: listener_realm_id.clone(),
+                                envelope_bytes: msg.content,
+                            })
+                            .is_err()
+                        {
+                            debug!(%listener_realm_id, "Sync channel closed, stopping listener");
+                            break;
+                        }
+                        // Notify listeners that data arrived
+                        let _ = event_tx.send(SyncEvent::RealmChanged {
+                            realm_id: listener_realm_id.clone(),
+                            changes_applied: 1,
+                        });
+                    }
+                    Some(TopicEvent::NeighborUp(peer)) => {
+                        event_count += 1;
+                        debug!(%listener_realm_id, event_count, ?peer, "Peer connected (joined)");
+                        let _ = event_tx.send(SyncEvent::PeerConnected {
+                            realm_id: listener_realm_id.clone(),
+                            peer_id: peer.to_string(),
+                        });
+                    }
+                    Some(TopicEvent::NeighborDown(peer)) => {
+                        event_count += 1;
+                        debug!(%listener_realm_id, event_count, ?peer, "Peer disconnected (joined)");
+                        let _ = event_tx.send(SyncEvent::PeerDisconnected {
+                            realm_id: listener_realm_id.clone(),
+                            peer_id: peer.to_string(),
+                        });
+                    }
+                    None => {
+                        debug!(%listener_realm_id, "Topic subscription closed");
+                        break;
+                    }
+                }
+            }
+            debug!(%listener_realm_id, "Join sync listener task ended");
+        });
 
         // Create realm info
         let info = RealmInfo {
@@ -1186,12 +1497,52 @@ impl SyncEngine {
             realm_id.clone(),
             RealmState {
                 doc,
-                topic_handle: Some(handle),
+                topic_sender: Some(sender),
                 realm_key: invite.realm_key,
             },
         );
 
-        debug!(%realm_id, "Joined realm");
+        // Update sync status
+        self.sync_status
+            .insert(realm_id.clone(), SyncStatus::Syncing { peer_count: 0 });
+        let _ = self.event_tx.send(SyncEvent::StatusChanged {
+            realm_id: realm_id.clone(),
+            status: SyncStatus::Syncing { peer_count: 0 },
+        });
+
+        debug!(%realm_id, "Joined realm and started sync");
+
+        // Wait for connection to establish before announcing
+        // The gossip connection typically takes ~20-50ms to establish
+        // This ensures we have a neighbor to receive our announce
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        debug!(%realm_id, "Connection delay complete, sending announce");
+
+        // Send an announce message to establish bidirectional communication
+        // This allows the inviter to learn our address and send messages back to us
+        // by forcing Bob to send a message first, which establishes the QUIC connection
+        let heads = if let Some(state) = self.realms.get_mut(&realm_id) {
+            state.doc.heads().into_iter().map(|h| h.0.to_vec()).collect()
+        } else {
+            vec![]
+        };
+
+        // Include our endpoint address so the receiver can add us to their discovery
+        let sender_addr = self.gossip.as_ref().map(|g| {
+            NodeAddrBytes::from_endpoint_addr(&g.endpoint_addr())
+        });
+
+        let announce = SyncMessage::Announce {
+            realm_id: realm_id.clone(),
+            heads,
+            sender_addr,
+        };
+        if let Err(e) = self.broadcast_sync(&realm_id, announce).await {
+            debug!(%realm_id, error = ?e, "Failed to send announce (non-fatal)");
+        } else {
+            debug!(%realm_id, "Sent announce to establish bidirectional connection");
+        }
+
         Ok(realm_id)
     }
 
@@ -1245,6 +1596,71 @@ impl SyncEngine {
             relay_url,
             did,
         })
+    }
+
+    /// Get this node's endpoint address
+    ///
+    /// Returns the EndpointAddr which can be used by other nodes to connect.
+    /// Returns None if networking is not active.
+    #[cfg(test)]
+    pub fn endpoint_addr(&self) -> Option<iroh::EndpointAddr> {
+        self.gossip.as_ref().map(|g| g.endpoint_addr())
+    }
+
+    /// Add a peer's address to the discovery system
+    ///
+    /// This allows sending messages to the peer directly.
+    #[cfg(test)]
+    pub fn add_peer_addr(&self, addr: iroh::EndpointAddr) {
+        if let Some(ref gossip) = self.gossip {
+            gossip.add_peer_addr(addr);
+        }
+    }
+
+    /// Wait for a peer to connect to a realm's sync topic
+    ///
+    /// Returns true if a peer connected within the timeout, false otherwise.
+    #[cfg(test)]
+    pub async fn wait_for_peer_connection(
+        &self,
+        realm_id: &RealmId,
+        wait_duration: std::time::Duration,
+    ) -> bool {
+        let mut events = self.event_tx.subscribe();
+        let start = std::time::Instant::now();
+
+        loop {
+            let remaining = wait_duration.saturating_sub(start.elapsed());
+            if remaining.is_zero() {
+                debug!(%realm_id, "Timeout waiting for peer connection");
+                return false;
+            }
+
+            match tokio::time::timeout(remaining, events.recv()).await {
+                Ok(Ok(SyncEvent::PeerConnected {
+                    realm_id: event_realm,
+                    peer_id,
+                })) => {
+                    if &event_realm == realm_id {
+                        debug!(%realm_id, %peer_id, "Peer connected");
+                        return true;
+                    }
+                }
+                Ok(Ok(_)) => {
+                    // Other event, keep waiting
+                    continue;
+                }
+                Ok(Err(_)) => {
+                    // Channel lagged, keep trying
+                    continue;
+                }
+                Err(_) => {
+                    // Timeout
+                    debug!(%realm_id, "Timeout waiting for peer connection");
+                    return false;
+                }
+            }
+        }
     }
 
     /// Gracefully shutdown the engine
@@ -1836,6 +2252,7 @@ mod tests {
         let message = SyncMessage::Announce {
             realm_id: realm_id.clone(),
             heads: vec![vec![0u8; 32]],
+            sender_addr: None,
         };
 
         // Broadcast should succeed (message goes to empty topic, but no error)
@@ -1857,6 +2274,7 @@ mod tests {
         let message = SyncMessage::Announce {
             realm_id: realm_id.clone(),
             heads: vec![],
+            sender_addr: None,
         };
 
         // Broadcast should fail because identity is not initialized
@@ -1880,6 +2298,7 @@ mod tests {
         let message = SyncMessage::Announce {
             realm_id: realm_id.clone(),
             heads: vec![],
+            sender_addr: None,
         };
 
         // Broadcast should fail because realm is not syncing
@@ -1904,6 +2323,7 @@ mod tests {
         let message = SyncMessage::Announce {
             realm_id: realm_id.clone(),
             heads: vec![vec![1, 2, 3]],
+            sender_addr: None,
         };
 
         let keypair = engine.identity.as_ref().unwrap();
@@ -1947,6 +2367,7 @@ mod tests {
         let message = SyncMessage::Announce {
             realm_id: realm_id.clone(),
             heads: vec![],
+            sender_addr: None,
         };
 
         let mut envelope =
@@ -1979,6 +2400,7 @@ mod tests {
         let message = SyncMessage::Announce {
             realm_id: realm_id.clone(),
             heads: vec![],
+            sender_addr: None,
         };
 
         let keypair = engine.identity.as_ref().unwrap();
@@ -2322,5 +2744,156 @@ mod tests {
         assert_eq!(tasks2[0].id, task2);
 
         engine.shutdown().await.unwrap();
+    }
+
+    /// Test that two engines can sync tasks via invite flow
+    ///
+    /// This is the critical user flow:
+    /// 1. Alice creates a realm and generates an invite
+    /// 2. Bob joins via the invite
+    /// 3. Alice adds a task
+    /// 4. Bob should see Alice's task (after sync propagates)
+    #[tokio::test]
+    async fn test_two_engines_sync_tasks_via_invite() {
+        use std::time::Duration;
+
+        let _ = tracing_subscriber::fmt::try_init();
+
+        // Create Alice's engine
+        let temp_dir_alice = TempDir::new().unwrap();
+        let mut alice = SyncEngine::new(temp_dir_alice.path()).await.unwrap();
+        alice.init_identity().unwrap(); // Required for signing sync messages
+
+        // Create Bob's engine
+        let temp_dir_bob = TempDir::new().unwrap();
+        let mut bob = SyncEngine::new(temp_dir_bob.path()).await.unwrap();
+        bob.init_identity().unwrap(); // Required for signing sync messages
+
+        // CRITICAL: Start networking on BOTH engines and exchange addresses BEFORE
+        // subscribing to any gossip topics. This matches the pattern used in the
+        // working p2p_integration tests. The iroh-gossip layer seems to require
+        // peer addresses to be in the static discovery BEFORE topic subscription
+        // for message delivery to work properly.
+        alice.start_networking().await.unwrap();
+        bob.start_networking().await.unwrap();
+
+        // Exchange peer addresses bidirectionally
+        if let (Some(alice_addr), Some(bob_addr)) = (alice.endpoint_addr(), bob.endpoint_addr()) {
+            debug!("Adding bidirectional peer addresses before gossip subscription");
+            alice.add_peer_addr(bob_addr);
+            bob.add_peer_addr(alice_addr);
+        }
+
+        // Small delay to let discovery propagate
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // CRITICAL: Subscribe to events BEFORE any sync operations start.
+        // This avoids the race condition where PeerConnected events fire
+        // before we start listening for them.
+        let mut alice_events = alice.subscribe_events();
+        let mut bob_events = bob.subscribe_events();
+
+        // Alice creates a realm
+        let realm_id = alice.create_realm("Shared Tasks").await.unwrap();
+
+        // Alice generates an invite (this should auto-start sync!)
+        let invite_str = alice.create_invite(&realm_id).await.unwrap();
+        debug!("Alice generated invite: {}...", &invite_str[..50.min(invite_str.len())]);
+
+        // Verify Alice is now syncing
+        assert!(
+            alice.is_realm_syncing(&realm_id),
+            "Alice should be syncing after generating invite"
+        );
+
+        // Bob joins via invite
+        let joined_realm_id = bob.join_realm(&invite_str).await.unwrap();
+        assert_eq!(joined_realm_id, realm_id, "Bob should join the same realm");
+
+        // Verify Bob is syncing
+        assert!(
+            bob.is_realm_syncing(&realm_id),
+            "Bob should be syncing after joining"
+        );
+
+        // CRITICAL: Wait for peers to connect before sending any messages.
+        // The gossip mesh takes time to establish, and messages sent before
+        // neighbors are connected won't be delivered.
+        debug!("Waiting for peer connections to establish...");
+
+        // Helper to wait for PeerConnected event on an existing subscription
+        async fn wait_for_peer_connected(
+            events: &mut broadcast::Receiver<SyncEvent>,
+            target_realm: &RealmId,
+            timeout_duration: Duration,
+        ) -> bool {
+            let start = std::time::Instant::now();
+            loop {
+                let remaining = timeout_duration.saturating_sub(start.elapsed());
+                if remaining.is_zero() {
+                    return false;
+                }
+                match tokio::time::timeout(remaining, events.recv()).await {
+                    Ok(Ok(SyncEvent::PeerConnected { realm_id, peer_id })) => {
+                        if &realm_id == target_realm {
+                            debug!(%realm_id, %peer_id, "Peer connected event received");
+                            return true;
+                        }
+                    }
+                    Ok(Ok(_)) => continue, // Other event
+                    Ok(Err(broadcast::error::RecvError::Lagged(_))) => continue, // Lagged, keep trying
+                    Ok(Err(_)) => return false, // Channel closed
+                    Err(_) => return false, // Timeout
+                }
+            }
+        }
+
+        // Wait for connections using the pre-made subscriptions
+        let alice_connected = wait_for_peer_connected(&mut alice_events, &realm_id, Duration::from_secs(10)).await;
+        let bob_connected = wait_for_peer_connected(&mut bob_events, &realm_id, Duration::from_secs(10)).await;
+
+        debug!(
+            alice_connected,
+            bob_connected,
+            "Peer connection status"
+        );
+
+        // At least one side should see a connection (typically Bob sees Alice first since he used Alice as bootstrap)
+        assert!(
+            alice_connected || bob_connected,
+            "At least one peer should have connected within 10 seconds"
+        );
+
+        // Give a brief moment for any additional connection setup
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        // Alice adds a task (this should broadcast via sync)
+        debug!("Alice adding task...");
+        let _task_id = alice.add_task(&realm_id, "Alice's task").await.unwrap();
+        debug!("Alice added task, waiting for sync to Bob...");
+
+        // Wait for sync to propagate to Bob (up to 5 seconds)
+        let mut synced = false;
+        for i in 0..50 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            // Process any pending sync messages
+            let processed = bob.process_pending_sync();
+            if processed > 0 {
+                debug!("Bob processed {} sync messages at iteration {}", processed, i);
+            }
+            let bob_tasks = bob.list_tasks(&realm_id).unwrap();
+            if !bob_tasks.is_empty() {
+                debug!("Bob received task after {}ms", (i + 1) * 100);
+                assert_eq!(bob_tasks[0].title, "Alice's task");
+                synced = true;
+                break;
+            }
+        }
+
+        assert!(synced, "Bob should have received Alice's task within 5 seconds");
+
+        // Cleanup
+        alice.shutdown().await.unwrap();
+        bob.shutdown().await.unwrap();
     }
 }

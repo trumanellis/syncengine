@@ -65,7 +65,7 @@ struct Args {
     #[arg(short, long)]
     data_dir: Option<PathBuf>,
 
-    /// Instance name (creates data dir: syncengine-<name>)
+    /// Instance name (creates data dir: instance-<name>)
     #[arg(short, long)]
     name: Option<String>,
 
@@ -89,7 +89,7 @@ fn main() {
     } else if let Some(ref name) = args.name {
         let base = dirs::data_dir()
             .unwrap_or_else(|| PathBuf::from("."))
-            .join(format!("syncengine-{}", name));
+            .join(format!("instance-{}", name));
         (base, name.clone())
     } else if let Some(instance) = args.instance {
         let base = dirs::data_dir()
@@ -97,7 +97,7 @@ fn main() {
         if instance == 1 {
             (base.join("syncengine"), format!("Instance {}", instance))
         } else {
-            (base.join(format!("syncengine-{}", instance)), format!("Instance {}", instance))
+            (base.join(format!("instance-{}", instance)), format!("Instance {}", instance))
         }
     } else {
         let base = dirs::data_dir()

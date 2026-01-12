@@ -1,12 +1,13 @@
 #!/bin/bash
 # Quick cleanup script for Synchronicity Engine
-# Usage: ./scripts/clean.sh [db|build|all]
+# Usage: ./scripts/clean.sh [db|instances|build|all]
 #
 # Commands:
-#   db      Reset database (backup + delete)
-#   build   Clean build artifacts
-#   all     Reset everything (db + build)
-#   (none)  Kill stuck processes only
+#   db         Reset main database (backup + delete)
+#   instances  Delete all test instance data (instance-*, syncengine-*)
+#   build      Clean build artifacts
+#   all        Reset everything (db + instances + build)
+#   (none)     Kill stuck processes only
 
 set -e
 
@@ -16,15 +17,16 @@ YELLOW='\033[1;33m'
 CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 
-# Determine data directory
-if [ -d "$HOME/Library/Application Support/syncengine" ]; then
-    DATA_DIR="$HOME/Library/Application Support/syncengine"
-elif [ -d "$HOME/.local/share/syncengine" ]; then
-    DATA_DIR="$HOME/.local/share/syncengine"
+# Determine base data directory
+if [ -d "$HOME/Library/Application Support" ]; then
+    BASE_DIR="$HOME/Library/Application Support"
+elif [ -d "$HOME/.local/share" ]; then
+    BASE_DIR="$HOME/.local/share"
 else
-    DATA_DIR=""
+    BASE_DIR=""
 fi
 
+DATA_DIR="$BASE_DIR/syncengine"
 DB_FILE="$DATA_DIR/syncengine.redb"
 
 kill_processes() {
@@ -38,7 +40,7 @@ kill_processes() {
 }
 
 reset_db() {
-    if [ -z "$DATA_DIR" ]; then
+    if [ -z "$BASE_DIR" ]; then
         echo -e "${YELLOW}Data directory not found. Skipping database reset.${NC}"
         return
     fi
@@ -51,7 +53,43 @@ reset_db() {
         echo -e "${GREEN}Database backed up to: ${BACKUP_FILE}${NC}"
         echo -e "${GREEN}Fresh database will be created on next launch.${NC}"
     else
-        echo -e "${YELLOW}No database file found. Nothing to reset.${NC}"
+        echo -e "${YELLOW}No database file found at $DB_FILE${NC}"
+    fi
+}
+
+reset_instances() {
+    if [ -z "$BASE_DIR" ]; then
+        echo -e "${YELLOW}Data directory not found. Skipping instance reset.${NC}"
+        return
+    fi
+
+    echo -e "${CYAN}Cleaning test instance directories...${NC}"
+
+    # Count what we'll delete
+    local count=0
+
+    # New style: instance-*
+    for dir in "$BASE_DIR"/instance-*; do
+        if [ -d "$dir" ]; then
+            echo -e "  ${YELLOW}Removing: $(basename "$dir")${NC}"
+            rm -rf "$dir"
+            ((count++)) || true
+        fi
+    done
+
+    # Old style: syncengine-* (but not the main syncengine dir)
+    for dir in "$BASE_DIR"/syncengine-*; do
+        if [ -d "$dir" ]; then
+            echo -e "  ${YELLOW}Removing: $(basename "$dir")${NC}"
+            rm -rf "$dir"
+            ((count++)) || true
+        fi
+    done
+
+    if [ $count -eq 0 ]; then
+        echo -e "${YELLOW}No instance directories found.${NC}"
+    else
+        echo -e "${GREEN}Removed $count instance directory(s).${NC}"
     fi
 }
 
@@ -67,15 +105,17 @@ show_usage() {
     echo "Usage: ./scripts/clean.sh [command]"
     echo ""
     echo "Commands:"
-    echo "  (none)    Kill stuck processes only"
-    echo "  db        Reset database (backup + delete)"
-    echo "  build     Clean build artifacts (cargo clean)"
-    echo "  all       Reset everything (processes + db + build)"
+    echo "  (none)     Kill stuck processes only"
+    echo "  db         Reset main database (backup + delete)"
+    echo "  instances  Delete all test instance data (instance-*, syncengine-*)"
+    echo "  build      Clean build artifacts (cargo clean)"
+    echo "  all        Reset everything (processes + db + instances + build)"
     echo ""
     echo "Examples:"
-    echo "  ./scripts/clean.sh          # Just kill stuck processes"
-    echo "  ./scripts/clean.sh db       # Reset database"
-    echo "  ./scripts/clean.sh all      # Full reset"
+    echo "  ./scripts/clean.sh              # Just kill stuck processes"
+    echo "  ./scripts/clean.sh instances    # Clean test instances (love, joy, etc.)"
+    echo "  ./scripts/clean.sh db           # Reset main database"
+    echo "  ./scripts/clean.sh all          # Full reset"
 }
 
 case "${1:-}" in
@@ -83,12 +123,17 @@ case "${1:-}" in
         kill_processes
         reset_db
         ;;
+    instances)
+        kill_processes
+        reset_instances
+        ;;
     build)
         clean_build
         ;;
     all)
         kill_processes
         reset_db
+        reset_instances
         clean_build
         ;;
     -h|--help|help)
@@ -109,4 +154,4 @@ echo ""
 echo -e "${GREEN}=== Cleanup complete ===${NC}"
 echo ""
 echo "To launch the app:"
-echo "  cargo run --bin syncengine-desktop"
+echo "  ./se love joy    # Two test instances"

@@ -85,8 +85,13 @@ pub fn Field() -> Element {
                                 // Refresh tasks if this is the selected realm
                                 if selected_realm() == Some(realm_id.clone()) {
                                     let shared = engine();
-                                    let guard = shared.read().await;
-                                    if let Some(ref eng) = *guard {
+                                    let mut guard = shared.write().await;
+                                    if let Some(ref mut eng) = *guard {
+                                        // Process any pending sync messages first!
+                                        // This applies received gossip messages to the document
+                                        let _ = eng.process_pending_sync();
+
+                                        // Now read the updated task list
                                         if let Ok(task_list) = eng.list_tasks(&realm_id) {
                                             tasks.set(task_list);
                                         }
@@ -109,6 +114,11 @@ pub fn Field() -> Element {
             let mut guard = shared.write().await;
             if let Some(ref mut eng) = *guard {
                 let _ = eng.open_realm(&realm_id).await;
+
+                // Process any pending sync messages BEFORE reading tasks
+                // This handles messages that arrived when no realm was selected
+                let _ = eng.process_pending_sync();
+
                 match eng.list_tasks(&realm_id) {
                     Ok(task_list) => {
                         tasks.set(task_list);

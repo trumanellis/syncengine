@@ -4,6 +4,7 @@
 
 use std::sync::Arc;
 
+use iroh::discovery::static_provider::StaticProvider;
 use iroh::protocol::Router;
 use iroh::{Endpoint, EndpointAddr, PublicKey, SecretKey};
 use iroh_gossip::net::{Gossip, GOSSIP_ALPN};
@@ -24,7 +25,115 @@ pub struct GossipMessage {
     pub content: Vec<u8>,
 }
 
-/// Handle to a subscribed gossip topic
+/// Event from a gossip topic (message or neighbor change)
+#[derive(Debug)]
+pub enum TopicEvent {
+    /// A message was received from a peer
+    Message(GossipMessage),
+    /// A neighbor joined the topic
+    NeighborUp(PublicKey),
+    /// A neighbor left the topic
+    NeighborDown(PublicKey),
+}
+
+/// Handle to a subscribed gossip topic for sending messages
+///
+/// The sender can be cloned and shared across threads.
+/// The receiver is returned separately by subscribe() for direct polling.
+#[derive(Clone)]
+pub struct TopicSender {
+    sender: Arc<Mutex<iroh_gossip::api::GossipSender>>,
+    topic_id: TopicId,
+}
+
+/// Handle to receive messages from a gossip topic
+///
+/// This should be polled directly by a single task - not shared via Arc<Mutex<...>>.
+pub struct TopicReceiver {
+    receiver: iroh_gossip::api::GossipReceiver,
+    topic_id: TopicId,
+}
+
+impl TopicSender {
+    /// Broadcast a message to all peers on this topic
+    pub async fn broadcast(&self, msg: impl Into<Vec<u8>>) -> SyncResult<()> {
+        let data: Vec<u8> = msg.into();
+        debug!(topic = ?self.topic_id, len = data.len(), "Broadcasting message");
+
+        self.sender
+            .lock()
+            .await
+            .broadcast(data.into())
+            .await
+            .map_err(|e| SyncError::Gossip(format!("Failed to broadcast: {}", e)))?;
+
+        Ok(())
+    }
+
+    /// Get the topic ID
+    pub fn topic_id(&self) -> TopicId {
+        self.topic_id
+    }
+}
+
+impl TopicReceiver {
+    /// Receive the next event from the topic (message or neighbor change)
+    ///
+    /// This should be called from a single task that owns the receiver.
+    /// Returns None if the topic subscription is closed.
+    pub async fn recv_event(&mut self) -> Option<TopicEvent> {
+        use iroh_gossip::api::Event;
+        use n0_future::StreamExt;
+
+        loop {
+            match self.receiver.try_next().await {
+                Ok(Some(event)) => {
+                    match event {
+                        Event::Received(msg) => {
+                            debug!(topic = ?self.topic_id, from = ?msg.delivered_from, "Received message");
+                            return Some(TopicEvent::Message(GossipMessage {
+                                from: msg.delivered_from,
+                                content: msg.content.to_vec(),
+                            }));
+                        }
+                        Event::NeighborUp(peer) => {
+                            info!(topic = ?self.topic_id, ?peer, "Neighbor joined");
+                            return Some(TopicEvent::NeighborUp(peer));
+                        }
+                        Event::NeighborDown(peer) => {
+                            info!(topic = ?self.topic_id, ?peer, "Neighbor left");
+                            return Some(TopicEvent::NeighborDown(peer));
+                        }
+                        Event::Lagged => {
+                            warn!(topic = ?self.topic_id, "Lagged behind on topic");
+                            // Continue waiting for actual events
+                        }
+                    }
+                }
+                Ok(None) => {
+                    debug!(topic = ?self.topic_id, "Topic subscription closed");
+                    return None;
+                }
+                Err(e) => {
+                    warn!(topic = ?self.topic_id, error = ?e, "Error receiving from topic");
+                    return None;
+                }
+            }
+        }
+    }
+
+    /// Check if we have joined the topic swarm
+    pub fn is_joined(&self) -> bool {
+        self.receiver.is_joined()
+    }
+
+    /// Get the topic ID
+    pub fn topic_id(&self) -> TopicId {
+        self.topic_id
+    }
+}
+
+/// Legacy handle to a subscribed gossip topic (for compatibility)
 ///
 /// Allows sending and receiving messages on a specific topic.
 pub struct TopicHandle {
@@ -53,6 +162,25 @@ impl TopicHandle {
     ///
     /// Returns None if the topic subscription is closed.
     pub async fn recv(&self) -> Option<GossipMessage> {
+        loop {
+            match self.recv_event().await {
+                Some(TopicEvent::Message(msg)) => return Some(msg),
+                Some(TopicEvent::NeighborUp(_) | TopicEvent::NeighborDown(_)) => {
+                    // Skip neighbor events, continue waiting for messages
+                    continue;
+                }
+                None => return None,
+            }
+        }
+    }
+
+    /// Receive the next event from the topic (message or neighbor change)
+    ///
+    /// Returns all events including NeighborUp/NeighborDown, not just messages.
+    /// This is useful for listeners that need to track peer connections.
+    ///
+    /// Returns None if the topic subscription is closed.
+    pub async fn recv_event(&self) -> Option<TopicEvent> {
         use iroh_gossip::api::Event;
         use n0_future::StreamExt;
 
@@ -64,22 +192,22 @@ impl TopicHandle {
                     match event {
                         Event::Received(msg) => {
                             debug!(topic = ?self.topic_id, from = ?msg.delivered_from, "Received message");
-                            return Some(GossipMessage {
+                            return Some(TopicEvent::Message(GossipMessage {
                                 from: msg.delivered_from,
                                 content: msg.content.to_vec(),
-                            });
+                            }));
                         }
                         Event::NeighborUp(peer) => {
                             info!(topic = ?self.topic_id, ?peer, "Neighbor joined");
-                            // Continue waiting for actual messages
+                            return Some(TopicEvent::NeighborUp(peer));
                         }
                         Event::NeighborDown(peer) => {
                             info!(topic = ?self.topic_id, ?peer, "Neighbor left");
-                            // Continue waiting for actual messages
+                            return Some(TopicEvent::NeighborDown(peer));
                         }
                         Event::Lagged => {
                             warn!(topic = ?self.topic_id, "Lagged behind on topic");
-                            // Continue waiting for actual messages
+                            // Continue waiting for actual events
                         }
                     }
                 }
@@ -100,6 +228,58 @@ impl TopicHandle {
         self.receiver.lock().await.is_joined()
     }
 
+    /// Wait for a neighbor to join the topic
+    ///
+    /// This blocks until a NeighborUp event is received or the timeout expires.
+    /// Returns true if a neighbor was found, false if timeout occurred.
+    /// Any messages received while waiting are discarded (they should be
+    /// handled by the main listener which runs in parallel).
+    pub async fn wait_for_neighbor(&self, timeout: std::time::Duration) -> bool {
+        use iroh_gossip::api::Event;
+        use n0_future::StreamExt;
+
+        let result = tokio::time::timeout(timeout, async {
+            let mut receiver = self.receiver.lock().await;
+            loop {
+                match receiver.try_next().await {
+                    Ok(Some(event)) => {
+                        match event {
+                            Event::NeighborUp(peer) => {
+                                info!(topic = ?self.topic_id, ?peer, "Neighbor found while waiting");
+                                return true;
+                            }
+                            Event::Received(_) => {
+                                // Message received while waiting - continue waiting
+                                // The main listener will handle messages
+                                debug!(topic = ?self.topic_id, "Message received while waiting for neighbor");
+                            }
+                            Event::NeighborDown(_) | Event::Lagged => {
+                                // Continue waiting
+                            }
+                        }
+                    }
+                    Ok(None) => {
+                        debug!(topic = ?self.topic_id, "Topic closed while waiting for neighbor");
+                        return false;
+                    }
+                    Err(e) => {
+                        warn!(topic = ?self.topic_id, error = ?e, "Error while waiting for neighbor");
+                        return false;
+                    }
+                }
+            }
+        })
+        .await;
+
+        match result {
+            Ok(found) => found,
+            Err(_) => {
+                debug!(topic = ?self.topic_id, "Timeout waiting for neighbor");
+                false
+            }
+        }
+    }
+
     /// Get the topic ID this handle is subscribed to
     pub fn topic_id(&self) -> TopicId {
         self.topic_id
@@ -115,6 +295,8 @@ pub struct GossipSync {
     endpoint: Endpoint,
     gossip: Gossip,
     router: Router,
+    /// Static discovery provider for adding out-of-band peer addresses
+    static_provider: StaticProvider,
     #[allow(dead_code)]
     secret_key: SecretKey,
 }
@@ -134,10 +316,14 @@ impl GossipSync {
     pub async fn with_secret_key(secret_key: Option<SecretKey>) -> SyncResult<Self> {
         let secret_key = secret_key.unwrap_or_else(|| SecretKey::generate(&mut rand::rng()));
 
-        // Build the endpoint
+        // Create static provider for out-of-band peer addresses
+        let static_provider = StaticProvider::new();
+
+        // Build the endpoint with static discovery
         let endpoint = Endpoint::builder()
             .secret_key(secret_key.clone())
             .alpns(vec![GOSSIP_ALPN.to_vec()])
+            .discovery(static_provider.clone())
             .bind()
             .await
             .map_err(|e| SyncError::Network(format!("Failed to bind endpoint: {}", e)))?;
@@ -145,9 +331,14 @@ impl GossipSync {
         let endpoint_id = endpoint.id();
         info!(%endpoint_id, "Endpoint bound");
 
-        // Spawn gossip protocol handler
-        let gossip = Gossip::builder().spawn(endpoint.clone());
-        info!("Gossip spawned");
+        // Spawn gossip protocol handler with increased message size limit
+        // Default is 4KB, but Automerge documents + envelope overhead can exceed this.
+        // Use 1MB to support larger documents with many tasks.
+        const MAX_MESSAGE_SIZE: usize = 1024 * 1024; // 1MB
+        let gossip = Gossip::builder()
+            .max_message_size(MAX_MESSAGE_SIZE)
+            .spawn(endpoint.clone());
+        info!(max_message_size = MAX_MESSAGE_SIZE, "Gossip spawned");
 
         // Build router to accept incoming gossip connections
         let router = Router::builder(endpoint.clone())
@@ -159,6 +350,7 @@ impl GossipSync {
             endpoint,
             gossip,
             router,
+            static_provider,
             secret_key,
         })
     }
@@ -175,7 +367,59 @@ impl GossipSync {
         self.endpoint.id()
     }
 
-    /// Subscribe to a gossip topic
+    /// Add a peer's address to the static discovery provider
+    ///
+    /// This makes the peer's address known to iroh for faster connection
+    /// establishment, without relying on DNS-based discovery.
+    pub fn add_peer_addr(&self, endpoint_addr: EndpointAddr) {
+        info!(
+            peer = %endpoint_addr.id,
+            addrs = endpoint_addr.addrs.len(),
+            "Adding peer address to static discovery"
+        );
+        self.static_provider.add_endpoint_info(endpoint_addr);
+    }
+
+    /// Subscribe to a gossip topic (returns split sender/receiver)
+    ///
+    /// This is the preferred method for new code. The receiver should be polled
+    /// directly by a single task - not wrapped in Arc<Mutex<...>>.
+    ///
+    /// # Arguments
+    /// * `topic_id` - The topic to subscribe to (typically derived from a realm ID)
+    /// * `bootstrap_peers` - Initial peers to connect to (can be empty for first node)
+    pub async fn subscribe_split(
+        &self,
+        topic_id: TopicId,
+        bootstrap_peers: Vec<iroh::EndpointId>,
+    ) -> SyncResult<(TopicSender, TopicReceiver)> {
+        info!(
+            ?topic_id,
+            peer_count = bootstrap_peers.len(),
+            "Subscribing to topic (split)"
+        );
+
+        let gossip_topic = self
+            .gossip
+            .subscribe(topic_id, bootstrap_peers)
+            .await
+            .map_err(|e| SyncError::Gossip(format!("Failed to subscribe: {}", e)))?;
+
+        let (sender, receiver) = gossip_topic.split();
+
+        Ok((
+            TopicSender {
+                sender: Arc::new(Mutex::new(sender)),
+                topic_id,
+            },
+            TopicReceiver {
+                receiver,
+                topic_id,
+            },
+        ))
+    }
+
+    /// Subscribe to a gossip topic (legacy API with Arc<Mutex<...>> wrapped receiver)
     ///
     /// # Arguments
     /// * `topic_id` - The topic to subscribe to (typically derived from a realm ID)
@@ -259,29 +503,73 @@ impl GossipSync {
         let topic_id = invite.topic_id();
         info!(?topic_id, peers = invite.bootstrap_peers.len(), "Joining via invite");
 
-        // Convert bootstrap peers from NodeAddrBytes to EndpointId
-        // Note: We extract just the endpoint IDs for gossip subscription.
-        // The iroh discovery service will handle finding the actual addresses
-        // of these peers. In the future, we could use a StaticProvider to
-        // pre-populate known addresses for faster connection.
+        // Convert bootstrap peers from NodeAddrBytes to EndpointAddr
+        // and add them to the static discovery provider for immediate connection
         let mut bootstrap_ids = Vec::with_capacity(invite.bootstrap_peers.len());
 
         for peer_bytes in &invite.bootstrap_peers {
-            // Convert to EndpointAddr to extract the ID
+            // Convert to EndpointAddr
             let endpoint_addr = peer_bytes.to_endpoint_addr()?;
-            bootstrap_ids.push(endpoint_addr.id);
 
             debug!(
                 peer = %endpoint_addr.id,
                 relay = ?peer_bytes.relay_url,
                 addrs = peer_bytes.direct_addresses.len(),
-                "Adding bootstrap peer"
+                "Adding bootstrap peer to static discovery"
             );
+
+            // Add the full address to static discovery for immediate connection
+            // This avoids relying on slow DNS-based discovery
+            self.add_peer_addr(endpoint_addr.clone());
+
+            bootstrap_ids.push(endpoint_addr.id);
         }
 
         // Subscribe to the topic with bootstrap peers
-        // Gossip will use iroh's discovery to find peer addresses
+        // Gossip can now immediately connect using the addresses we added
         self.subscribe(topic_id, bootstrap_ids).await
+    }
+
+    /// Join a gossip topic using an invite ticket (split version)
+    ///
+    /// Returns a split (sender, receiver) pair. The receiver should be polled
+    /// directly by a single task, not wrapped in Arc<Mutex<...>>.
+    pub async fn join_via_invite_split(
+        &self,
+        invite: &InviteTicket,
+    ) -> SyncResult<(TopicSender, TopicReceiver)> {
+        // Check expiration
+        if invite.is_expired() {
+            return Err(SyncError::InvalidInvite("Invite has expired".to_string()));
+        }
+
+        let topic_id = invite.topic_id();
+        info!(?topic_id, peers = invite.bootstrap_peers.len(), "Joining via invite (split)");
+
+        // Convert bootstrap peers from NodeAddrBytes to EndpointAddr
+        // and add them to the static discovery provider for immediate connection
+        let mut bootstrap_ids = Vec::with_capacity(invite.bootstrap_peers.len());
+
+        for peer_bytes in &invite.bootstrap_peers {
+            // Convert to EndpointAddr
+            let endpoint_addr = peer_bytes.to_endpoint_addr()?;
+
+            debug!(
+                peer = %endpoint_addr.id,
+                relay = ?peer_bytes.relay_url,
+                addrs = peer_bytes.direct_addresses.len(),
+                "Adding bootstrap peer to static discovery"
+            );
+
+            // Add the full address to static discovery for immediate connection
+            // This avoids relying on slow DNS-based discovery
+            self.add_peer_addr(endpoint_addr.clone());
+
+            bootstrap_ids.push(endpoint_addr.id);
+        }
+
+        // Subscribe to the topic with bootstrap peers using split API
+        self.subscribe_split(topic_id, bootstrap_ids).await
     }
 
     /// Generate an invite ticket for a realm we're subscribed to
@@ -301,7 +589,7 @@ impl GossipSync {
     /// # Example
     ///
     /// ```ignore
-    /// let invite = gossip.generate_invite(&realm_id, realm_key)?;
+    /// let invite = gossip.generate_invite(&realm_id, realm_key, Some("My Realm"))?;
     /// let invite_string = invite.encode()?;
     /// // Share invite_string via QR code, link, etc.
     /// ```
@@ -309,6 +597,7 @@ impl GossipSync {
         &self,
         realm_id: &RealmId,
         realm_key: [u8; 32],
+        realm_name: Option<&str>,
     ) -> SyncResult<InviteTicket> {
         // Get our current endpoint address
         let our_addr = self.endpoint_addr();
@@ -325,7 +614,12 @@ impl GossipSync {
         );
 
         // Create the invite with us as the only bootstrap peer
-        let invite = InviteTicket::new(realm_id, realm_key, vec![our_node_addr]);
+        let mut invite = InviteTicket::new(realm_id, realm_key, vec![our_node_addr]);
+
+        // Include realm name if provided
+        if let Some(name) = realm_name {
+            invite = invite.with_name(name);
+        }
 
         Ok(invite)
     }
@@ -479,7 +773,7 @@ mod tests {
 
         // Generate an invite
         let invite = gossip
-            .generate_invite(&realm_id, realm_key)
+            .generate_invite(&realm_id, realm_key, None)
             .expect("Failed to generate invite");
 
         // Verify the invite contains our node as a bootstrap peer
@@ -556,7 +850,7 @@ mod tests {
 
         // Generate an invite from the host
         let invite = host
-            .generate_invite(&realm_id, realm_key)
+            .generate_invite(&realm_id, realm_key, Some("Test Realm"))
             .expect("Failed to generate invite");
 
         // Create a joining node
@@ -624,7 +918,7 @@ mod tests {
 
         // Generate an invite
         let invite = gossip
-            .generate_invite(&realm_id, realm_key)
+            .generate_invite(&realm_id, realm_key, Some("My Realm"))
             .expect("Failed to generate invite");
 
         // Encode and decode

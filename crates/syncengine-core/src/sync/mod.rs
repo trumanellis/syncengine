@@ -70,6 +70,6 @@ pub mod protocol;
 
 pub use envelope::{SyncEnvelope, ENVELOPE_VERSION};
 pub use events::{SyncEvent, SyncStatus};
-pub use gossip::{GossipMessage, GossipSync, TopicHandle};
+pub use gossip::{GossipMessage, GossipSync, TopicEvent, TopicHandle, TopicReceiver, TopicSender};
 pub use manager::SyncManager;
 pub use protocol::{SyncMessage, WireMessage};
