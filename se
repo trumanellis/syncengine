@@ -46,21 +46,43 @@ fi
 
 # Launch each instance
 PIDS=()
-FIRST=true
+TOTAL=$#
+INDEX=0
+
 for name in "$@"; do
-    # First instance on left, others on right
-    if [ "$FIRST" = true ]; then
-        POSITION="left"
-        FIRST=false
+    # Determine position based on total count and index
+    if [ "$TOTAL" -eq 1 ]; then
+        POSITION="maximized"
+    elif [ "$TOTAL" -eq 2 ]; then
+        if [ "$INDEX" -eq 0 ]; then
+            POSITION="left"
+        else
+            POSITION="right"
+        fi
+    elif [ "$TOTAL" -eq 3 ]; then
+        if [ "$INDEX" -eq 0 ]; then
+            POSITION="left"
+        elif [ "$INDEX" -eq 1 ]; then
+            POSITION="center"
+        else
+            POSITION="right"
+        fi
     else
-        POSITION="right"
+        # More than 3: just use left/right alternating (not ideal, but functional)
+        if [ $((INDEX % 2)) -eq 0 ]; then
+            POSITION="left"
+        else
+            POSITION="right"
+        fi
     fi
 
     echo -e "${CYAN}Launching instance: ${YELLOW}$name${NC} (${POSITION})"
 
-    # Launch in background with position
-    "$BINARY" --name "$name" --position "$POSITION" &
+    # Launch in background with position and total count
+    "$BINARY" --name "$name" --position "$POSITION" --total-windows "$TOTAL" &
     PIDS+=($!)
+
+    INDEX=$((INDEX + 1))
 
     # Small delay between launches to avoid race conditions
     sleep 0.5

@@ -59,7 +59,7 @@ pub use invite::{InviteTicket, NodeAddrBytes};
 pub use realm::RealmDoc;
 pub use storage::Storage;
 pub use sync::{
-    GossipMessage, GossipSync, SyncEnvelope, SyncEvent, SyncManager, SyncMessage, SyncStatus,
-    TopicHandle, WireMessage, ENVELOPE_VERSION,
+    GossipMessage, GossipSync, NetworkDebugInfo, SyncEnvelope, SyncEvent, SyncManager,
+    SyncMessage, SyncStatus, TopicHandle, WireMessage, ENVELOPE_VERSION,
 };
 pub use types::*;

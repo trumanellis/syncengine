@@ -3,7 +3,7 @@
 //! Where intentions manifest and synchronicities form.
 
 use dioxus::prelude::*;
-use syncengine_core::{RealmId, RealmInfo, SyncEvent, SyncStatus, Task};
+use syncengine_core::{NetworkDebugInfo, RealmId, RealmInfo, SyncEvent, Task};
 
 use crate::components::{InvitePanel, JoinRealmModal, NetworkResonance, NetworkState, RealmSelector, TaskList};
 use crate::context::{use_engine, use_engine_ready};
@@ -21,6 +21,7 @@ pub fn Field() -> Element {
     let mut tasks: Signal<Vec<Task>> = use_signal(Vec::new);
     let mut error: Signal<Option<String>> = use_signal(|| None);
     let mut network_state: Signal<NetworkState> = use_signal(NetworkState::default);
+    let mut network_debug: Signal<Option<NetworkDebugInfo>> = use_signal(|| None);
 
     // Invite UI state
     let mut show_join_modal: Signal<bool> = use_signal(|| false);
@@ -108,13 +109,14 @@ pub fn Field() -> Element {
                                 }
                             }
                             Ok(SyncEvent::PeerConnected { realm_id, .. } | SyncEvent::PeerDisconnected { realm_id, .. }) => {
-                                // Refresh sync status when peers connect/disconnect for selected realm
+                                // Refresh sync status and debug info when peers connect/disconnect for selected realm
                                 if selected_realm() == Some(realm_id.clone()) {
                                     let shared = engine();
                                     let guard = shared.read().await;
                                     if let Some(ref eng) = *guard {
                                         let status = eng.sync_status(&realm_id);
                                         network_state.set(NetworkState::from_status(status));
+                                        network_debug.set(Some(eng.network_debug_info(&realm_id)));
                                     }
                                 }
                             }
@@ -139,9 +141,10 @@ pub fn Field() -> Element {
                 // This handles messages that arrived when no realm was selected
                 let _ = eng.process_pending_sync();
 
-                // Update network status for this realm
+                // Update network status and debug info for this realm
                 let status = eng.sync_status(&realm_id);
                 network_state.set(NetworkState::from_status(status));
+                network_debug.set(Some(eng.network_debug_info(&realm_id)));
 
                 match eng.list_tasks(&realm_id) {
                     Ok(task_list) => {
@@ -324,7 +327,7 @@ pub fn Field() -> Element {
                     }
                 }
 
-                NetworkResonance { state: network_state() }
+                NetworkResonance { state: network_state(), debug_info: network_debug() }
             }
 
             // Error display

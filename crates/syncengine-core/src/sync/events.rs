@@ -25,6 +25,28 @@ use std::fmt;
 
 use crate::types::RealmId;
 
+/// Debug information about the network state for a realm.
+/// Used by UI to show detailed sync status in a debug dropdown.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct NetworkDebugInfo {
+    /// Our node's public key (hex string, first 8 chars for display)
+    pub node_id: String,
+    /// Full node ID (for copying)
+    pub node_id_full: String,
+    /// Current sync status
+    pub status: SyncStatus,
+    /// Number of bootstrap peers configured for reconnection
+    pub bootstrap_peer_count: usize,
+    /// Whether this realm is shared (P2P enabled)
+    pub is_shared: bool,
+    /// Whether sync is currently active (listener running)
+    pub sync_active: bool,
+    /// Last error message, if any
+    pub last_error: Option<String>,
+    /// List of connected peer IDs (short form)
+    pub connected_peers: Vec<String>,
+}
+
 /// Status of synchronization for a realm
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SyncStatus {

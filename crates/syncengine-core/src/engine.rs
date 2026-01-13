@@ -39,7 +39,7 @@ use crate::identity::{Did, HybridKeypair, HybridPublicKey};
 use crate::invite::{InviteTicket, NodeAddrBytes};
 use crate::realm::RealmDoc;
 use crate::storage::Storage;
-use crate::sync::{GossipSync, SyncEnvelope, SyncEvent, SyncMessage, SyncStatus, TopicEvent, TopicSender};
+use crate::sync::{GossipSync, NetworkDebugInfo, SyncEnvelope, SyncEvent, SyncMessage, SyncStatus, TopicEvent, TopicSender};
 use crate::types::{RealmId, RealmInfo, Task, TaskId};
 
 /// Internal state for an open realm
@@ -1181,6 +1181,66 @@ impl SyncEngine {
             .get(realm_id)
             .cloned()
             .unwrap_or(SyncStatus::Idle)
+    }
+
+    /// Get detailed network debug information for a realm.
+    ///
+    /// Returns information useful for debugging sync issues:
+    /// - Our node ID
+    /// - Current sync status with peer count
+    /// - Whether sync is active
+    /// - Bootstrap peer count
+    pub fn network_debug_info(&self, realm_id: &RealmId) -> NetworkDebugInfo {
+        // Get node ID from gossip if available
+        let (node_id, node_id_full) = if let Some(ref gossip) = self.gossip {
+            let pk = gossip.public_key();
+            let full = format!("{:?}", pk);
+            // Extract just the hex part, e.g., "PublicKey(abc...)" -> "abc..."
+            let short = full
+                .strip_prefix("PublicKey(")
+                .and_then(|s| s.strip_suffix(")"))
+                .map(|s| s.chars().take(8).collect::<String>())
+                .unwrap_or_else(|| "unknown".to_string());
+            (short, full)
+        } else {
+            ("offline".to_string(), "offline".to_string())
+        };
+
+        // Get sync status
+        let status = self.sync_status(realm_id);
+
+        // Get realm info for bootstrap peers
+        let (bootstrap_peer_count, is_shared) = self
+            .storage
+            .load_realm(realm_id)
+            .ok()
+            .flatten()
+            .map(|info| (info.bootstrap_peers.len(), info.is_shared))
+            .unwrap_or((0, false));
+
+        // Check if sync is active (we have a gossip and status is not Idle)
+        let sync_active = self.gossip.is_some() && !matches!(status, SyncStatus::Idle);
+
+        // Extract error if status is Error
+        let last_error = match &status {
+            SyncStatus::Error(msg) => Some(msg.clone()),
+            _ => None,
+        };
+
+        // Get connected peer IDs (currently we only have count, not IDs)
+        // TODO: Track actual peer IDs in sync_status for display
+        let connected_peers = Vec::new();
+
+        NetworkDebugInfo {
+            node_id,
+            node_id_full,
+            status,
+            bootstrap_peer_count,
+            is_shared,
+            sync_active,
+            last_error,
+            connected_peers,
+        }
     }
 
     /// Subscribe to sync events

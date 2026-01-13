@@ -327,6 +327,120 @@ body {
   font-size: var(--text-xs);
 }
 
+/* Network Resonance Container (for dropdown positioning) */
+.network-resonance-container {
+  position: relative;
+}
+
+.network-resonance {
+  cursor: pointer;
+  transition: opacity 0.2s ease;
+}
+
+.network-resonance:hover {
+  opacity: 0.8;
+}
+
+/* Dropdown Arrow */
+.dropdown-arrow {
+  margin-left: 0.5rem;
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  transition: transform 0.2s ease;
+}
+
+/* Network Debug Dropdown Panel */
+.network-debug-dropdown {
+  position: absolute;
+  top: calc(100% + 0.5rem);
+  right: 0;
+  width: 320px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1rem;
+  z-index: 1000;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+}
+
+.debug-title {
+  font-family: var(--font-title);
+  font-size: var(--text-base);
+  color: var(--gold);
+  margin: 0 0 0.75rem 0;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.debug-section {
+  margin-bottom: 0.75rem;
+}
+
+.debug-section:last-child {
+  margin-bottom: 0;
+}
+
+.debug-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.25rem 0;
+}
+
+.debug-row.full-id {
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.debug-label {
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+}
+
+.debug-value {
+  color: var(--text-primary);
+}
+
+.debug-value.mono {
+  font-family: var(--font-mono);
+  color: var(--cyan);
+}
+
+.debug-value.error {
+  color: var(--danger);
+}
+
+.debug-row.error {
+  background: rgba(255, 100, 100, 0.1);
+  padding: 0.25rem 0.5rem;
+  border-radius: 2px;
+  margin: 0.25rem 0;
+}
+
+.debug-copyable {
+  width: 100%;
+  margin-top: 0.25rem;
+  padding: 0.5rem;
+  background: var(--void);
+  border-radius: 2px;
+  overflow-x: auto;
+}
+
+.debug-code {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--cyan);
+  word-break: break-all;
+}
+
+.debug-no-info {
+  color: var(--text-secondary);
+  font-style: italic;
+  margin: 0;
+}
+
 /* === Buttons === */
 .btn-primary {
   padding: 0.75rem 2rem;

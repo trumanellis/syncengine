@@ -12,9 +12,11 @@
 //! | Syncing(0) | "field listening" | Connected but no peers yet |
 //! | Syncing(1+) | "field resonating • N souls" | Actively syncing with peers |
 //! | Error | "dissonance" | Connection error |
+//!
+//! Clicking the indicator shows a debug dropdown with network details.
 
 use dioxus::prelude::*;
-use syncengine_core::SyncStatus;
+use syncengine_core::{NetworkDebugInfo, SyncStatus};
 
 /// Legacy field state enum for backwards compatibility.
 /// New code should use NetworkState with actual SyncStatus.
@@ -137,8 +139,13 @@ pub fn FieldStatus(status: FieldState) -> Element {
 /// - Sacred terminology describing connection state
 /// - Peer count when actively syncing
 /// - Activity pulse when data flows
+/// - Clickable dropdown with debug information
 #[component]
-pub fn NetworkResonance(state: NetworkState) -> Element {
+pub fn NetworkResonance(
+    state: NetworkState,
+    #[props(optional)] debug_info: Option<NetworkDebugInfo>,
+) -> Element {
+    let mut show_dropdown = use_signal(|| false);
     let dot_class = state.dot_class();
     let label_class = state.label_class();
     let label = state.label();
@@ -146,28 +153,89 @@ pub fn NetworkResonance(state: NetworkState) -> Element {
 
     rsx! {
         div {
-            class: "network-resonance",
-            "aria-live": "polite",
-            "aria-label": "Network status: {label}",
+            class: "network-resonance-container",
 
-            // Resonance orb with concentric rings for peer visualization
-            div { class: "resonance-orb",
-                // Outer glow ring (visible when resonating)
-                if state.is_resonating() {
-                    div { class: "resonance-ring outer" }
+            // Main clickable indicator
+            div {
+                class: "network-resonance",
+                "aria-live": "polite",
+                "aria-label": "Network status: {label}",
+                onclick: move |_| show_dropdown.set(!show_dropdown()),
+
+                // Resonance orb with concentric rings for peer visualization
+                div { class: "resonance-orb",
+                    // Outer glow ring (visible when resonating)
+                    if state.is_resonating() {
+                        div { class: "resonance-ring outer" }
+                    }
+
+                    // Middle ring (visible with 2+ peers)
+                    if peer_count.unwrap_or(0) >= 2 {
+                        div { class: "resonance-ring middle" }
+                    }
+
+                    // Core status dot
+                    span { class: "{dot_class}" }
                 }
 
-                // Middle ring (visible with 2+ peers)
-                if peer_count.unwrap_or(0) >= 2 {
-                    div { class: "resonance-ring middle" }
-                }
+                // Sacred status label
+                span { class: "{label_class}", "{label}" }
 
-                // Core status dot
-                span { class: "{dot_class}" }
+                // Dropdown arrow indicator
+                span { class: "dropdown-arrow", if show_dropdown() { "▲" } else { "▼" } }
             }
 
-            // Sacred status label
-            span { class: "{label_class}", "{label}" }
+            // Debug dropdown panel
+            if show_dropdown() {
+                div { class: "network-debug-dropdown",
+                    h4 { class: "debug-title", "Network Debug" }
+
+                    if let Some(ref info) = debug_info {
+                        div { class: "debug-section",
+                            div { class: "debug-row",
+                                span { class: "debug-label", "Node ID:" }
+                                span { class: "debug-value mono", "{info.node_id}" }
+                            }
+                            div { class: "debug-row",
+                                span { class: "debug-label", "Status:" }
+                                span { class: "debug-value", "{info.status}" }
+                            }
+                            div { class: "debug-row",
+                                span { class: "debug-label", "Shared:" }
+                                span { class: "debug-value", if info.is_shared { "Yes" } else { "No" } }
+                            }
+                            div { class: "debug-row",
+                                span { class: "debug-label", "Sync Active:" }
+                                span { class: "debug-value", if info.sync_active { "Yes" } else { "No" } }
+                            }
+                            div { class: "debug-row",
+                                span { class: "debug-label", "Bootstrap Peers:" }
+                                span { class: "debug-value", "{info.bootstrap_peer_count}" }
+                            }
+                            if let Some(ref err) = info.last_error {
+                                div { class: "debug-row error",
+                                    span { class: "debug-label", "Error:" }
+                                    span { class: "debug-value error", "{err}" }
+                                }
+                            }
+                        }
+
+                        // Full node ID for copying
+                        div { class: "debug-section",
+                            div { class: "debug-row full-id",
+                                span { class: "debug-label", "Full Node ID:" }
+                            }
+                            div { class: "debug-copyable",
+                                code { class: "debug-code", "{info.node_id_full}" }
+                            }
+                        }
+                    } else {
+                        div { class: "debug-section",
+                            p { class: "debug-no-info", "No realm selected" }
+                        }
+                    }
+                }
+            }
         }
     }
 }
