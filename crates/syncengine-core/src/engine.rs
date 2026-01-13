@@ -1100,6 +1100,75 @@ impl SyncEngine {
             debug!(%listener_realm_id, event_count, "Sync listener task ended");
         });
 
+        // Spawn periodic bootstrap reconnection task
+        // This handles the case where both peers start at the same time - the initial
+        // add_peer_addr calls fail because neither peer is ready yet. This task
+        // periodically re-tries the bootstrap peers until we connect.
+        if let Some(realm_info) = self.storage.load_realm(realm_id)? {
+            if !realm_info.bootstrap_peers.is_empty() {
+                let reconnect_realm_id = realm_id.clone();
+                let reconnect_gossip = gossip.clone();
+                let reconnect_sync_status = self.sync_status.clone();
+                let bootstrap_peers = realm_info.bootstrap_peers.clone();
+
+                tokio::spawn(async move {
+                    use std::time::Duration;
+
+                    let mut attempt = 0;
+                    const MAX_ATTEMPTS: u32 = 24; // 2 minutes of retries (5s * 24)
+                    const RETRY_INTERVAL: Duration = Duration::from_secs(5);
+
+                    loop {
+                        // Wait before retry (skip on first iteration to allow initial connect attempt)
+                        if attempt > 0 {
+                            tokio::time::sleep(RETRY_INTERVAL).await;
+                        }
+                        attempt += 1;
+
+                        // Check if we already have peers - if so, we're done
+                        let current_peer_count = {
+                            let status_map = reconnect_sync_status.lock().unwrap();
+                            match status_map.get(&reconnect_realm_id) {
+                                Some(SyncStatus::Syncing { peer_count }) => *peer_count,
+                                _ => 0,
+                            }
+                        };
+
+                        if current_peer_count > 0 {
+                            debug!(
+                                %reconnect_realm_id,
+                                peer_count = current_peer_count,
+                                "Bootstrap reconnection task: peers connected, stopping"
+                            );
+                            break;
+                        }
+
+                        if attempt > MAX_ATTEMPTS {
+                            debug!(
+                                %reconnect_realm_id,
+                                attempt,
+                                "Bootstrap reconnection task: max attempts reached, stopping"
+                            );
+                            break;
+                        }
+
+                        // Re-add all bootstrap peer addresses
+                        for peer_bytes in &bootstrap_peers {
+                            if let Ok(endpoint_addr) = peer_bytes.to_endpoint_addr() {
+                                debug!(
+                                    %reconnect_realm_id,
+                                    attempt,
+                                    peer = %endpoint_addr.id,
+                                    "Bootstrap reconnection: re-adding peer address"
+                                );
+                                reconnect_gossip.add_peer_addr(endpoint_addr);
+                            }
+                        }
+                    }
+                });
+            }
+        }
+
         // Update status to Syncing
         self.sync_status
             .lock()

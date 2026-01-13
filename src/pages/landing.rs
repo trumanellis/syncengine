@@ -1,16 +1,42 @@
 //! Landing page - Entry point to the Synchronicity Engine.
 //!
 //! "Enter the Field" - The gateway to collective intention.
+//!
+//! If the user already has realms (returning user), auto-redirects to Field.
 
 use dioxus::prelude::*;
 
 use crate::app::Route;
 use crate::components::{FieldState, FieldStatus};
+use crate::context::{use_engine, use_engine_ready};
 
 /// Landing page component.
+///
+/// Auto-redirects to Field if user already has realms (returning user).
 #[component]
 pub fn Landing() -> Element {
     let navigator = use_navigator();
+    let engine = use_engine();
+    let engine_ready = use_engine_ready();
+
+    // Auto-redirect returning users to the Field
+    use_effect(move || {
+        if engine_ready() {
+            spawn(async move {
+                let shared = engine();
+                let guard = shared.read().await;
+                if let Some(ref eng) = *guard {
+                    // Check if user has any realms (returning user)
+                    if let Ok(realms) = eng.list_realms().await {
+                        if !realms.is_empty() {
+                            tracing::info!("Returning user detected ({} realms), auto-navigating to Field", realms.len());
+                            navigator.push(Route::Field {});
+                        }
+                    }
+                }
+            });
+        }
+    });
 
     let enter_field = move |_| {
         navigator.push(Route::Field {});
