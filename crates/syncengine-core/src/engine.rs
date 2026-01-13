@@ -529,7 +529,12 @@ impl SyncEngine {
             state.doc.apply_sync_message(data)?;
         }
 
-        debug!(%realm_id, bytes = data.len(), is_full_doc, "Applied sync changes");
+        // Save the updated document to disk
+        // This ensures sync changes persist across app restarts
+        let doc_bytes = state.doc.save();
+        self.storage.save_document(realm_id, &doc_bytes)?;
+
+        debug!(%realm_id, bytes = data.len(), is_full_doc, saved_bytes = doc_bytes.len(), "Applied and saved sync changes");
         Ok(())
     }
 
@@ -2895,5 +2900,116 @@ mod tests {
         // Cleanup
         alice.shutdown().await.unwrap();
         bob.shutdown().await.unwrap();
+    }
+
+    /// Regression test for sync persistence bug
+    ///
+    /// Verifies that sync changes (from gossip messages) are saved to disk
+    /// and persist across engine restarts. This test simulates:
+    /// 1. Receiving a full document sync message
+    /// 2. Applying it to memory
+    /// 3. Restarting the engine
+    /// 4. Verifying the synced data persisted to disk
+    #[tokio::test]
+    async fn test_sync_changes_persist_across_restart() {
+        let temp_dir = TempDir::new().unwrap();
+        let data_dir = temp_dir.path();
+
+        // Phase 1: Create engine, create realm, simulate receiving sync data
+        let realm_id = {
+            let mut engine = SyncEngine::new(data_dir).await.unwrap();
+            engine.init_identity().unwrap();
+
+            // Create a realm
+            let realm_id = engine.create_realm("Test Realm").await.unwrap();
+
+            // Create a separate document with a task (simulating what we'd receive from a peer)
+            let mut remote_doc = RealmDoc::new();
+            let _ = remote_doc.add_task("Synced Task from Peer");
+
+            // Simulate receiving a full document sync (SyncResponse message)
+            let remote_doc_bytes = remote_doc.save();
+            let result = engine.apply_sync_changes(&realm_id, &remote_doc_bytes, true);
+            assert!(result.is_ok(), "Should apply sync changes successfully");
+
+            // Verify the task exists in memory
+            let tasks = engine.list_tasks(&realm_id).unwrap();
+            assert_eq!(tasks.len(), 1, "Should have 1 task in memory after sync");
+            assert_eq!(tasks[0].title, "Synced Task from Peer");
+
+            realm_id
+        }; // Engine drops here, releasing all resources
+
+        // Phase 2: Create new engine instance with same data directory
+        {
+            let mut engine2 = SyncEngine::new(data_dir).await.unwrap();
+            engine2.init_identity().unwrap();
+
+            // Open the realm (loads from disk)
+            engine2.open_realm(&realm_id).await.unwrap();
+
+            // Verify the synced task persisted to disk
+            let tasks = engine2.list_tasks(&realm_id).unwrap();
+            assert_eq!(
+                tasks.len(),
+                1,
+                "Should have 1 task after restart (loaded from disk)"
+            );
+            assert_eq!(
+                tasks[0].title, "Synced Task from Peer",
+                "Synced task should persist across restart"
+            );
+        }
+    }
+
+    /// Test that incremental sync changes also persist
+    #[tokio::test]
+    async fn test_incremental_sync_changes_persist() {
+        let temp_dir = TempDir::new().unwrap();
+        let data_dir = temp_dir.path();
+
+        let realm_id = {
+            let mut engine = SyncEngine::new(data_dir).await.unwrap();
+            engine.init_identity().unwrap();
+
+            // Create a realm with an initial task
+            let realm_id = engine.create_realm("Test Realm").await.unwrap();
+            engine.add_task(&realm_id, "Initial Task").await.unwrap();
+
+            // Get the current document state
+            let state = engine.realms.get_mut(&realm_id).unwrap();
+            let initial_doc_bytes = state.doc.save();
+
+            // Create a remote doc with the same initial state
+            let mut remote_doc = RealmDoc::load(&initial_doc_bytes).unwrap();
+            remote_doc.add_task("Synced Task").unwrap();
+
+            // Generate incremental changes using the public API
+            let changes = remote_doc.generate_sync_message();
+
+            // Apply incremental sync changes
+            let result = engine.apply_sync_changes(&realm_id, &changes, false);
+            assert!(result.is_ok(), "Should apply incremental changes");
+
+            // Verify both tasks exist in memory
+            let tasks = engine.list_tasks(&realm_id).unwrap();
+            assert_eq!(tasks.len(), 2, "Should have 2 tasks after incremental sync");
+
+            realm_id
+        };
+
+        // Restart and verify
+        {
+            let mut engine2 = SyncEngine::new(data_dir).await.unwrap();
+            engine2.init_identity().unwrap();
+            engine2.open_realm(&realm_id).await.unwrap();
+
+            let tasks = engine2.list_tasks(&realm_id).unwrap();
+            assert_eq!(
+                tasks.len(),
+                2,
+                "Both tasks should persist after restart (incremental sync)"
+            );
+        }
     }
 }
