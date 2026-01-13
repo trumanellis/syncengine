@@ -281,9 +281,7 @@ mod tests {
             return false;
         }
         // Check marker and data prefix
-        signature[0] == 0x51
-            && signature[1] == 0x9E
-            && signature[2..] == data[..data.len().min(32)]
+        signature[0] == 0x51 && signature[1] == 0x9E && signature[2..] == data[..data.len().min(32)]
     }
 
     /// Mock verifier that always fails
@@ -317,7 +315,10 @@ mod tests {
 
         // Verify the message matches
         match opened {
-            SyncMessage::Changes { realm_id: rid, data } => {
+            SyncMessage::Changes {
+                realm_id: rid,
+                data,
+            } => {
                 assert_eq!(rid.0, realm_id.0);
                 assert_eq!(data, vec![1, 2, 3, 4, 5]);
             }
@@ -375,7 +376,10 @@ mod tests {
         // Could fail at signature or decryption depending on implementation
         match result {
             Err(SyncError::SignatureInvalid(_)) | Err(SyncError::DecryptionFailed(_)) => {}
-            Err(e) => panic!("Expected SignatureInvalid or DecryptionFailed, got: {:?}", e),
+            Err(e) => panic!(
+                "Expected SignatureInvalid or DecryptionFailed, got: {:?}",
+                e
+            ),
             Ok(_) => panic!("Expected error, but got Ok"),
         }
     }

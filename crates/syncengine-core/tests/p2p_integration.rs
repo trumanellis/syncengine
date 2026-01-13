@@ -2025,12 +2025,16 @@ async fn test_persistence_restart() {
         realm_id = realm_info.id.clone();
 
         // Save realm
-        storage.save_realm(&realm_info).expect("Failed to save realm");
+        storage
+            .save_realm(&realm_info)
+            .expect("Failed to save realm");
 
         // Create an Automerge document with tasks
         let mut doc = RealmDoc::new();
-        doc.add_task("Task 1 - persist me").expect("Failed to add task");
-        doc.add_task("Task 2 - also persist me").expect("Failed to add task");
+        doc.add_task("Task 1 - persist me")
+            .expect("Failed to add task");
+        doc.add_task("Task 2 - also persist me")
+            .expect("Failed to add task");
 
         // Save document
         let doc_bytes = doc.save();
@@ -2211,11 +2215,7 @@ async fn test_persistence_rejoin_gossip() {
         .unwrap()
         .expect("B should have document");
     let doc_b = RealmDoc::load(&doc_bytes_b).expect("load");
-    assert_eq!(
-        doc_b.list_tasks().unwrap().len(),
-        1,
-        "B should have 1 task"
-    );
+    assert_eq!(doc_b.list_tasks().unwrap().len(), 1, "B should have 1 task");
 
     // "Shutdown" Node B (drop everything including storage)
     drop(receiver_b);
@@ -2284,9 +2284,7 @@ async fn test_persistence_rejoin_gossip() {
         let tasks = doc_b_new.list_tasks().expect("list tasks");
         assert_eq!(tasks.len(), 2, "B should now have 2 tasks");
         assert!(
-            tasks
-                .iter()
-                .any(|t| t.title == "New task after B rejoined"),
+            tasks.iter().any(|t| t.title == "New task after B rejoined"),
             "New task should be present"
         );
     }
@@ -2502,7 +2500,9 @@ async fn test_persistence_concurrent_realms() {
             let realm_info = RealmInfo::new(format!("Concurrent Realm {}", i));
             let realm_id = realm_info.id.clone();
 
-            storage_clone.save_realm(&realm_info).expect("Failed to save");
+            storage_clone
+                .save_realm(&realm_info)
+                .expect("Failed to save");
 
             // Create and save document
             let mut doc = RealmDoc::new();
@@ -3362,14 +3362,14 @@ async fn test_did_format_validation() {
 
     // Test various invalid DID formats
     let invalid_dids = vec![
-        Did("".to_string()),                         // Empty
-        Did("did:sync:".to_string()),                // Missing z prefix
-        Did("did:sync:z".to_string()),               // No base58 content
-        Did("did:other:z123abc".to_string()),        // Wrong method
-        Did("did:sync:x123abc".to_string()),         // Wrong multibase prefix
-        Did("did:sync:z!!!invalid!!!".to_string()),  // Invalid base58 chars
-        Did("notadid".to_string()),                  // Not a DID at all
-        Did("did:sync:zO0Il".to_string()),           // Invalid base58 (O, 0, I, l)
+        Did("".to_string()),                        // Empty
+        Did("did:sync:".to_string()),               // Missing z prefix
+        Did("did:sync:z".to_string()),              // No base58 content
+        Did("did:other:z123abc".to_string()),       // Wrong method
+        Did("did:sync:x123abc".to_string()),        // Wrong multibase prefix
+        Did("did:sync:z!!!invalid!!!".to_string()), // Invalid base58 chars
+        Did("notadid".to_string()),                 // Not a DID at all
+        Did("did:sync:zO0Il".to_string()),          // Invalid base58 (O, 0, I, l)
     ];
 
     for invalid_did in &invalid_dids {
@@ -3379,7 +3379,10 @@ async fn test_did_format_validation() {
             invalid_did.0
         );
     }
-    println!("Correctly rejected {} invalid DID formats", invalid_dids.len());
+    println!(
+        "Correctly rejected {} invalid DID formats",
+        invalid_dids.len()
+    );
 
     // Test DID from specific public key hash
     let test_hash = [42u8; 32];
@@ -3446,7 +3449,10 @@ async fn test_envelope_replay_protection() {
 
     // First envelope is new
     let is_replay_1 = seen_nonces.contains(&envelope1.nonce);
-    assert!(!is_replay_1, "First envelope should not be detected as replay");
+    assert!(
+        !is_replay_1,
+        "First envelope should not be detected as replay"
+    );
     seen_nonces.insert(envelope1.nonce);
 
     // If same envelope received again, it's a replay
@@ -3478,10 +3484,7 @@ async fn test_envelope_replay_protection() {
         .as_millis() as u64;
 
     let is_too_old = current_time - envelope1.timestamp > max_age_ms;
-    assert!(
-        !is_too_old,
-        "Fresh envelope should not be rejected for age"
-    );
+    assert!(!is_too_old, "Fresh envelope should not be rejected for age");
 
     // Create artificially old envelope for testing
     let mut old_envelope = SyncEnvelope::new(&keypair, b"old message".to_vec());
@@ -3569,7 +3572,9 @@ async fn test_multiple_signed_messages() {
                         received_messages.len() + 1
                     );
                     // Decrypt and store
-                    let decrypted = crypto.decrypt(&envelope.payload).expect("Failed to decrypt");
+                    let decrypted = crypto
+                        .decrypt(&envelope.payload)
+                        .expect("Failed to decrypt");
                     received_messages.push(decrypted);
                 }
                 Ok(Some(_)) => continue,

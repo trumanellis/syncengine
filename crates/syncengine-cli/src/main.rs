@@ -35,14 +35,16 @@ use std::time::Duration;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use syncengine_core::{RealmId, SyncEngine, TaskId};
+use syncengine_core::{PeerStatus, RealmId, SyncEngine, TaskId};
 
 /// Synchronicity Engine - P2P Task Sharing
 #[derive(Parser)]
 #[command(name = "syncengine")]
 #[command(version = "0.1.0")]
 #[command(about = "Synchronicity Engine - P2P Task Sharing")]
-#[command(long_about = "A censorship-resistant, local-first, peer-to-peer task sharing application implementing a sacred gifting economy.")]
+#[command(
+    long_about = "A censorship-resistant, local-first, peer-to-peer task sharing application implementing a sacred gifting economy."
+)]
 struct Cli {
     /// Increase verbosity (-v, -vv, -vvv)
     #[arg(short, long, action = clap::ArgAction::Count)]
@@ -83,6 +85,12 @@ enum Commands {
     Invite {
         #[command(subcommand)]
         action: InviteAction,
+    },
+
+    /// Peer management
+    Peers {
+        #[command(subcommand)]
+        action: PeersAction,
     },
 
     /// Start serving/syncing as a persistent P2P node
@@ -176,6 +184,33 @@ enum InviteAction {
     },
 }
 
+#[derive(Subcommand)]
+enum PeersAction {
+    /// List all discovered peers
+    List {
+        /// Filter by status (online, offline, unknown)
+        #[arg(short, long)]
+        status: Option<String>,
+    },
+    /// Show status of specific peer
+    Status {
+        /// Peer endpoint ID (hex format)
+        endpoint_id: String,
+    },
+    /// Manually attempt to connect to a peer
+    Connect {
+        /// Peer endpoint ID (hex format)
+        endpoint_id: String,
+    },
+    /// Set local nickname for a peer
+    SetNickname {
+        /// Peer endpoint ID (hex format)
+        endpoint_id: String,
+        /// Nickname to set
+        nickname: String,
+    },
+}
+
 fn setup_logging(verbosity: u8) {
     let filter = match verbosity {
         0 => "warn",
@@ -208,6 +243,30 @@ fn parse_realm_id(s: &str) -> Result<RealmId> {
 /// Parse a task ID from ULID string
 fn parse_task_id(s: &str) -> Result<TaskId> {
     TaskId::from_string(s).map_err(|e| anyhow::anyhow!("Invalid task ID '{}': {}", s, e))
+}
+
+/// Parse a peer endpoint ID from hex string
+fn parse_endpoint_id(s: &str) -> Result<iroh::PublicKey> {
+    let bytes = hex::decode(s).map_err(|e| anyhow::anyhow!("Invalid hex format: {}", e))?;
+    if bytes.len() != 32 {
+        anyhow::bail!("Endpoint ID must be 32 bytes (got {})", bytes.len());
+    }
+    let mut array = [0u8; 32];
+    array.copy_from_slice(&bytes);
+    iroh::PublicKey::from_bytes(&array).map_err(|e| anyhow::anyhow!("Invalid public key: {}", e))
+}
+
+/// Parse peer status from string
+fn parse_peer_status(s: &str) -> Result<PeerStatus> {
+    match s.to_lowercase().as_str() {
+        "online" => Ok(PeerStatus::Online),
+        "offline" => Ok(PeerStatus::Offline),
+        "unknown" => Ok(PeerStatus::Unknown),
+        _ => anyhow::bail!(
+            "Invalid status '{}'. Must be one of: online, offline, unknown",
+            s
+        ),
+    }
 }
 
 #[tokio::main]
@@ -293,7 +352,7 @@ async fn main() -> Result<()> {
                     println!("  New DID: {}", did);
                 }
             }
-        }
+        },
 
         Commands::Realm { action } => match action {
             RealmAction::Create { name } => {
@@ -416,6 +475,112 @@ async fn main() -> Result<()> {
                 } else {
                     println!("Joined realm: {}", realm_id.to_base58());
                 }
+            }
+        },
+
+        Commands::Peers { action } => match action {
+            PeersAction::List { status } => {
+                let peers = if let Some(status_str) = status {
+                    let status = parse_peer_status(&status_str)?;
+                    engine.peer_registry().list_by_status(status)?
+                } else {
+                    engine.peer_registry().list_all()?
+                };
+
+                if peers.is_empty() {
+                    println!("No peers found.");
+                } else {
+                    println!("Discovered peers ({}):", peers.len());
+                    println!();
+                    for peer in peers {
+                        let endpoint_id_hex = hex::encode(peer.endpoint_id);
+                        let nickname = peer.nickname.unwrap_or_else(|| "(unnamed)".to_string());
+                        let status = peer.status;
+                        let realms = peer.shared_realms.len();
+
+                        println!(
+                            "  {} - {} [{}] ({} shared realms)",
+                            &endpoint_id_hex[..16],
+                            nickname,
+                            status,
+                            realms
+                        );
+                        println!("    Full ID: {}", endpoint_id_hex);
+                        if !peer.shared_realms.is_empty() {
+                            println!("    Shared realms:");
+                            for realm_id in &peer.shared_realms {
+                                println!("      - {}", realm_id.to_base58());
+                            }
+                        }
+                        println!();
+                    }
+                }
+            }
+
+            PeersAction::Status { endpoint_id } => {
+                let peer_id = parse_endpoint_id(&endpoint_id)?;
+                match engine.peer_registry().get(&peer_id)? {
+                    Some(peer) => {
+                        let nickname = peer.nickname.unwrap_or_else(|| "(unnamed)".to_string());
+                        println!("Peer: {}", nickname);
+                        println!("  Endpoint ID: {}", hex::encode(peer.endpoint_id));
+                        println!("  Status: {}", peer.status);
+                        println!("  Last seen: {} (Unix timestamp)", peer.last_seen);
+                        println!("  Shared realms: {}", peer.shared_realms.len());
+                        if !peer.shared_realms.is_empty() {
+                            for realm_id in &peer.shared_realms {
+                                println!("    - {}", realm_id.to_base58());
+                            }
+                        }
+                    }
+                    None => {
+                        anyhow::bail!("Peer not found: {}", endpoint_id);
+                    }
+                }
+            }
+
+            PeersAction::Connect { endpoint_id } => {
+                let peer_id = parse_endpoint_id(&endpoint_id)?;
+
+                // Ensure networking is started
+                if !engine.is_networking_active() {
+                    engine.start_networking().await?;
+                }
+
+                println!("Attempting to connect to peer {}...", &endpoint_id[..16]);
+
+                // Manually trigger reconnection for this specific peer
+                // We'll do this by temporarily getting the peer, updating to Unknown,
+                // and then calling the reconnection logic
+                if engine.peer_registry().get(&peer_id)?.is_some() {
+                    engine.attempt_reconnect_inactive_peers().await?;
+
+                    // Check the result
+                    if let Some(peer) = engine.peer_registry().get(&peer_id)? {
+                        match peer.status {
+                            PeerStatus::Online => println!("Successfully connected to peer."),
+                            PeerStatus::Offline => println!("Failed to connect to peer."),
+                            PeerStatus::Unknown => println!("Connection status unknown."),
+                        }
+                    }
+                } else {
+                    anyhow::bail!("Peer not found in registry: {}", endpoint_id);
+                }
+            }
+
+            PeersAction::SetNickname {
+                endpoint_id,
+                nickname,
+            } => {
+                let peer_id = parse_endpoint_id(&endpoint_id)?;
+                engine
+                    .peer_registry()
+                    .update_nickname(&peer_id, &nickname)?;
+                println!(
+                    "Set nickname '{}' for peer {}",
+                    nickname,
+                    &endpoint_id[..16]
+                );
             }
         },
 

@@ -26,6 +26,16 @@ pub struct Storage {
 }
 
 impl Storage {
+    /// Get a reference to the shared database handle
+    ///
+    /// This allows other components (like PeerRegistry) to share the same
+    /// database connection instead of opening multiple instances of the same file.
+    pub fn db_handle(&self) -> Arc<RwLock<Database>> {
+        self.db.clone()
+    }
+}
+
+impl Storage {
     /// Create a new storage instance at the given path.
     ///
     /// This will:
@@ -209,10 +219,7 @@ impl Storage {
     /// Save the node's identity keypair to storage.
     ///
     /// There is only one identity per node, stored with a fixed key.
-    pub fn save_identity(
-        &self,
-        keypair: &crate::identity::HybridKeypair,
-    ) -> Result<(), SyncError> {
+    pub fn save_identity(&self, keypair: &crate::identity::HybridKeypair) -> Result<(), SyncError> {
         let db = self.db.read();
         let write_txn = db.begin_write()?;
         {

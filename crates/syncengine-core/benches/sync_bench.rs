@@ -18,9 +18,7 @@ use syncengine_core::{RealmId, TaskId};
 
 fn bench_document_creation(c: &mut Criterion) {
     c.bench_function("create_empty_document", |b| {
-        b.iter(|| {
-            black_box(RealmDoc::new())
-        })
+        b.iter(|| black_box(RealmDoc::new()))
     });
 }
 
@@ -35,9 +33,7 @@ fn bench_add_task(c: &mut Criterion) {
     group.bench_function("to_empty_doc", |b| {
         b.iter_batched(
             || RealmDoc::new(),
-            |mut doc| {
-                black_box(doc.add_task("Test task").unwrap())
-            },
+            |mut doc| black_box(doc.add_task("Test task").unwrap()),
             criterion::BatchSize::SmallInput,
         )
     });
@@ -52,9 +48,7 @@ fn bench_add_task(c: &mut Criterion) {
                 }
                 doc
             },
-            |mut doc| {
-                black_box(doc.add_task("New task").unwrap())
-            },
+            |mut doc| black_box(doc.add_task("New task").unwrap()),
             criterion::BatchSize::SmallInput,
         )
     });
@@ -69,9 +63,7 @@ fn bench_add_task(c: &mut Criterion) {
                 }
                 doc
             },
-            |mut doc| {
-                black_box(doc.add_task("New task").unwrap())
-            },
+            |mut doc| black_box(doc.add_task("New task").unwrap()),
             criterion::BatchSize::SmallInput,
         )
     });
@@ -90,9 +82,7 @@ fn bench_toggle_task(c: &mut Criterion) {
                 let id = doc.add_task("Test").unwrap();
                 (doc, id)
             },
-            |(mut doc, id)| {
-                black_box(doc.toggle_task(&id).unwrap())
-            },
+            |(mut doc, id)| black_box(doc.toggle_task(&id).unwrap()),
             criterion::BatchSize::SmallInput,
         )
     });
@@ -108,9 +98,7 @@ fn bench_toggle_task(c: &mut Criterion) {
                 }
                 (doc, ids[50].clone())
             },
-            |(mut doc, id)| {
-                black_box(doc.toggle_task(&id).unwrap())
-            },
+            |(mut doc, id)| black_box(doc.toggle_task(&id).unwrap()),
             criterion::BatchSize::SmallInput,
         )
     });
@@ -126,9 +114,7 @@ fn bench_delete_task(c: &mut Criterion) {
                 let id = doc.add_task("To delete").unwrap();
                 (doc, id)
             },
-            |(mut doc, id)| {
-                black_box(doc.delete_task(&id).unwrap())
-            },
+            |(mut doc, id)| black_box(doc.delete_task(&id).unwrap()),
             criterion::BatchSize::SmallInput,
         )
     });
@@ -145,9 +131,7 @@ fn bench_get_task(c: &mut Criterion) {
         }
         let target_id = ids[5].clone();
 
-        b.iter(|| {
-            black_box(doc.get_task(&target_id).unwrap())
-        })
+        b.iter(|| black_box(doc.get_task(&target_id).unwrap()))
     });
 
     group.bench_function("from_100_tasks", |b| {
@@ -158,9 +142,7 @@ fn bench_get_task(c: &mut Criterion) {
         }
         let target_id = ids[50].clone();
 
-        b.iter(|| {
-            black_box(doc.get_task(&target_id).unwrap())
-        })
+        b.iter(|| black_box(doc.get_task(&target_id).unwrap()))
     });
 
     group.finish();
@@ -178,9 +160,7 @@ fn bench_list_tasks(c: &mut Criterion) {
                 doc.add_task(&format!("Task {}", i)).unwrap();
             }
 
-            b.iter(|| {
-                black_box(doc.list_tasks().unwrap())
-            })
+            b.iter(|| black_box(doc.list_tasks().unwrap()))
         });
     }
 
@@ -201,9 +181,7 @@ fn bench_save_document(c: &mut Criterion) {
                 doc.add_task(&format!("Task {}", i)).unwrap();
             }
 
-            b.iter(|| {
-                black_box(doc.save())
-            })
+            b.iter(|| black_box(doc.save()))
         });
     }
 
@@ -221,9 +199,7 @@ fn bench_load_document(c: &mut Criterion) {
             }
             let bytes = doc.save();
 
-            b.iter(|| {
-                black_box(RealmDoc::load(&bytes).unwrap())
-            })
+            b.iter(|| black_box(RealmDoc::load(&bytes).unwrap()))
         });
     }
 
@@ -264,9 +240,7 @@ fn bench_fork(c: &mut Criterion) {
                 doc.add_task(&format!("Task {}", i)).unwrap();
             }
 
-            b.iter(|| {
-                black_box(doc.fork())
-            })
+            b.iter(|| black_box(doc.fork()))
         });
     }
 
@@ -280,9 +254,7 @@ fn bench_merge(c: &mut Criterion) {
     group.bench_function("empty_into_empty", |b| {
         b.iter_batched(
             || (RealmDoc::new(), RealmDoc::new()),
-            |(mut doc1, mut doc2)| {
-                black_box(doc1.merge(&mut doc2).unwrap())
-            },
+            |(mut doc1, mut doc2)| black_box(doc1.merge(&mut doc2).unwrap()),
             criterion::BatchSize::SmallInput,
         )
     });
@@ -297,9 +269,7 @@ fn bench_merge(c: &mut Criterion) {
                 fork.add_task("New").unwrap();
                 (doc, fork)
             },
-            |(mut doc, mut fork)| {
-                black_box(doc.merge(&mut fork).unwrap())
-            },
+            |(mut doc, mut fork)| black_box(doc.merge(&mut fork).unwrap()),
             criterion::BatchSize::SmallInput,
         )
     });
@@ -316,9 +286,7 @@ fn bench_merge(c: &mut Criterion) {
                 }
                 (doc, fork)
             },
-            |(mut doc, mut fork)| {
-                black_box(doc.merge(&mut fork).unwrap())
-            },
+            |(mut doc, mut fork)| black_box(doc.merge(&mut fork).unwrap()),
             criterion::BatchSize::SmallInput,
         )
     });
@@ -336,9 +304,7 @@ fn bench_merge(c: &mut Criterion) {
                 }
                 (fork1, fork2)
             },
-            |(mut fork1, mut fork2)| {
-                black_box(fork1.merge(&mut fork2).unwrap())
-            },
+            |(mut fork1, mut fork2)| black_box(fork1.merge(&mut fork2).unwrap()),
             criterion::BatchSize::SmallInput,
         )
     });
@@ -363,9 +329,7 @@ fn bench_incremental_sync(c: &mut Criterion) {
                 }
                 doc
             },
-            |mut doc| {
-                black_box(doc.generate_sync_message())
-            },
+            |mut doc| black_box(doc.generate_sync_message()),
             criterion::BatchSize::SmallInput,
         )
     });
@@ -387,9 +351,7 @@ fn bench_incremental_sync(c: &mut Criterion) {
 
         b.iter_batched(
             || RealmDoc::load(&bytes).unwrap(),
-            |mut doc2| {
-                black_box(doc2.apply_sync_message(&sync_msg).unwrap())
-            },
+            |mut doc2| black_box(doc2.apply_sync_message(&sync_msg).unwrap()),
             criterion::BatchSize::SmallInput,
         )
     });
@@ -404,17 +366,9 @@ fn bench_incremental_sync(c: &mut Criterion) {
 fn bench_id_generation(c: &mut Criterion) {
     let mut group = c.benchmark_group("id_generation");
 
-    group.bench_function("task_id", |b| {
-        b.iter(|| {
-            black_box(TaskId::new())
-        })
-    });
+    group.bench_function("task_id", |b| b.iter(|| black_box(TaskId::new())));
 
-    group.bench_function("realm_id", |b| {
-        b.iter(|| {
-            black_box(RealmId::new())
-        })
-    });
+    group.bench_function("realm_id", |b| b.iter(|| black_box(RealmId::new())));
 
     group.finish();
 }
@@ -424,23 +378,17 @@ fn bench_id_serialization(c: &mut Criterion) {
 
     let task_id = TaskId::new();
     group.bench_function("task_id_to_string", |b| {
-        b.iter(|| {
-            black_box(task_id.to_string_repr())
-        })
+        b.iter(|| black_box(task_id.to_string_repr()))
     });
 
     let realm_id = RealmId::new();
     group.bench_function("realm_id_to_base58", |b| {
-        b.iter(|| {
-            black_box(realm_id.to_base58())
-        })
+        b.iter(|| black_box(realm_id.to_base58()))
     });
 
     let realm_str = realm_id.to_base58();
     group.bench_function("realm_id_from_base58", |b| {
-        b.iter(|| {
-            black_box(RealmId::from_base58(&realm_str).unwrap())
-        })
+        b.iter(|| black_box(RealmId::from_base58(&realm_str).unwrap()))
     });
 
     group.finish();
@@ -486,10 +434,7 @@ fn bench_two_node_sync(c: &mut Criterion) {
 // Criterion Groups
 // ============================================================================
 
-criterion_group!(
-    creation_benches,
-    bench_document_creation,
-);
+criterion_group!(creation_benches, bench_document_creation,);
 
 criterion_group!(
     task_op_benches,
@@ -507,23 +452,11 @@ criterion_group!(
     bench_save_load_roundtrip,
 );
 
-criterion_group!(
-    merge_benches,
-    bench_fork,
-    bench_merge,
-);
+criterion_group!(merge_benches, bench_fork, bench_merge,);
 
-criterion_group!(
-    sync_benches,
-    bench_incremental_sync,
-    bench_two_node_sync,
-);
+criterion_group!(sync_benches, bench_incremental_sync, bench_two_node_sync,);
 
-criterion_group!(
-    id_benches,
-    bench_id_generation,
-    bench_id_serialization,
-);
+criterion_group!(id_benches, bench_id_generation, bench_id_serialization,);
 
 criterion_main!(
     creation_benches,

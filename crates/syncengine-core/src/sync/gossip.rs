@@ -412,10 +412,7 @@ impl GossipSync {
                 sender: Arc::new(Mutex::new(sender)),
                 topic_id,
             },
-            TopicReceiver {
-                receiver,
-                topic_id,
-            },
+            TopicReceiver { receiver, topic_id },
         ))
     }
 
@@ -501,7 +498,11 @@ impl GossipSync {
         }
 
         let topic_id = invite.topic_id();
-        info!(?topic_id, peers = invite.bootstrap_peers.len(), "Joining via invite");
+        info!(
+            ?topic_id,
+            peers = invite.bootstrap_peers.len(),
+            "Joining via invite"
+        );
 
         // Convert bootstrap peers from NodeAddrBytes to EndpointAddr
         // and add them to the static discovery provider for immediate connection
@@ -544,7 +545,11 @@ impl GossipSync {
         }
 
         let topic_id = invite.topic_id();
-        info!(?topic_id, peers = invite.bootstrap_peers.len(), "Joining via invite (split)");
+        info!(
+            ?topic_id,
+            peers = invite.bootstrap_peers.len(),
+            "Joining via invite (split)"
+        );
 
         // Convert bootstrap peers from NodeAddrBytes to EndpointAddr
         // and add them to the static discovery provider for immediate connection
@@ -826,7 +831,10 @@ mod tests {
 
         // Second peer should be the additional one
         assert_eq!(invite.bootstrap_peers[1].node_id, additional_peer.node_id);
-        assert_eq!(invite.bootstrap_peers[1].relay_url, additional_peer.relay_url);
+        assert_eq!(
+            invite.bootstrap_peers[1].relay_url,
+            additional_peer.relay_url
+        );
 
         gossip.shutdown().await.unwrap();
     }
@@ -882,13 +890,15 @@ mod tests {
         let realm_key = [42u8; 32];
 
         // Create an expired invite
-        let expired_invite = InviteTicket::new(&realm_id, realm_key, vec![
-            NodeAddrBytes {
+        let expired_invite = InviteTicket::new(
+            &realm_id,
+            realm_key,
+            vec![NodeAddrBytes {
                 node_id: *gossip.public_key().as_bytes(),
                 relay_url: None,
                 direct_addresses: vec![],
-            }
-        ])
+            }],
+        )
         .with_expiry(0); // Unix epoch = already expired
 
         // Attempt to join should fail
@@ -898,7 +908,11 @@ mod tests {
         // Use match to avoid needing Debug on TopicHandle
         match result {
             Err(SyncError::InvalidInvite(msg)) => {
-                assert!(msg.contains("expired"), "Expected 'expired' in error message, got: {}", msg);
+                assert!(
+                    msg.contains("expired"),
+                    "Expected 'expired' in error message, got: {}",
+                    msg
+                );
             }
             Err(other) => panic!("Expected InvalidInvite error, got: {:?}", other),
             Ok(_) => panic!("Expected error, but got Ok"),

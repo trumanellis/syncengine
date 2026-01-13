@@ -11,8 +11,8 @@
 //! - "Join the Field" as button text
 //! - "Sigil copied to clipboard" as feedback
 
-use dioxus::prelude::*;
 use dioxus::events::MouseData;
+use dioxus::prelude::*;
 use syncengine_core::{InviteTicket, RealmId};
 
 use crate::context::use_engine;
@@ -22,8 +22,8 @@ use crate::context::use_engine;
 /// Returns a base64-encoded PNG data URL that can be used as an img src.
 /// Returns None if QR code generation fails.
 fn generate_qr_data_url(data: &str) -> Option<String> {
-    use qrcode::QrCode;
     use qrcode::render::svg;
+    use qrcode::QrCode;
 
     let code = QrCode::new(data.as_bytes()).ok()?;
 
@@ -80,14 +80,24 @@ impl<'a> Base64Writer<'a> {
         }
 
         let b0 = self.buffer[0];
-        let b1 = if self.buffer_len > 1 { self.buffer[1] } else { 0 };
-        let b2 = if self.buffer_len > 2 { self.buffer[2] } else { 0 };
+        let b1 = if self.buffer_len > 1 {
+            self.buffer[1]
+        } else {
+            0
+        };
+        let b2 = if self.buffer_len > 2 {
+            self.buffer[2]
+        } else {
+            0
+        };
 
         self.output.push(ALPHABET[(b0 >> 2) as usize]);
-        self.output.push(ALPHABET[(((b0 & 0x03) << 4) | (b1 >> 4)) as usize]);
+        self.output
+            .push(ALPHABET[(((b0 & 0x03) << 4) | (b1 >> 4)) as usize]);
 
         if self.buffer_len > 1 {
-            self.output.push(ALPHABET[(((b1 & 0x0f) << 2) | (b2 >> 6)) as usize]);
+            self.output
+                .push(ALPHABET[(((b1 & 0x0f) << 2) | (b2 >> 6)) as usize]);
         } else {
             self.output.push(b'=');
         }
@@ -653,8 +663,8 @@ mod tests {
     #[test]
     fn test_base64_encode_padding() {
         // Test different padding scenarios
-        assert_eq!(base64_encode("a"), "YQ==");     // 1 byte -> 2 padding
-        assert_eq!(base64_encode("ab"), "YWI=");    // 2 bytes -> 1 padding
-        assert_eq!(base64_encode("abc"), "YWJj");   // 3 bytes -> no padding
+        assert_eq!(base64_encode("a"), "YQ=="); // 1 byte -> 2 padding
+        assert_eq!(base64_encode("ab"), "YWI="); // 2 bytes -> 1 padding
+        assert_eq!(base64_encode("abc"), "YWJj"); // 3 bytes -> no padding
     }
 }

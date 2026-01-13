@@ -5,7 +5,9 @@
 use dioxus::prelude::*;
 use syncengine_core::{NetworkDebugInfo, RealmId, RealmInfo, SyncEvent, Task};
 
-use crate::components::{InvitePanel, JoinRealmModal, NetworkResonance, NetworkState, RealmSelector, TaskList};
+use crate::components::{
+    InvitePanel, JoinRealmModal, NetworkResonance, NetworkState, RealmSelector, TaskList,
+};
 use crate::context::{use_engine, use_engine_ready};
 
 /// Main application view component.
@@ -128,7 +130,10 @@ pub fn Field() -> Element {
                                     network_state.set(NetworkState::from_status(status));
                                 }
                             }
-                            Ok(SyncEvent::PeerConnected { realm_id, .. } | SyncEvent::PeerDisconnected { realm_id, .. }) => {
+                            Ok(
+                                SyncEvent::PeerConnected { realm_id, .. }
+                                | SyncEvent::PeerDisconnected { realm_id, .. },
+                            ) => {
                                 // Refresh sync status and debug info when peers connect/disconnect for selected realm
                                 if selected_realm() == Some(realm_id.clone()) {
                                     let shared = engine();
@@ -140,7 +145,7 @@ pub fn Field() -> Element {
                                     }
                                 }
                             }
-                            Ok(_) => {} // Ignore other events
+                            Ok(_) => {}      // Ignore other events
                             Err(_) => break, // Channel closed
                         }
                     }
@@ -220,16 +225,14 @@ pub fn Field() -> Element {
             let mut guard = shared.write().await;
             if let Some(ref mut eng) = *guard {
                 match eng.add_task(&realm_id, &title).await {
-                    Ok(_) => {
-                        match eng.list_tasks(&realm_id) {
-                            Ok(task_list) => {
-                                tasks.set(task_list);
-                            }
-                            Err(e) => {
-                                error.set(Some(format!("Failed to refresh tasks: {}", e)));
-                            }
+                    Ok(_) => match eng.list_tasks(&realm_id) {
+                        Ok(task_list) => {
+                            tasks.set(task_list);
                         }
-                    }
+                        Err(e) => {
+                            error.set(Some(format!("Failed to refresh tasks: {}", e)));
+                        }
+                    },
                     Err(e) => {
                         error.set(Some(format!("Failed to add task: {}", e)));
                     }

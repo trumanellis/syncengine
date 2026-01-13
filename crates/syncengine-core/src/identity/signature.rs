@@ -60,9 +60,9 @@ impl HybridSignature {
         }
 
         // Ed25519 signature (64 bytes)
-        let ed25519_bytes: [u8; 64] = bytes[..64]
-            .try_into()
-            .map_err(|_| crate::SyncError::Identity("Invalid Ed25519 signature length".to_string()))?;
+        let ed25519_bytes: [u8; 64] = bytes[..64].try_into().map_err(|_| {
+            crate::SyncError::Identity("Invalid Ed25519 signature length".to_string())
+        })?;
         let ed25519 = Ed25519Signature::from_bytes(&ed25519_bytes);
 
         // ML-DSA length (4 bytes)
@@ -146,7 +146,8 @@ mod tests {
 
         // Serialize with serde
         let json = serde_json::to_string(&signature).expect("Failed to serialize");
-        let recovered: HybridSignature = serde_json::from_str(&json).expect("Failed to deserialize");
+        let recovered: HybridSignature =
+            serde_json::from_str(&json).expect("Failed to deserialize");
 
         assert_eq!(signature.ed25519.to_bytes(), recovered.ed25519.to_bytes());
     }

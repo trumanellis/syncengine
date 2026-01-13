@@ -51,7 +51,11 @@ pub fn TaskItem(
     };
 
     // Unicode: circle (U+25CB) or checkmark (U+2713)
-    let check_symbol = if task.completed { "\u{2713}" } else { "\u{25CB}" };
+    let check_symbol = if task.completed {
+        "\u{2713}"
+    } else {
+        "\u{25CB}"
+    };
 
     rsx! {
         div { class: "intention-item",
@@ -189,8 +193,16 @@ mod tests {
         let task = Task::new("Test intention");
         assert!(!task.completed);
         // Verify class logic
-        let check_class = if task.completed { "check completed" } else { "check" };
-        let title_class = if task.completed { "intention-title completed" } else { "intention-title" };
+        let check_class = if task.completed {
+            "check completed"
+        } else {
+            "check"
+        };
+        let title_class = if task.completed {
+            "intention-title completed"
+        } else {
+            "intention-title"
+        };
         assert_eq!(check_class, "check");
         assert_eq!(title_class, "intention-title");
     }
@@ -201,8 +213,16 @@ mod tests {
         task.complete();
         assert!(task.completed);
         // Verify class logic
-        let check_class = if task.completed { "check completed" } else { "check" };
-        let title_class = if task.completed { "intention-title completed" } else { "intention-title" };
+        let check_class = if task.completed {
+            "check completed"
+        } else {
+            "check"
+        };
+        let title_class = if task.completed {
+            "intention-title completed"
+        } else {
+            "intention-title"
+        };
         assert_eq!(check_class, "check completed");
         assert_eq!(title_class, "intention-title completed");
     }

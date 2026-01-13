@@ -292,7 +292,9 @@ fn test_task_add() {
         .args(["task", "add", &realm_id, "Build solar dehydrator"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("Added task: Build solar dehydrator"))
+        .stdout(predicate::str::contains(
+            "Added task: Build solar dehydrator",
+        ))
         .stdout(predicate::str::contains("ID:"));
 }
 
@@ -644,10 +646,7 @@ fn test_multiple_realms() {
 fn test_invalid_subcommand() {
     let data_dir = TempDir::new().unwrap();
 
-    cli_cmd(&data_dir)
-        .arg("nonexistent")
-        .assert()
-        .failure();
+    cli_cmd(&data_dir).arg("nonexistent").assert().failure();
 }
 
 #[test]
@@ -661,10 +660,7 @@ fn test_missing_required_args() {
         .failure();
 
     // task add without realm_id
-    cli_cmd(&data_dir)
-        .args(["task", "add"])
-        .assert()
-        .failure();
+    cli_cmd(&data_dir).args(["task", "add"]).assert().failure();
 }
 
 #[test]

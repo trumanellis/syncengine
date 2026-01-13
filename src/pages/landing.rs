@@ -29,7 +29,10 @@ pub fn Landing() -> Element {
                     // Check if user has any realms (returning user)
                     if let Ok(realms) = eng.list_realms().await {
                         if !realms.is_empty() {
-                            tracing::info!("Returning user detected ({} realms), auto-navigating to Field", realms.len());
+                            tracing::info!(
+                                "Returning user detected ({} realms), auto-navigating to Field",
+                                realms.len()
+                            );
                             navigator.push(Route::Field {});
                         }
                     }

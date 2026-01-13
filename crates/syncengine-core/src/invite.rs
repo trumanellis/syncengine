@@ -638,7 +638,10 @@ mod tests {
 
         let result: Result<EndpointAddr, _> = node_addr_bytes.try_into();
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Invalid socket address"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid socket address"));
     }
 
     #[test]
@@ -656,6 +659,9 @@ mod tests {
 
         let result: Result<EndpointAddr, _> = node_addr_bytes.try_into();
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Invalid relay URL"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Invalid relay URL"));
     }
 }

@@ -77,9 +77,7 @@ impl Did {
         }
 
         if parts[1] != "sync" {
-            return Err(SyncError::Identity(
-                "DID method must be 'sync'".to_string(),
-            ));
+            return Err(SyncError::Identity("DID method must be 'sync'".to_string()));
         }
 
         if !parts[2].starts_with('z') {

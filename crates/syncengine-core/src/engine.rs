@@ -37,9 +37,13 @@ use tracing::{debug, info, warn};
 use crate::error::SyncError;
 use crate::identity::{Did, HybridKeypair, HybridPublicKey};
 use crate::invite::{InviteTicket, NodeAddrBytes};
+use crate::peers::{PeerInfo, PeerRegistry, PeerSource, PeerStatus};
 use crate::realm::RealmDoc;
 use crate::storage::Storage;
-use crate::sync::{GossipSync, NetworkDebugInfo, SyncEnvelope, SyncEvent, SyncMessage, SyncStatus, TopicEvent, TopicSender};
+use crate::sync::{
+    GossipSync, NetworkDebugInfo, SyncEnvelope, SyncEvent, SyncMessage, SyncStatus, TopicEvent,
+    TopicSender,
+};
 use crate::types::{RealmId, RealmInfo, Task, TaskId};
 
 /// Internal state for an open realm
@@ -82,14 +86,14 @@ enum SyncChannelMessage {
         envelope_bytes: Vec<u8>,
     },
     /// Request to broadcast our full document to peers (triggered on NeighborUp)
-    BroadcastRequest {
-        realm_id: RealmId,
-    },
+    BroadcastRequest { realm_id: RealmId },
 }
 
 pub struct SyncEngine {
     /// Persistent storage for realms, documents, and keys
     storage: Storage,
+    /// Peer registry for tracking discovered peers
+    peer_registry: Arc<PeerRegistry>,
     /// Gossip-based P2P networking (lazy-initialized)
     gossip: Option<Arc<GossipSync>>,
     /// Currently open realms with their in-memory state
@@ -129,12 +133,16 @@ impl SyncEngine {
         let db_path = data_dir.join("syncengine.redb");
         let storage = Storage::new(&db_path)?;
 
+        // Initialize peer registry using the same database connection
+        let peer_registry = Arc::new(PeerRegistry::new(storage.db_handle())?);
+
         let (event_tx, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
 
         let (sync_tx, sync_rx) = tokio::sync::mpsc::unbounded_channel();
 
         Ok(Self {
             storage,
+            peer_registry,
             gossip: None,
             realms: HashMap::new(),
             data_dir,
@@ -154,6 +162,11 @@ impl SyncEngine {
     /// Get a reference to the storage layer
     pub fn storage(&self) -> &Storage {
         &self.storage
+    }
+
+    /// Get a reference to the peer registry
+    pub fn peer_registry(&self) -> &Arc<PeerRegistry> {
+        &self.peer_registry
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -475,7 +488,10 @@ impl SyncEngine {
         // Drain all pending messages from the channel
         loop {
             match self.sync_rx.try_recv() {
-                Ok(SyncChannelMessage::IncomingData { realm_id, envelope_bytes }) => {
+                Ok(SyncChannelMessage::IncomingData {
+                    realm_id,
+                    envelope_bytes,
+                }) => {
                     debug!(
                         %realm_id,
                         envelope_bytes = envelope_bytes.len(),
@@ -501,7 +517,9 @@ impl SyncEngine {
                                 processed += 1;
                             }
                         }
-                        Ok(Some(SyncMessage::SyncRequest { realm_id: req_realm_id })) => {
+                        Ok(Some(SyncMessage::SyncRequest {
+                            realm_id: req_realm_id,
+                        })) => {
                             // Peer is requesting our state - queue a broadcast
                             info!(
                                 %realm_id,
@@ -534,9 +552,12 @@ impl SyncEngine {
                             // This fixes the asymmetry where joiners saved creator's address but creator
                             // never saved joiners' addresses, causing sync to break after restart
                             if let Some(addr) = sender_addr {
-                                if let Ok(Some(mut realm_info)) = self.storage.load_realm(&realm_id) {
+                                if let Ok(Some(mut realm_info)) = self.storage.load_realm(&realm_id)
+                                {
                                     // Check if we already have this peer
-                                    let already_has_peer = realm_info.bootstrap_peers.iter()
+                                    let already_has_peer = realm_info
+                                        .bootstrap_peers
+                                        .iter()
                                         .any(|p| p.node_id == addr.node_id);
 
                                     if !already_has_peer {
@@ -619,7 +640,9 @@ impl SyncEngine {
                                     let sender_clone = sender.clone();
                                     let realm_id_clone = realm_id.clone();
                                     tokio::spawn(async move {
-                                        if let Err(e) = sender_clone.broadcast(bytes::Bytes::from(bytes)).await {
+                                        if let Err(e) =
+                                            sender_clone.broadcast(bytes::Bytes::from(bytes)).await
+                                        {
                                             warn!(%realm_id_clone, error = ?e, "Failed to broadcast document on peer connect");
                                         } else {
                                             info!(%realm_id_clone, "Broadcast full document to newly connected peer");
@@ -643,7 +666,12 @@ impl SyncEngine {
     }
 
     /// Apply sync changes to a realm document (internal sync version)
-    fn apply_sync_changes(&mut self, realm_id: &RealmId, data: &[u8], is_full_doc: bool) -> Result<(), SyncError> {
+    fn apply_sync_changes(
+        &mut self,
+        realm_id: &RealmId,
+        data: &[u8],
+        is_full_doc: bool,
+    ) -> Result<(), SyncError> {
         let state = self
             .realms
             .get_mut(realm_id)
@@ -775,7 +803,11 @@ impl SyncEngine {
     /// # Errors
     ///
     /// Returns `SyncError::RealmNotFound` if the realm is not open.
-    pub fn get_task(&self, realm_id: &RealmId, task_id: &TaskId) -> Result<Option<Task>, SyncError> {
+    pub fn get_task(
+        &self,
+        realm_id: &RealmId,
+        task_id: &TaskId,
+    ) -> Result<Option<Task>, SyncError> {
         let state = self
             .realms
             .get(realm_id)
@@ -793,7 +825,11 @@ impl SyncEngine {
     ///
     /// Returns `SyncError::RealmNotFound` if the realm doesn't exist.
     /// Returns `SyncError::TaskNotFound` if the task doesn't exist.
-    pub async fn toggle_task(&mut self, realm_id: &RealmId, task_id: &TaskId) -> Result<(), SyncError> {
+    pub async fn toggle_task(
+        &mut self,
+        realm_id: &RealmId,
+        task_id: &TaskId,
+    ) -> Result<(), SyncError> {
         // Ensure realm is open
         if !self.realms.contains_key(realm_id) {
             self.open_realm(realm_id).await?;
@@ -833,7 +869,11 @@ impl SyncEngine {
     /// # Errors
     ///
     /// Returns `SyncError::RealmNotFound` if the realm doesn't exist.
-    pub async fn delete_task(&mut self, realm_id: &RealmId, task_id: &TaskId) -> Result<(), SyncError> {
+    pub async fn delete_task(
+        &mut self,
+        realm_id: &RealmId,
+        task_id: &TaskId,
+    ) -> Result<(), SyncError> {
         // Ensure realm is open
         if !self.realms.contains_key(realm_id) {
             self.open_realm(realm_id).await?;
@@ -907,6 +947,78 @@ impl SyncEngine {
         let gossip = Arc::new(GossipSync::new().await?);
         self.gossip = Some(gossip.clone());
         Ok(gossip)
+    }
+
+    /// Start the peer reconnection background task
+    ///
+    /// This spawns a background task that runs every 5 minutes and attempts
+    /// to reconnect to all inactive peers (offline or unknown status).
+    ///
+    /// The task will continue running until the engine is dropped.
+    pub fn start_peer_reconnection_task(self: Arc<Self>) {
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(300)); // 5 minutes
+            loop {
+                interval.tick().await;
+                if let Err(e) = self.attempt_reconnect_inactive_peers().await {
+                    tracing::warn!("Peer reconnection error: {}", e);
+                }
+            }
+        });
+        info!("Peer reconnection task started");
+    }
+
+    /// Attempt to reconnect to all inactive peers
+    ///
+    /// This iterates through all peers with status Offline or Unknown and
+    /// attempts to establish a connection. The peer status is updated based
+    /// on the connection result.
+    ///
+    /// This is called automatically by the background reconnection task.
+    pub async fn attempt_reconnect_inactive_peers(&self) -> Result<(), SyncError> {
+        let inactive = self.peer_registry.list_inactive()?;
+
+        if inactive.is_empty() {
+            debug!("No inactive peers to reconnect");
+            return Ok(());
+        }
+
+        info!(
+            "Attempting to reconnect to {} inactive peers",
+            inactive.len()
+        );
+
+        for peer_info in inactive {
+            let peer_id = peer_info.public_key();
+
+            // Skip if gossip not initialized
+            let Some(ref gossip) = self.gossip else {
+                debug!("Gossip not initialized, skipping peer reconnection");
+                return Ok(());
+            };
+
+            debug!(?peer_id, "Attempting to reconnect to peer");
+
+            // Try to connect using the endpoint
+            match gossip
+                .endpoint()
+                .connect(peer_id, iroh_gossip::net::GOSSIP_ALPN)
+                .await
+            {
+                Ok(_conn) => {
+                    info!(?peer_id, "Successfully reconnected to peer");
+                    self.peer_registry
+                        .update_status(&peer_id, crate::peers::PeerStatus::Online)?;
+                }
+                Err(e) => {
+                    debug!(?peer_id, error = ?e, "Failed to reconnect to peer");
+                    self.peer_registry
+                        .update_status(&peer_id, crate::peers::PeerStatus::Offline)?;
+                }
+            }
+        }
+
+        Ok(())
     }
 
     /// Start syncing a realm with peers via gossip
@@ -1000,6 +1112,8 @@ impl SyncEngine {
         let event_tx = self.event_tx.clone();
         // Clone sync_status Arc for thread-safe peer counting in listener task
         let sync_status = self.sync_status.clone();
+        // Clone peer_registry for tracking discovered peers
+        let peer_registry = self.peer_registry.clone();
 
         tokio::spawn(async move {
             debug!(%listener_realm_id, "Sync listener task started");
@@ -1037,15 +1151,32 @@ impl SyncEngine {
                         event_count += 1;
                         debug!(%listener_realm_id, event_count, ?peer, "Peer connected");
 
+                        // Record peer in registry
+                        let peer_info =
+                            PeerInfo::new(peer, PeerSource::FromRealm(listener_realm_id.clone()))
+                                .with_status(PeerStatus::Online);
+                        if let Err(e) = peer_registry.add_or_update(&peer_info) {
+                            warn!(?peer, error = ?e, "Failed to record peer in registry");
+                        } else {
+                            // Also record the realm for this peer
+                            let _ = peer_registry.add_peer_realm(&peer, &listener_realm_id);
+                            debug!(?peer, "Recorded peer in registry");
+                        }
+
                         // Update peer count in sync_status (thread-safe)
                         let new_count = {
                             let mut status_map = sync_status.lock().unwrap();
-                            if let Some(SyncStatus::Syncing { peer_count }) = status_map.get_mut(&listener_realm_id) {
+                            if let Some(SyncStatus::Syncing { peer_count }) =
+                                status_map.get_mut(&listener_realm_id)
+                            {
                                 *peer_count += 1;
                                 *peer_count
                             } else {
                                 // Initialize to 1 if not in Syncing state
-                                status_map.insert(listener_realm_id.clone(), SyncStatus::Syncing { peer_count: 1 });
+                                status_map.insert(
+                                    listener_realm_id.clone(),
+                                    SyncStatus::Syncing { peer_count: 1 },
+                                );
                                 1
                             }
                         };
@@ -1063,17 +1194,28 @@ impl SyncEngine {
                         });
                         let _ = event_tx.send(SyncEvent::StatusChanged {
                             realm_id: listener_realm_id.clone(),
-                            status: SyncStatus::Syncing { peer_count: new_count },
+                            status: SyncStatus::Syncing {
+                                peer_count: new_count,
+                            },
                         });
                     }
                     Some(TopicEvent::NeighborDown(peer)) => {
                         event_count += 1;
                         debug!(%listener_realm_id, event_count, ?peer, "Peer disconnected");
 
+                        // Mark peer as offline in registry
+                        if let Err(e) = peer_registry.update_status(&peer, PeerStatus::Offline) {
+                            warn!(?peer, error = ?e, "Failed to update peer status to offline");
+                        } else {
+                            debug!(?peer, "Marked peer as offline in registry");
+                        }
+
                         // Update peer count in sync_status (thread-safe)
                         let new_count = {
                             let mut status_map = sync_status.lock().unwrap();
-                            if let Some(SyncStatus::Syncing { peer_count }) = status_map.get_mut(&listener_realm_id) {
+                            if let Some(SyncStatus::Syncing { peer_count }) =
+                                status_map.get_mut(&listener_realm_id)
+                            {
                                 *peer_count = peer_count.saturating_sub(1);
                                 *peer_count
                             } else {
@@ -1088,7 +1230,9 @@ impl SyncEngine {
                         });
                         let _ = event_tx.send(SyncEvent::StatusChanged {
                             realm_id: listener_realm_id.clone(),
-                            status: SyncStatus::Syncing { peer_count: new_count },
+                            status: SyncStatus::Syncing {
+                                peer_count: new_count,
+                            },
                         });
                     }
                     None => {
@@ -1215,7 +1359,10 @@ impl SyncEngine {
             state.topic_sender = None;
 
             // Update status to Idle
-            self.sync_status.lock().unwrap().insert(realm_id.clone(), SyncStatus::Idle);
+            self.sync_status
+                .lock()
+                .unwrap()
+                .insert(realm_id.clone(), SyncStatus::Idle);
             let _ = self.event_tx.send(SyncEvent::StatusChanged {
                 realm_id: realm_id.clone(),
                 status: SyncStatus::Idle,
@@ -1566,9 +1713,10 @@ impl SyncEngine {
         };
 
         // Create announce message with our address for peer discovery
-        let sender_addr = self.gossip.as_ref().map(|g| {
-            NodeAddrBytes::from_endpoint_addr(&g.endpoint_addr())
-        });
+        let sender_addr = self
+            .gossip
+            .as_ref()
+            .map(|g| NodeAddrBytes::from_endpoint_addr(&g.endpoint_addr()));
 
         let message = SyncMessage::Announce {
             realm_id: realm_id.clone(),
@@ -1762,10 +1910,7 @@ impl SyncEngine {
         };
 
         // Get realm name for the invite
-        let realm_name = self
-            .storage
-            .load_realm(realm_id)?
-            .map(|info| info.name);
+        let realm_name = self.storage.load_realm(realm_id)?.map(|info| info.name);
 
         // Ensure gossip is initialized
         let gossip = self.ensure_gossip().await?;
@@ -1836,6 +1981,8 @@ impl SyncEngine {
         let event_tx = self.event_tx.clone();
         // Clone sync_status Arc for thread-safe peer counting in listener task
         let sync_status = self.sync_status.clone();
+        // Clone peer_registry for tracking discovered peers
+        let peer_registry = self.peer_registry.clone();
 
         tokio::spawn(async move {
             debug!(%listener_realm_id, "Join sync listener task started");
@@ -1854,11 +2001,10 @@ impl SyncEngine {
                             "Received sync message (joined)"
                         );
                         // Send to channel for processing by main engine
-                        let send_result = sync_tx
-                            .send(SyncChannelMessage::IncomingData {
-                                realm_id: listener_realm_id.clone(),
-                                envelope_bytes: msg.content,
-                            });
+                        let send_result = sync_tx.send(SyncChannelMessage::IncomingData {
+                            realm_id: listener_realm_id.clone(),
+                            envelope_bytes: msg.content,
+                        });
                         if send_result.is_err() {
                             debug!(%listener_realm_id, "Sync channel closed, stopping listener");
                             break;
@@ -1878,15 +2024,32 @@ impl SyncEngine {
                         event_count += 1;
                         debug!(%listener_realm_id, event_count, ?peer, "Peer connected (joined)");
 
+                        // Record peer in registry
+                        let peer_info =
+                            PeerInfo::new(peer, PeerSource::FromRealm(listener_realm_id.clone()))
+                                .with_status(PeerStatus::Online);
+                        if let Err(e) = peer_registry.add_or_update(&peer_info) {
+                            warn!(?peer, error = ?e, "Failed to record peer in registry (joined)");
+                        } else {
+                            // Also record the realm for this peer
+                            let _ = peer_registry.add_peer_realm(&peer, &listener_realm_id);
+                            debug!(?peer, "Recorded peer in registry (joined)");
+                        }
+
                         // Update peer count in sync_status (thread-safe)
                         let new_count = {
                             let mut status_map = sync_status.lock().unwrap();
-                            if let Some(SyncStatus::Syncing { peer_count }) = status_map.get_mut(&listener_realm_id) {
+                            if let Some(SyncStatus::Syncing { peer_count }) =
+                                status_map.get_mut(&listener_realm_id)
+                            {
                                 *peer_count += 1;
                                 *peer_count
                             } else {
                                 // Initialize to 1 if not in Syncing state
-                                status_map.insert(listener_realm_id.clone(), SyncStatus::Syncing { peer_count: 1 });
+                                status_map.insert(
+                                    listener_realm_id.clone(),
+                                    SyncStatus::Syncing { peer_count: 1 },
+                                );
                                 1
                             }
                         };
@@ -1904,17 +2067,28 @@ impl SyncEngine {
                         });
                         let _ = event_tx.send(SyncEvent::StatusChanged {
                             realm_id: listener_realm_id.clone(),
-                            status: SyncStatus::Syncing { peer_count: new_count },
+                            status: SyncStatus::Syncing {
+                                peer_count: new_count,
+                            },
                         });
                     }
                     Some(TopicEvent::NeighborDown(peer)) => {
                         event_count += 1;
                         debug!(%listener_realm_id, event_count, ?peer, "Peer disconnected (joined)");
 
+                        // Mark peer as offline in registry
+                        if let Err(e) = peer_registry.update_status(&peer, PeerStatus::Offline) {
+                            warn!(?peer, error = ?e, "Failed to update peer status to offline (joined)");
+                        } else {
+                            debug!(?peer, "Marked peer as offline in registry (joined)");
+                        }
+
                         // Update peer count in sync_status (thread-safe)
                         let new_count = {
                             let mut status_map = sync_status.lock().unwrap();
-                            if let Some(SyncStatus::Syncing { peer_count }) = status_map.get_mut(&listener_realm_id) {
+                            if let Some(SyncStatus::Syncing { peer_count }) =
+                                status_map.get_mut(&listener_realm_id)
+                            {
                                 *peer_count = peer_count.saturating_sub(1);
                                 *peer_count
                             } else {
@@ -1929,7 +2103,9 @@ impl SyncEngine {
                         });
                         let _ = event_tx.send(SyncEvent::StatusChanged {
                             realm_id: listener_realm_id.clone(),
-                            status: SyncStatus::Syncing { peer_count: new_count },
+                            status: SyncStatus::Syncing {
+                                peer_count: new_count,
+                            },
                         });
                     }
                     None => {
@@ -1944,7 +2120,10 @@ impl SyncEngine {
         // Create realm info with bootstrap peers for reconnection after restart
         let info = RealmInfo {
             id: realm_id.clone(),
-            name: invite.realm_name.clone().unwrap_or_else(|| "Shared Realm".to_string()),
+            name: invite
+                .realm_name
+                .clone()
+                .unwrap_or_else(|| "Shared Realm".to_string()),
             is_shared: true,
             created_at: chrono::Utc::now().timestamp(),
             bootstrap_peers: invite.bootstrap_peers.clone(),
@@ -1990,15 +2169,21 @@ impl SyncEngine {
         // This allows the inviter to learn our address and send messages back to us
         // by forcing Bob to send a message first, which establishes the QUIC connection
         let heads = if let Some(state) = self.realms.get_mut(&realm_id) {
-            state.doc.heads().into_iter().map(|h| h.0.to_vec()).collect()
+            state
+                .doc
+                .heads()
+                .into_iter()
+                .map(|h| h.0.to_vec())
+                .collect()
         } else {
             vec![]
         };
 
         // Include our endpoint address so the receiver can add us to their discovery
-        let sender_addr = self.gossip.as_ref().map(|g| {
-            NodeAddrBytes::from_endpoint_addr(&g.endpoint_addr())
-        });
+        let sender_addr = self
+            .gossip
+            .as_ref()
+            .map(|g| NodeAddrBytes::from_endpoint_addr(&g.endpoint_addr()));
 
         let announce = SyncMessage::Announce {
             realm_id: realm_id.clone(),
@@ -2838,9 +3023,10 @@ mod tests {
             sender_addr: None,
         };
 
-        let mut envelope =
-            SyncEnvelope::seal(&message, "did:example:test", &realm_key, |_| vec![0x51, 0x9E, 1])
-                .unwrap();
+        let mut envelope = SyncEnvelope::seal(&message, "did:example:test", &realm_key, |_| {
+            vec![0x51, 0x9E, 1]
+        })
+        .unwrap();
 
         // Tamper with the signature to make it invalid (empty)
         envelope.signature = vec![];
@@ -3011,7 +3197,10 @@ mod tests {
 
         // Start and stop sync
         engine.start_sync(&realm_id).await.unwrap();
-        assert!(matches!(engine.sync_status(&realm_id), SyncStatus::Syncing { .. }));
+        assert!(matches!(
+            engine.sync_status(&realm_id),
+            SyncStatus::Syncing { .. }
+        ));
 
         engine.stop_sync(&realm_id).await.unwrap();
         assert_eq!(engine.sync_status(&realm_id), SyncStatus::Idle);
@@ -3039,9 +3228,18 @@ mod tests {
         assert!(engine.is_realm_syncing(&realm3));
 
         // Check status for each
-        assert!(matches!(engine.sync_status(&realm1), SyncStatus::Syncing { .. }));
-        assert!(matches!(engine.sync_status(&realm2), SyncStatus::Syncing { .. }));
-        assert!(matches!(engine.sync_status(&realm3), SyncStatus::Syncing { .. }));
+        assert!(matches!(
+            engine.sync_status(&realm1),
+            SyncStatus::Syncing { .. }
+        ));
+        assert!(matches!(
+            engine.sync_status(&realm2),
+            SyncStatus::Syncing { .. }
+        ));
+        assert!(matches!(
+            engine.sync_status(&realm3),
+            SyncStatus::Syncing { .. }
+        ));
 
         // Verify syncing_count
         assert_eq!(engine.syncing_count(), 3);
@@ -3072,7 +3270,11 @@ mod tests {
         let elapsed = start.elapsed();
 
         // Should complete quickly (not blocking)
-        assert!(elapsed.as_millis() < 5000, "start_sync took too long: {:?}", elapsed);
+        assert!(
+            elapsed.as_millis() < 5000,
+            "start_sync took too long: {:?}",
+            elapsed
+        );
 
         // Both should be syncing
         assert!(engine.is_realm_syncing(&realm1));
@@ -3098,7 +3300,10 @@ mod tests {
         assert!(engine.is_realm_syncing(&realm1));
         assert!(!engine.is_realm_syncing(&realm2));
 
-        assert!(matches!(engine.sync_status(&realm1), SyncStatus::Syncing { .. }));
+        assert!(matches!(
+            engine.sync_status(&realm1),
+            SyncStatus::Syncing { .. }
+        ));
         assert_eq!(engine.sync_status(&realm2), SyncStatus::Idle);
 
         engine.shutdown().await.unwrap();
@@ -3122,14 +3327,17 @@ mod tests {
 
         // Use a short timeout for testing
         for _ in 0..10 {
-            match tokio::time::timeout(
-                std::time::Duration::from_millis(100),
-                events.recv()
-            ).await {
-                Ok(Ok(SyncEvent::StatusChanged { status: SyncStatus::Connecting, .. })) => {
+            match tokio::time::timeout(std::time::Duration::from_millis(100), events.recv()).await {
+                Ok(Ok(SyncEvent::StatusChanged {
+                    status: SyncStatus::Connecting,
+                    ..
+                })) => {
                     found_connecting = true;
                 }
-                Ok(Ok(SyncEvent::StatusChanged { status: SyncStatus::Syncing { .. }, .. })) => {
+                Ok(Ok(SyncEvent::StatusChanged {
+                    status: SyncStatus::Syncing { .. },
+                    ..
+                })) => {
                     found_syncing = true;
                 }
                 _ => break,
@@ -3137,7 +3345,10 @@ mod tests {
         }
 
         // Should have received at least the connecting or syncing event
-        assert!(found_connecting || found_syncing, "Should receive status change events");
+        assert!(
+            found_connecting || found_syncing,
+            "Should receive status change events"
+        );
 
         engine.shutdown().await.unwrap();
     }
@@ -3266,7 +3477,10 @@ mod tests {
 
         // Alice generates an invite (this should auto-start sync!)
         let invite_str = alice.create_invite(&realm_id).await.unwrap();
-        debug!("Alice generated invite: {}...", &invite_str[..50.min(invite_str.len())]);
+        debug!(
+            "Alice generated invite: {}...",
+            &invite_str[..50.min(invite_str.len())]
+        );
 
         // Verify Alice is now syncing
         assert!(
@@ -3310,21 +3524,19 @@ mod tests {
                     }
                     Ok(Ok(_)) => continue, // Other event
                     Ok(Err(broadcast::error::RecvError::Lagged(_))) => continue, // Lagged, keep trying
-                    Ok(Err(_)) => return false, // Channel closed
-                    Err(_) => return false, // Timeout
+                    Ok(Err(_)) => return false,                                  // Channel closed
+                    Err(_) => return false,                                      // Timeout
                 }
             }
         }
 
         // Wait for connections using the pre-made subscriptions
-        let alice_connected = wait_for_peer_connected(&mut alice_events, &realm_id, Duration::from_secs(10)).await;
-        let bob_connected = wait_for_peer_connected(&mut bob_events, &realm_id, Duration::from_secs(10)).await;
+        let alice_connected =
+            wait_for_peer_connected(&mut alice_events, &realm_id, Duration::from_secs(10)).await;
+        let bob_connected =
+            wait_for_peer_connected(&mut bob_events, &realm_id, Duration::from_secs(10)).await;
 
-        debug!(
-            alice_connected,
-            bob_connected,
-            "Peer connection status"
-        );
+        debug!(alice_connected, bob_connected, "Peer connection status");
 
         // At least one side should see a connection (typically Bob sees Alice first since he used Alice as bootstrap)
         assert!(
@@ -3355,7 +3567,10 @@ mod tests {
             // Process any pending sync messages
             let processed = bob.process_pending_sync();
             if processed > 0 {
-                debug!("Bob processed {} sync messages at iteration {}", processed, i);
+                debug!(
+                    "Bob processed {} sync messages at iteration {}",
+                    processed, i
+                );
             }
             let bob_tasks = bob.list_tasks(&realm_id).unwrap();
             debug!(
@@ -3372,7 +3587,10 @@ mod tests {
             }
         }
 
-        assert!(synced, "Bob should have received Alice's task within 5 seconds");
+        assert!(
+            synced,
+            "Bob should have received Alice's task within 5 seconds"
+        );
 
         // Cleanup
         alice.shutdown().await.unwrap();
@@ -3543,18 +3761,15 @@ mod tests {
                 "Bootstrap peers should persist to storage"
             );
             assert_eq!(
-                loaded_info.bootstrap_peers[0].node_id,
-                mock_peer.node_id,
+                loaded_info.bootstrap_peers[0].node_id, mock_peer.node_id,
                 "Peer node_id should match"
             );
             assert_eq!(
-                loaded_info.bootstrap_peers[0].relay_url,
-                mock_peer.relay_url,
+                loaded_info.bootstrap_peers[0].relay_url, mock_peer.relay_url,
                 "Peer relay_url should match"
             );
             assert_eq!(
-                loaded_info.bootstrap_peers[0].direct_addresses,
-                mock_peer.direct_addresses,
+                loaded_info.bootstrap_peers[0].direct_addresses, mock_peer.direct_addresses,
                 "Peer direct_addresses should match"
             );
         }
@@ -3619,7 +3834,10 @@ mod tests {
 
         // Save a realm key (required for envelope handling)
         let realm_key = [42u8; 32];
-        engine.storage.save_realm_key(&realm_id, &realm_key).unwrap();
+        engine
+            .storage
+            .save_realm_key(&realm_id, &realm_key)
+            .unwrap();
 
         // Open the realm so it's in memory
         engine.open_realm(&realm_id).await.unwrap();
@@ -3645,7 +3863,8 @@ mod tests {
         // Create signed envelopes in separate scopes to avoid borrow conflicts
         let envelope_bytes = {
             let identity = engine.identity.as_ref().unwrap();
-            let sender_did = crate::identity::Did::from_public_key(&identity.public_key()).to_string();
+            let sender_did =
+                crate::identity::Did::from_public_key(&identity.public_key()).to_string();
             let sign_fn = |data: &[u8]| identity.sign(data).to_bytes().to_vec();
             let envelope = SyncEnvelope::seal(&announce, &sender_did, &realm_key, sign_fn)
                 .expect("Should create envelope");
@@ -3683,7 +3902,8 @@ mod tests {
         // Verify idempotency - processing the same announce again shouldn't duplicate
         let envelope_bytes2 = {
             let identity = engine.identity.as_ref().unwrap();
-            let sender_did = crate::identity::Did::from_public_key(&identity.public_key()).to_string();
+            let sender_did =
+                crate::identity::Did::from_public_key(&identity.public_key()).to_string();
             let sign_fn = |data: &[u8]| identity.sign(data).to_bytes().to_vec();
             let envelope = SyncEnvelope::seal(&announce, &sender_did, &realm_key, sign_fn)
                 .expect("Should create envelope");
@@ -3794,7 +4014,10 @@ mod tests {
         let alice_connected = wait_for_peer(&mut alice_events, &realm_id).await;
         let bob_connected = wait_for_peer(&mut bob_events, &realm_id).await;
 
-        debug!(alice_connected, bob_connected, "Peer connection events received");
+        debug!(
+            alice_connected,
+            bob_connected, "Peer connection events received"
+        );
 
         assert!(
             alice_connected || bob_connected,
@@ -3808,7 +4031,11 @@ mod tests {
         let alice_status = alice.sync_status(&realm_id);
         let bob_status = bob.sync_status(&realm_id);
 
-        info!(?alice_status, ?bob_status, "Final sync status after peer connection");
+        info!(
+            ?alice_status,
+            ?bob_status,
+            "Final sync status after peer connection"
+        );
 
         // Check Alice's peer count
         match alice_status {
@@ -3874,7 +4101,8 @@ mod tests {
             bob.start_networking().await.unwrap();
 
             // Exchange addresses
-            if let (Some(alice_addr), Some(bob_addr)) = (alice.endpoint_addr(), bob.endpoint_addr()) {
+            if let (Some(alice_addr), Some(bob_addr)) = (alice.endpoint_addr(), bob.endpoint_addr())
+            {
                 alice.add_peer_addr(bob_addr);
                 bob.add_peer_addr(alice_addr);
             }
@@ -3908,7 +4136,10 @@ mod tests {
             assert!(connected, "Initial connection should succeed");
 
             // Alice adds initial task and waits for sync
-            alice.add_task(&realm_id, "Initial shared task").await.unwrap();
+            alice
+                .add_task(&realm_id, "Initial shared task")
+                .await
+                .unwrap();
             tokio::time::sleep(Duration::from_millis(500)).await;
             bob.process_pending_sync();
 
@@ -3931,8 +4162,14 @@ mod tests {
             alice.init_identity().unwrap();
             alice.open_realm(&realm_id).await.unwrap();
 
-            alice.add_task(&realm_id, "Alice offline task 1").await.unwrap();
-            alice.add_task(&realm_id, "Alice offline task 2").await.unwrap();
+            alice
+                .add_task(&realm_id, "Alice offline task 1")
+                .await
+                .unwrap();
+            alice
+                .add_task(&realm_id, "Alice offline task 2")
+                .await
+                .unwrap();
 
             let alice_tasks = alice.list_tasks(&realm_id).unwrap();
             info!(count = alice_tasks.len(), "Alice offline tasks");
@@ -3978,17 +4215,15 @@ mod tests {
 
             // Update Alice's realm with Bob's fresh address as bootstrap peer
             if let Ok(Some(mut alice_realm_info)) = alice.storage.load_realm(&realm_id) {
-                alice_realm_info.bootstrap_peers = vec![
-                    NodeAddrBytes::from_endpoint_addr(&bob_addr)
-                ];
+                alice_realm_info.bootstrap_peers =
+                    vec![NodeAddrBytes::from_endpoint_addr(&bob_addr)];
                 alice.storage.save_realm(&alice_realm_info).unwrap();
             }
 
             // Update Bob's realm with Alice's fresh address as bootstrap peer
             if let Ok(Some(mut bob_realm_info)) = bob.storage.load_realm(&realm_id) {
-                bob_realm_info.bootstrap_peers = vec![
-                    NodeAddrBytes::from_endpoint_addr(&alice_addr)
-                ];
+                bob_realm_info.bootstrap_peers =
+                    vec![NodeAddrBytes::from_endpoint_addr(&alice_addr)];
                 bob.storage.save_realm(&bob_realm_info).unwrap();
             }
         }
@@ -4052,13 +4287,27 @@ mod tests {
         );
 
         // Verify specific tasks exist on both
-        let alice_titles: std::collections::HashSet<_> = alice_tasks.iter().map(|t| t.title.as_str()).collect();
-        let bob_titles: std::collections::HashSet<_> = bob_tasks.iter().map(|t| t.title.as_str()).collect();
+        let alice_titles: std::collections::HashSet<_> =
+            alice_tasks.iter().map(|t| t.title.as_str()).collect();
+        let bob_titles: std::collections::HashSet<_> =
+            bob_tasks.iter().map(|t| t.title.as_str()).collect();
 
-        assert!(alice_titles.contains("Alice offline task 1"), "Alice should have her offline task 1");
-        assert!(alice_titles.contains("Bob offline task 1"), "Alice should have Bob's offline task 1");
-        assert!(bob_titles.contains("Alice offline task 1"), "Bob should have Alice's offline task 1");
-        assert!(bob_titles.contains("Bob offline task 1"), "Bob should have his offline task 1");
+        assert!(
+            alice_titles.contains("Alice offline task 1"),
+            "Alice should have her offline task 1"
+        );
+        assert!(
+            alice_titles.contains("Bob offline task 1"),
+            "Alice should have Bob's offline task 1"
+        );
+        assert!(
+            bob_titles.contains("Alice offline task 1"),
+            "Bob should have Alice's offline task 1"
+        );
+        assert!(
+            bob_titles.contains("Bob offline task 1"),
+            "Bob should have his offline task 1"
+        );
 
         // Cleanup
         alice.shutdown().await.unwrap();

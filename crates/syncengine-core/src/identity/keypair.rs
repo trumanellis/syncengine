@@ -153,10 +153,9 @@ impl HybridKeypair {
         }
 
         // ML-DSA public key
-        let ml_dsa_public = dilithium5::PublicKey::from_bytes(
-            &bytes[offset + 4..offset + 4 + ml_dsa_public_len],
-        )
-        .map_err(|_| SyncError::Identity("Invalid ML-DSA public key".to_string()))?;
+        let ml_dsa_public =
+            dilithium5::PublicKey::from_bytes(&bytes[offset + 4..offset + 4 + ml_dsa_public_len])
+                .map_err(|_| SyncError::Identity("Invalid ML-DSA public key".to_string()))?;
 
         Ok(Self {
             ed25519,
@@ -188,7 +187,10 @@ impl Clone for HybridKeypair {
 impl std::fmt::Debug for HybridKeypair {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HybridKeypair")
-            .field("ed25519_public", &hex::encode(self.ed25519.verifying_key().as_bytes()))
+            .field(
+                "ed25519_public",
+                &hex::encode(self.ed25519.verifying_key().as_bytes()),
+            )
             .field("ml_dsa_public_len", &self.ml_dsa_public.as_bytes().len())
             .finish_non_exhaustive()
     }
@@ -269,9 +271,7 @@ impl HybridPublicKey {
         ) as usize;
 
         if bytes.len() < 36 + ml_dsa_len {
-            return Err(SyncError::Identity(
-                "Public key data truncated".to_string(),
-            ));
+            return Err(SyncError::Identity("Public key data truncated".to_string()));
         }
 
         // ML-DSA public key

@@ -148,11 +148,7 @@ impl SyncManager {
     /// # Returns
     ///
     /// `true` if sync was started, `false` if already syncing
-    pub async fn start_realm_sync(
-        &self,
-        realm_id: RealmId,
-        topic_handle: TopicHandle,
-    ) -> bool {
+    pub async fn start_realm_sync(&self, realm_id: RealmId, topic_handle: TopicHandle) -> bool {
         // Check if already syncing
         {
             let realms = self.realms.read().await;
@@ -178,7 +174,8 @@ impl SyncManager {
 
         // Spawn background task for this realm
         let task_handle = tokio::spawn(async move {
-            Self::realm_sync_task(realm_id_clone, topic_handle_for_task, event_tx, realms_ref).await;
+            Self::realm_sync_task(realm_id_clone, topic_handle_for_task, event_tx, realms_ref)
+                .await;
         });
 
         // Store state

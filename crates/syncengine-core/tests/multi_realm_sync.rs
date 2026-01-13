@@ -57,12 +57,24 @@ async fn test_concurrent_multi_realm_sync() {
     assert!(engine.is_realm_syncing(&realm3));
 
     // Verify status is Syncing for all
-    assert!(matches!(engine.sync_status(&realm1), SyncStatus::Syncing { .. }));
-    assert!(matches!(engine.sync_status(&realm2), SyncStatus::Syncing { .. }));
-    assert!(matches!(engine.sync_status(&realm3), SyncStatus::Syncing { .. }));
+    assert!(matches!(
+        engine.sync_status(&realm1),
+        SyncStatus::Syncing { .. }
+    ));
+    assert!(matches!(
+        engine.sync_status(&realm2),
+        SyncStatus::Syncing { .. }
+    ));
+    assert!(matches!(
+        engine.sync_status(&realm3),
+        SyncStatus::Syncing { .. }
+    ));
 
     // Add tasks to different realms while syncing
-    engine.add_task(&realm1, "Finish project proposal").await.unwrap();
+    engine
+        .add_task(&realm1, "Finish project proposal")
+        .await
+        .unwrap();
     engine.add_task(&realm2, "Clean garage").await.unwrap();
     engine.add_task(&realm3, "Practice guitar").await.unwrap();
 
@@ -108,22 +120,34 @@ async fn test_sync_status_per_realm() {
     engine.start_sync(&realm1).await.unwrap();
 
     // realm1 should be syncing, realm2 still idle
-    assert!(matches!(engine.sync_status(&realm1), SyncStatus::Syncing { .. }));
+    assert!(matches!(
+        engine.sync_status(&realm1),
+        SyncStatus::Syncing { .. }
+    ));
     assert_eq!(engine.sync_status(&realm2), SyncStatus::Idle);
 
     // Start sync on realm2
     engine.start_sync(&realm2).await.unwrap();
 
     // Both should be syncing
-    assert!(matches!(engine.sync_status(&realm1), SyncStatus::Syncing { .. }));
-    assert!(matches!(engine.sync_status(&realm2), SyncStatus::Syncing { .. }));
+    assert!(matches!(
+        engine.sync_status(&realm1),
+        SyncStatus::Syncing { .. }
+    ));
+    assert!(matches!(
+        engine.sync_status(&realm2),
+        SyncStatus::Syncing { .. }
+    ));
 
     // Stop realm1
     engine.stop_sync(&realm1).await.unwrap();
 
     // realm1 idle, realm2 still syncing
     assert_eq!(engine.sync_status(&realm1), SyncStatus::Idle);
-    assert!(matches!(engine.sync_status(&realm2), SyncStatus::Syncing { .. }));
+    assert!(matches!(
+        engine.sync_status(&realm2),
+        SyncStatus::Syncing { .. }
+    ));
 
     engine.shutdown().await.unwrap();
 }
@@ -346,7 +370,10 @@ async fn test_sync_restart_after_stop() {
     assert!(engine.is_realm_syncing(&realm_id));
 
     // Add a task during sync
-    engine.add_task(&realm_id, "Task before stop").await.unwrap();
+    engine
+        .add_task(&realm_id, "Task before stop")
+        .await
+        .unwrap();
 
     // Simulate network interruption - stop sync
     engine.stop_sync(&realm_id).await.unwrap();
@@ -360,10 +387,16 @@ async fn test_sync_restart_after_stop() {
     // Simulate network recovery - restart sync
     engine.start_sync(&realm_id).await.unwrap();
     assert!(engine.is_realm_syncing(&realm_id));
-    assert!(matches!(engine.sync_status(&realm_id), SyncStatus::Syncing { .. }));
+    assert!(matches!(
+        engine.sync_status(&realm_id),
+        SyncStatus::Syncing { .. }
+    ));
 
     // Add another task after restart
-    engine.add_task(&realm_id, "Task after restart").await.unwrap();
+    engine
+        .add_task(&realm_id, "Task after restart")
+        .await
+        .unwrap();
     let tasks = engine.list_tasks(&realm_id).unwrap();
     assert_eq!(tasks.len(), 2);
 
@@ -380,14 +413,25 @@ async fn test_multiple_stop_start_cycles() {
     for i in 0..3 {
         // Start sync
         engine.start_sync(&realm_id).await.unwrap();
-        assert!(engine.is_realm_syncing(&realm_id), "Cycle {}: Should be syncing after start", i);
+        assert!(
+            engine.is_realm_syncing(&realm_id),
+            "Cycle {}: Should be syncing after start",
+            i
+        );
 
         // Add a task
-        engine.add_task(&realm_id, &format!("Task {}", i)).await.unwrap();
+        engine
+            .add_task(&realm_id, &format!("Task {}", i))
+            .await
+            .unwrap();
 
         // Stop sync
         engine.stop_sync(&realm_id).await.unwrap();
-        assert!(!engine.is_realm_syncing(&realm_id), "Cycle {}: Should not be syncing after stop", i);
+        assert!(
+            !engine.is_realm_syncing(&realm_id),
+            "Cycle {}: Should not be syncing after stop",
+            i
+        );
     }
 
     // All tasks should be present
@@ -534,7 +578,13 @@ async fn test_events_during_sync_recovery() {
 
     // Check for idle event in stop phase
     let has_idle = stop_events.iter().any(|e| {
-        matches!(e, SyncEvent::StatusChanged { status: SyncStatus::Idle, .. })
+        matches!(
+            e,
+            SyncEvent::StatusChanged {
+                status: SyncStatus::Idle,
+                ..
+            }
+        )
     });
     assert!(has_idle, "Should have Idle status event after stop");
 

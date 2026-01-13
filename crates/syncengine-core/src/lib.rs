@@ -45,6 +45,7 @@ pub mod engine;
 pub mod error;
 pub mod identity;
 pub mod invite;
+pub mod peers;
 pub mod realm;
 pub mod storage;
 pub mod sync;
@@ -56,10 +57,11 @@ pub use engine::{NodeInfo, SyncEngine};
 pub use error::SyncError;
 pub use identity::{Did, HybridKeypair, HybridPublicKey, HybridSignature};
 pub use invite::{InviteTicket, NodeAddrBytes};
+pub use peers::{PeerInfo, PeerRegistry, PeerSource, PeerStatus};
 pub use realm::RealmDoc;
 pub use storage::Storage;
 pub use sync::{
-    GossipMessage, GossipSync, NetworkDebugInfo, SyncEnvelope, SyncEvent, SyncManager,
-    SyncMessage, SyncStatus, TopicHandle, WireMessage, ENVELOPE_VERSION,
+    GossipMessage, GossipSync, NetworkDebugInfo, SyncEnvelope, SyncEvent, SyncManager, SyncMessage,
+    SyncStatus, TopicHandle, WireMessage, ENVELOPE_VERSION,
 };
 pub use types::*;

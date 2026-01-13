@@ -106,7 +106,10 @@ fn test_rapid_toggles() {
     // After even number of toggles, all should be incomplete
     for id in &ids {
         let task = doc.get_task(id).unwrap().unwrap();
-        assert!(!task.completed, "Task should be incomplete after even toggles");
+        assert!(
+            !task.completed,
+            "Task should be incomplete after even toggles"
+        );
     }
 
     println!(
@@ -177,10 +180,7 @@ fn test_simulated_concurrent_edits() {
         assert_eq!(peer.list_tasks().unwrap().len(), 100);
     }
 
-    println!(
-        "5 peers x 20 edits + merge in {:?}",
-        duration
-    );
+    println!("5 peers x 20 edits + merge in {:?}", duration);
 }
 
 /// Test incremental sync with many changes
@@ -219,10 +219,7 @@ fn test_incremental_sync_100_changes() {
     assert_eq!(doc1.list_tasks().unwrap().len(), 110);
     assert_eq!(doc2.list_tasks().unwrap().len(), 110);
 
-    println!(
-        "100 adds with 10 incremental syncs in {:?}",
-        duration
-    );
+    println!("100 adds with 10 incremental syncs in {:?}", duration);
 }
 
 // ============================================================================
@@ -236,7 +233,10 @@ fn test_task_id_uniqueness_under_stress() {
 
     for _ in 0..10000 {
         let id = TaskId::new();
-        assert!(ids.insert(id.to_string_repr()), "Duplicate TaskId generated!");
+        assert!(
+            ids.insert(id.to_string_repr()),
+            "Duplicate TaskId generated!"
+        );
     }
 
     assert_eq!(ids.len(), 10000);

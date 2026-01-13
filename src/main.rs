@@ -17,17 +17,18 @@ use dioxus::desktop::{Config, LogicalPosition, WindowBuilder};
 fn get_screen_size() -> (f64, f64) {
     // Try to get screen size using osascript on macOS
     if let Ok(output) = Command::new("osascript")
-        .args(["-e", "tell application \"Finder\" to get bounds of window of desktop"])
+        .args([
+            "-e",
+            "tell application \"Finder\" to get bounds of window of desktop",
+        ])
         .output()
     {
         if let Ok(stdout) = String::from_utf8(output.stdout) {
             // Output format: "0, 0, 1440, 900" (x1, y1, x2, y2)
             let parts: Vec<&str> = stdout.trim().split(", ").collect();
             if parts.len() == 4 {
-                if let (Ok(width), Ok(height)) = (
-                    parts[2].parse::<f64>(),
-                    parts[3].parse::<f64>(),
-                ) {
+                if let (Ok(width), Ok(height)) = (parts[2].parse::<f64>(), parts[3].parse::<f64>())
+                {
                     return (width, height);
                 }
             }
@@ -91,19 +92,27 @@ fn main() {
 
     // Determine data directory and display name
     let (data_dir, display_name) = if let Some(dir) = args.data_dir {
-        (dir.clone(), dir.file_name().and_then(|n| n.to_str()).unwrap_or("custom").to_string())
+        (
+            dir.clone(),
+            dir.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("custom")
+                .to_string(),
+        )
     } else if let Some(ref name) = args.name {
         let base = dirs::data_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join(format!("instance-{}", name));
         (base, name.clone())
     } else if let Some(instance) = args.instance {
-        let base = dirs::data_dir()
-            .unwrap_or_else(|| PathBuf::from("."));
+        let base = dirs::data_dir().unwrap_or_else(|| PathBuf::from("."));
         if instance == 1 {
             (base.join("syncengine"), format!("Instance {}", instance))
         } else {
-            (base.join(format!("instance-{}", instance)), format!("Instance {}", instance))
+            (
+                base.join(format!("instance-{}", instance)),
+                format!("Instance {}", instance),
+            )
         }
     } else {
         let base = dirs::data_dir()
@@ -134,7 +143,13 @@ fn main() {
 
     tracing::info!(
         "Starting '{}' with data dir: {:?}, screen: {}x{}, window: {}x{}, total_windows: {}",
-        display_name, data_dir, screen_width, screen_height, window_width, window_height, args.total_windows
+        display_name,
+        data_dir,
+        screen_width,
+        screen_height,
+        window_width,
+        window_height,
+        args.total_windows
     );
 
     // Determine window position based on position enum and window width
@@ -155,7 +170,10 @@ fn main() {
     // Configure desktop window
     let mut window_builder = WindowBuilder::new()
         .with_title(&title)
-        .with_inner_size(dioxus::desktop::LogicalSize::new(window_width, window_height))
+        .with_inner_size(dioxus::desktop::LogicalSize::new(
+            window_width,
+            window_height,
+        ))
         .with_resizable(true);
 
     // Set position if specified (y=25 accounts for menu bar)
