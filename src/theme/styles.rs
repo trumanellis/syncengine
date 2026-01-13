@@ -355,12 +355,12 @@ body {
   top: calc(100% + 0.5rem);
   right: 0;
   width: 320px;
-  background: var(--surface);
-  border: 1px solid var(--border);
+  background: #121616;
+  border: 1px solid var(--void-border);
   border-radius: 4px;
   padding: 1rem;
   z-index: 1000;
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.8);
   font-family: var(--font-mono);
   font-size: var(--text-sm);
 }
@@ -371,7 +371,7 @@ body {
   color: var(--gold);
   margin: 0 0 0.75rem 0;
   padding-bottom: 0.5rem;
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--void-border);
 }
 
 .debug-section {
@@ -423,7 +423,7 @@ body {
   width: 100%;
   margin-top: 0.25rem;
   padding: 0.5rem;
-  background: var(--void);
+  background: var(--void-black);
   border-radius: 2px;
   overflow-x: auto;
 }
