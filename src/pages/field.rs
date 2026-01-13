@@ -32,16 +32,36 @@ pub fn Field() -> Element {
     let mut toggling_task: Signal<Option<syncengine_core::TaskId>> = use_signal(|| None);
     let mut deleting_task: Signal<Option<syncengine_core::TaskId>> = use_signal(|| None);
 
-    // Load realms when engine becomes ready
+    // Load realms when engine becomes ready, auto-select first realm
     use_effect(move || {
         if engine_ready() {
             spawn(async move {
                 let shared = engine();
-                let guard = shared.read().await;
-                if let Some(ref eng) = *guard {
+                let mut guard = shared.write().await;
+                if let Some(ref mut eng) = *guard {
                     match eng.list_realms().await {
                         Ok(realm_list) => {
+                            // Auto-select the first realm if available
+                            let first_realm = realm_list.first().cloned();
                             realms.set(realm_list);
+
+                            if let Some(realm_info) = first_realm {
+                                // Open the realm (starts sync if shared)
+                                let _ = eng.open_realm(&realm_info.id).await;
+                                let _ = eng.process_pending_sync();
+
+                                // Update network status
+                                let status = eng.sync_status(&realm_info.id);
+                                network_state.set(NetworkState::from_status(status));
+                                network_debug.set(Some(eng.network_debug_info(&realm_info.id)));
+
+                                // Load tasks
+                                if let Ok(task_list) = eng.list_tasks(&realm_info.id) {
+                                    tasks.set(task_list);
+                                }
+
+                                selected_realm.set(Some(realm_info.id));
+                            }
                         }
                         Err(e) => {
                             error.set(Some(format!("Failed to load realms: {}", e)));
