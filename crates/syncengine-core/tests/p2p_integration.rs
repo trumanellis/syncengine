@@ -2140,6 +2140,7 @@ async fn test_persistence_rejoin_gossip() {
         name: "Shared Realm".to_string(),
         is_shared: true,
         created_at: chrono::Utc::now().timestamp(),
+        bootstrap_peers: Vec::new(),
     };
 
     storage_a.save_realm(&realm_info_a).unwrap();

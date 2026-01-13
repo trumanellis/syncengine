@@ -43,7 +43,9 @@ static DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
 /// Window position on screen
 #[derive(Debug, Clone, ValueEnum)]
 enum WindowPosition {
+    Maximized,
     Left,
+    Center,
     Right,
 }
 
@@ -73,9 +75,13 @@ struct Args {
     #[arg(short, long)]
     instance: Option<u8>,
 
-    /// Window position (left or right half of screen)
+    /// Window position (maximized, left, center, or right)
     #[arg(short, long, value_enum)]
     position: Option<WindowPosition>,
+
+    /// Total number of windows (for calculating split width)
+    #[arg(short, long, default_value = "1")]
+    total_windows: u8,
 }
 
 fn main() {
@@ -112,8 +118,11 @@ fn main() {
     // Get screen dimensions and calculate window size
     let (screen_width, screen_height) = get_screen_size();
 
-    // Window size: exactly half screen width, full height minus menu bar (~25px)
-    let window_width = screen_width / 2.0;
+    // Calculate window width based on total windows
+    let window_width = match args.position {
+        Some(WindowPosition::Maximized) => screen_width,
+        _ => screen_width / args.total_windows as f64,
+    };
     let window_height = screen_height - 25.0;
 
     // Window title with instance name
@@ -124,14 +133,23 @@ fn main() {
     };
 
     tracing::info!(
-        "Starting '{}' with data dir: {:?}, screen: {}x{}, window: {}x{}",
-        display_name, data_dir, screen_width, screen_height, window_width, window_height
+        "Starting '{}' with data dir: {:?}, screen: {}x{}, window: {}x{}, total_windows: {}",
+        display_name, data_dir, screen_width, screen_height, window_width, window_height, args.total_windows
     );
 
-    // Determine window position (left starts at 0, right starts at half screen)
+    // Determine window position based on position enum and window width
     let window_x = match args.position {
-        Some(WindowPosition::Right) => window_width as i32,
-        _ => 0, // Left or default
+        Some(WindowPosition::Maximized) => 0,
+        Some(WindowPosition::Left) => 0,
+        Some(WindowPosition::Center) => window_width as i32,
+        Some(WindowPosition::Right) => {
+            if args.total_windows == 2 {
+                window_width as i32
+            } else {
+                (window_width * 2.0) as i32
+            }
+        }
+        None => 0,
     };
 
     // Configure desktop window

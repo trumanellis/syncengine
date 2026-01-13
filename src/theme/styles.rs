@@ -138,6 +138,195 @@ body {
   50% { opacity: 0.6; }
 }
 
+/* === Network Resonance Indicator === */
+.network-resonance {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+}
+
+.network-resonance.compact {
+  gap: 0.5rem;
+}
+
+/* Resonance Orb Container */
+.resonance-orb {
+  position: relative;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.resonance-orb.compact {
+  width: 20px;
+  height: 20px;
+}
+
+/* Concentric Rings (visible when resonating) */
+.resonance-ring {
+  position: absolute;
+  border-radius: 50%;
+  border: 1px solid var(--moss);
+  animation: ring-pulse 2s ease-in-out infinite;
+}
+
+.resonance-ring.outer {
+  width: 100%;
+  height: 100%;
+  opacity: 0.4;
+  animation-delay: 0s;
+}
+
+.resonance-ring.middle {
+  width: 75%;
+  height: 75%;
+  opacity: 0.6;
+  animation-delay: 0.5s;
+}
+
+.resonance-ring.outer.compact {
+  width: 100%;
+  height: 100%;
+}
+
+@keyframes ring-pulse {
+  0%, 100% {
+    transform: scale(1);
+    opacity: 0.4;
+  }
+  50% {
+    transform: scale(1.15);
+    opacity: 0.7;
+  }
+}
+
+/* Core Resonance Dot */
+.resonance-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  position: relative;
+  z-index: 1;
+  transition: all var(--transition-normal);
+}
+
+/* State: Dormant (offline) */
+.resonance-dot.dormant {
+  background: var(--text-muted);
+  box-shadow: none;
+}
+
+/* State: Seeking (connecting) */
+.resonance-dot.seeking {
+  background: var(--gold);
+  box-shadow: 0 0 8px var(--gold-glow);
+  animation: seeking-pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes seeking-pulse {
+  0%, 100% {
+    box-shadow: 0 0 8px var(--gold-glow);
+    transform: scale(1);
+  }
+  50% {
+    box-shadow: 0 0 16px var(--gold-glow);
+    transform: scale(1.1);
+  }
+}
+
+/* State: Listening (connected, 0 peers) */
+.resonance-dot.listening {
+  background: var(--cyan);
+  box-shadow: 0 0 10px var(--cyan-glow);
+  animation: listening-glow 2s ease-in-out infinite;
+}
+
+@keyframes listening-glow {
+  0%, 100% {
+    box-shadow: 0 0 8px var(--cyan-glow);
+  }
+  50% {
+    box-shadow: 0 0 14px var(--cyan-glow);
+  }
+}
+
+/* State: Resonating (syncing with peers) */
+.resonance-dot.resonating {
+  background: var(--moss-glow);
+  box-shadow: 0 0 12px var(--moss-glow);
+  animation: resonating-pulse 1.8s ease-in-out infinite;
+}
+
+@keyframes resonating-pulse {
+  0%, 100% {
+    box-shadow: 0 0 10px var(--moss-glow);
+    transform: scale(1);
+  }
+  50% {
+    box-shadow: 0 0 20px var(--moss-glow), 0 0 30px rgba(124, 184, 124, 0.2);
+    transform: scale(1.05);
+  }
+}
+
+/* State: Dissonance (error) */
+.resonance-dot.dissonance {
+  background: var(--danger);
+  box-shadow: 0 0 10px rgba(255, 51, 102, 0.5);
+  animation: dissonance-flash 0.8s ease-in-out infinite;
+}
+
+@keyframes dissonance-flash {
+  0%, 100% {
+    opacity: 1;
+    box-shadow: 0 0 10px rgba(255, 51, 102, 0.5);
+  }
+  50% {
+    opacity: 0.7;
+    box-shadow: 0 0 16px rgba(255, 51, 102, 0.7);
+  }
+}
+
+/* Resonance Labels */
+.resonance-label {
+  color: var(--text-secondary);
+  transition: color var(--transition-normal);
+  white-space: nowrap;
+}
+
+.resonance-label.dormant {
+  color: var(--text-muted);
+}
+
+.resonance-label.seeking {
+  color: var(--gold);
+  animation: seeking-text 1.5s ease-in-out infinite;
+}
+
+@keyframes seeking-text {
+  0%, 100% { opacity: 0.7; }
+  50% { opacity: 1; }
+}
+
+.resonance-label.listening {
+  color: var(--cyan);
+}
+
+.resonance-label.resonating {
+  color: var(--moss-glow);
+}
+
+.resonance-label.dissonance {
+  color: var(--danger);
+}
+
+.resonance-label.compact {
+  font-size: var(--text-xs);
+}
+
 /* === Buttons === */
 .btn-primary {
   padding: 0.75rem 2rem;
@@ -290,6 +479,25 @@ body {
   min-height: 100vh;
   background: var(--void-black);
   padding: 2rem;
+  position: relative;
+}
+
+/* Seed of Life background for Field view */
+.app-shell::before {
+  content: '';
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 800px;
+  height: 800px;
+  background-image: url('assets/seed-of-life.svg');
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: contain;
+  opacity: 0.03;
+  pointer-events: none;
+  z-index: 0;
 }
 
 .app-header {
@@ -333,7 +541,7 @@ body {
   display: flex;
   gap: 2rem;
   min-height: calc(100vh - 200px);
-  padding-bottom: 4rem;
+  padding-bottom: 5rem; /* Ensure content doesn't overlap fixed footer */
 }
 
 /* === Realm Sidebar === */
@@ -627,10 +835,28 @@ body {
 }
 
 .invite-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   font-family: var(--font-serif);
   font-size: var(--text-lg);
   font-weight: 400;
   margin-bottom: 1rem;
+  color: var(--text-primary);
+}
+
+.panel-close-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  font-size: var(--text-xl);
+  cursor: pointer;
+  padding: 0.25rem 0.5rem;
+  transition: color 0.2s ease;
+  line-height: 1;
+}
+
+.panel-close-btn:hover {
   color: var(--text-primary);
 }
 
@@ -726,12 +952,14 @@ body {
 
 .invite-ticket-code {
   font-family: var(--font-mono);
-  font-size: var(--text-xs);
+  font-size: var(--text-sm);
   color: var(--cyan);
   word-break: break-all;
   display: block;
-  max-height: 80px;
+  max-height: 120px;
   overflow-y: auto;
+  user-select: all;
+  cursor: text;
 }
 
 .invite-copy-btn {

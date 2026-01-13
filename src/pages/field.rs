@@ -3,9 +3,9 @@
 //! Where intentions manifest and synchronicities form.
 
 use dioxus::prelude::*;
-use syncengine_core::{RealmId, RealmInfo, SyncEvent, Task};
+use syncengine_core::{RealmId, RealmInfo, SyncEvent, SyncStatus, Task};
 
-use crate::components::{FieldState, FieldStatus, InvitePanel, JoinRealmModal, RealmSelector, TaskList};
+use crate::components::{InvitePanel, JoinRealmModal, NetworkResonance, NetworkState, RealmSelector, TaskList};
 use crate::context::{use_engine, use_engine_ready};
 
 /// Main application view component.
@@ -20,11 +20,16 @@ pub fn Field() -> Element {
     let mut selected_realm: Signal<Option<RealmId>> = use_signal(|| None);
     let mut tasks: Signal<Vec<Task>> = use_signal(Vec::new);
     let mut error: Signal<Option<String>> = use_signal(|| None);
-    let mut field_state: Signal<FieldState> = use_signal(|| FieldState::Listening);
+    let mut network_state: Signal<NetworkState> = use_signal(NetworkState::default);
 
     // Invite UI state
     let mut show_join_modal: Signal<bool> = use_signal(|| false);
     let mut show_invite_panel: Signal<bool> = use_signal(|| false);
+
+    // Loading states for task operations
+    let mut adding_task: Signal<bool> = use_signal(|| false);
+    let mut toggling_task: Signal<Option<syncengine_core::TaskId>> = use_signal(|| None);
+    let mut deleting_task: Signal<Option<syncengine_core::TaskId>> = use_signal(|| None);
 
     // Load realms when engine becomes ready
     use_effect(move || {
@@ -36,11 +41,9 @@ pub fn Field() -> Element {
                     match eng.list_realms().await {
                         Ok(realm_list) => {
                             realms.set(realm_list);
-                            field_state.set(FieldState::Resonating);
                         }
                         Err(e) => {
                             error.set(Some(format!("Failed to load realms: {}", e)));
-                            field_state.set(FieldState::Dormant);
                         }
                     }
                 }
@@ -98,6 +101,23 @@ pub fn Field() -> Element {
                                     }
                                 }
                             }
+                            Ok(SyncEvent::StatusChanged { realm_id, status }) => {
+                                // Update network state when sync status changes for selected realm
+                                if selected_realm() == Some(realm_id) {
+                                    network_state.set(NetworkState::from_status(status));
+                                }
+                            }
+                            Ok(SyncEvent::PeerConnected { realm_id, .. } | SyncEvent::PeerDisconnected { realm_id, .. }) => {
+                                // Refresh sync status when peers connect/disconnect for selected realm
+                                if selected_realm() == Some(realm_id.clone()) {
+                                    let shared = engine();
+                                    let guard = shared.read().await;
+                                    if let Some(ref eng) = *guard {
+                                        let status = eng.sync_status(&realm_id);
+                                        network_state.set(NetworkState::from_status(status));
+                                    }
+                                }
+                            }
                             Ok(_) => {} // Ignore other events
                             Err(_) => break, // Channel closed
                         }
@@ -118,6 +138,10 @@ pub fn Field() -> Element {
                 // Process any pending sync messages BEFORE reading tasks
                 // This handles messages that arrived when no realm was selected
                 let _ = eng.process_pending_sync();
+
+                // Update network status for this realm
+                let status = eng.sync_status(&realm_id);
+                network_state.set(NetworkState::from_status(status));
 
                 match eng.list_tasks(&realm_id) {
                     Ok(task_list) => {
@@ -157,8 +181,8 @@ pub fn Field() -> Element {
     };
 
     // Handler for adding a new task
-    let add_task = move |title: String| {
-        if title.trim().is_empty() {
+    let mut add_task = move |title: String| {
+        if title.trim().is_empty() || adding_task() {
             return;
         }
 
@@ -167,6 +191,7 @@ pub fn Field() -> Element {
             None => return,
         };
 
+        adding_task.set(true);
         spawn(async move {
             let shared = engine();
             let mut guard = shared.write().await;
@@ -187,16 +212,23 @@ pub fn Field() -> Element {
                     }
                 }
             }
+            adding_task.set(false);
         });
     };
 
     // Handler for toggling a task
-    let toggle_task = move |task_id: syncengine_core::TaskId| {
+    let mut toggle_task = move |task_id: syncengine_core::TaskId| {
+        // Prevent double-toggling
+        if toggling_task().is_some() {
+            return;
+        }
+
         let realm_id = match selected_realm() {
             Some(id) => id,
             None => return,
         };
 
+        toggling_task.set(Some(task_id.clone()));
         spawn(async move {
             let shared = engine();
             let mut guard = shared.write().await;
@@ -212,16 +244,23 @@ pub fn Field() -> Element {
                     }
                 }
             }
+            toggling_task.set(None);
         });
     };
 
     // Handler for deleting a task
-    let delete_task = move |task_id: syncengine_core::TaskId| {
+    let mut delete_task = move |task_id: syncengine_core::TaskId| {
+        // Prevent double-deleting
+        if deleting_task().is_some() {
+            return;
+        }
+
         let realm_id = match selected_realm() {
             Some(id) => id,
             None => return,
         };
 
+        deleting_task.set(Some(task_id.clone()));
         spawn(async move {
             let shared = engine();
             let mut guard = shared.write().await;
@@ -237,6 +276,7 @@ pub fn Field() -> Element {
                     }
                 }
             }
+            deleting_task.set(None);
         });
     };
 
@@ -284,7 +324,7 @@ pub fn Field() -> Element {
                     }
                 }
 
-                FieldStatus { status: field_state() }
+                NetworkResonance { state: network_state() }
             }
 
             // Error display
@@ -361,6 +401,7 @@ pub fn Field() -> Element {
                             aside { class: "invite-sidebar",
                                 InvitePanel {
                                     realm_id: realm_id,
+                                    on_close: move |_| show_invite_panel.set(false),
                                 }
                             }
                         }

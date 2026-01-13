@@ -204,6 +204,9 @@ pub fn InvitePanel(
     /// Callback when an invite is successfully created
     #[props(default)]
     on_invite_created: Option<EventHandler<InviteTicket>>,
+    /// Callback when panel close button is clicked
+    #[props(default)]
+    on_close: Option<EventHandler<()>>,
 ) -> Element {
     let mut invite_ticket: Signal<Option<InviteTicket>> = use_signal(|| None);
     let mut invite_string: Signal<Option<String>> = use_signal(|| None);
@@ -316,8 +319,16 @@ pub fn InvitePanel(
 
     rsx! {
         div { class: "invite-panel",
-            h3 { class: "invite-panel-header",
+            header { class: "invite-panel-header",
                 span { class: "sacred-term", "Summon Others" }
+                if let Some(handler) = on_close {
+                    button {
+                        class: "panel-close-btn",
+                        onclick: move |_| handler.call(()),
+                        "aria-label": "Close invite panel",
+                        "\u{00D7}"
+                    }
+                }
             }
 
             // Error display

@@ -4,6 +4,8 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use ulid::Ulid;
 
+use crate::invite::NodeAddrBytes;
+
 /// Unique identifier for a realm (gossip topic)
 ///
 /// A realm represents a shared space where tasks are synchronized
@@ -117,6 +119,9 @@ pub struct RealmInfo {
     pub is_shared: bool,
     /// Unix timestamp of creation
     pub created_at: i64,
+    /// Bootstrap peers for reconnecting after restart (only for shared realms)
+    #[serde(default)]
+    pub bootstrap_peers: Vec<NodeAddrBytes>,
 }
 
 impl RealmInfo {
@@ -127,6 +132,7 @@ impl RealmInfo {
             name: name.into(),
             is_shared: false,
             created_at: chrono::Utc::now().timestamp(),
+            bootstrap_peers: Vec::new(),
         }
     }
 }
