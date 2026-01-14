@@ -67,25 +67,10 @@ pub fn QuestCard(
                         class: Some("card-image__quest".to_string()),
                     }
                 } else {
-                    div { class: "card-image__default card-image__quest",
-                        // Default quest placeholder
-                        svg {
-                            xmlns: "http://www.w3.org/2000/svg",
-                            view_box: "0 0 100 100",
-                            class: "default-quest-icon",
-                            // Mountain/quest icon
-                            path {
-                                d: "M 10 80 L 30 40 L 50 60 L 70 20 L 90 80 Z",
-                                fill: "currentColor",
-                                opacity: "0.3",
-                            }
-                            circle {
-                                cx: "70",
-                                cy: "20",
-                                r: "5",
-                                fill: "#d4af37",
-                            }
-                        }
+                    img {
+                        class: "card-image__default card-image__quest",
+                        src: "assets/quest-default.png",
+                        alt: "Quest",
                     }
                 }
 

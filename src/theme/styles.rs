@@ -2383,7 +2383,7 @@ body {
   display: flex;
   flex-direction: column;
   padding: var(--spacing-phi-lg);
-  gap: var(--spacing-phi-md);
+  gap: 0.5rem;
   overflow: hidden;
   min-height: 0;
 }
@@ -2391,17 +2391,18 @@ body {
 /* === Card Header === */
 .card-header {
   border-bottom: 1px solid rgba(212, 175, 55, 0.2);
-  padding-bottom: var(--spacing-phi-sm);
+  padding-bottom: 0.375rem;
+  margin-bottom: 0.5rem;
 }
 
 .card-header__title {
   font-family: var(--font-serif);
-  font-size: 1.75rem;
+  font-size: 1.125rem;
   font-weight: 600;
   color: var(--gold);
   margin: 0 0 0.25rem 0;
   letter-spacing: 0.02em;
-  line-height: 1.2;
+  line-height: 1.3;
 }
 
 .card-header__subtitle {
@@ -2939,7 +2940,7 @@ body {
   }
 
   .card-header__title {
-    font-size: 1.5rem;
+    font-size: 1rem;
   }
 
   .card-gallery {
