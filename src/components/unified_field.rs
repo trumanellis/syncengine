@@ -283,7 +283,6 @@ fn RealmSection(props: RealmSectionProps) -> Element {
 
                                             QuestCard {
                                                 quest: task_for_card,
-                                                expanded: false,
                                                 on_click: move |_| {
                                                     // Toggle task on card click
                                                     props.on_toggle_task.call(task_id_for_toggle.clone());

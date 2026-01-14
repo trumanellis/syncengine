@@ -28,22 +28,10 @@ use crate::components::images::AsyncImage;
 pub fn QuestCard(
     /// Task/quest data
     quest: Task,
-    /// Whether description is expanded
-    #[props(default = false)]
-    expanded: bool,
-    /// Callback when expand state changes
-    #[props(default = None)]
-    on_expand: Option<EventHandler<bool>>,
     /// Optional click handler for the entire card
     #[props(default = None)]
     on_click: Option<EventHandler<String>>,
 ) -> Element {
-    let toggle_expand = move |_| {
-        if let Some(handler) = &on_expand {
-            handler.call(!expanded);
-        }
-    };
-
     let handle_card_click = move |_| {
         if let Some(handler) = &on_click {
             handler.call(quest.id.to_string());
@@ -67,65 +55,11 @@ pub fn QuestCard(
                         class: Some("card-image__quest".to_string()),
                     }
                 } else {
-                    div { class: "card-image__default card-image__quest",
-                        // Sacred geometry quest icon
-                        svg {
-                            xmlns: "http://www.w3.org/2000/svg",
-                            view_box: "0 0 200 200",
-                            class: "default-quest-icon",
-                            style: "width: 100%; height: 100%;",
-
-                            // Background gradient
-                            defs {
-                                radialGradient {
-                                    id: "quest-glow",
-                                    cx: "50%",
-                                    cy: "50%",
-                                    r: "50%",
-                                    stop {
-                                        offset: "0%",
-                                        style: "stop-color:#d4af37;stop-opacity:0.3"
-                                    }
-                                    stop {
-                                        offset: "100%",
-                                        style: "stop-color:#d4af37;stop-opacity:0"
-                                    }
-                                }
-                            }
-
-                            // Glow circle
-                            circle {
-                                cx: "100",
-                                cy: "100",
-                                r: "80",
-                                fill: "url(#quest-glow)",
-                            }
-
-                            // Seed of Life pattern (sacred geometry)
-                            g {
-                                stroke: "#d4af37",
-                                stroke_width: "1.5",
-                                fill: "none",
-                                opacity: "0.6",
-
-                                // Center circle
-                                circle { cx: "100", cy: "100", r: "20" }
-                                // Surrounding circles
-                                circle { cx: "100", cy: "80", r: "20" }
-                                circle { cx: "117.32", cy: "90", r: "20" }
-                                circle { cx: "117.32", cy: "110", r: "20" }
-                                circle { cx: "100", cy: "120", r: "20" }
-                                circle { cx: "82.68", cy: "110", r: "20" }
-                                circle { cx: "82.68", cy: "90", r: "20" }
-                            }
-
-                            // Center diamond
-                            path {
-                                d: "M 100 85 L 115 100 L 100 115 L 85 100 Z",
-                                fill: "#d4af37",
-                                opacity: "0.8",
-                            }
-                        }
+                    // Default quest image
+                    img {
+                        class: "card-image__default card-image__quest",
+                        src: asset!("/assets/quest-default.png"),
+                        alt: "Quest",
                     }
                 }
 
@@ -160,7 +94,7 @@ pub fn QuestCard(
                     }
                 }
 
-                // Description (markdown, collapsible)
+                // Description (markdown, always expanded)
                 div { class: "card-markdown-section",
                     if !quest.description.is_empty() {
                         {
@@ -168,19 +102,8 @@ pub fn QuestCard(
                             rsx! {
                                 MarkdownRenderer {
                                     content: desc_signal,
-                                    collapsible: true,
-                                    collapsed: !expanded,
-                                }
-
-                                // Expand/collapse button
-                                button {
-                                    class: "expand-toggle",
-                                    onclick: toggle_expand,
-                                    if expanded {
-                                        "Collapse"
-                                    } else {
-                                        "Expand"
-                                    }
+                                    collapsible: false,
+                                    collapsed: false,
                                 }
                             }
                         }
