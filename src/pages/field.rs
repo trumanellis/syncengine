@@ -1,10 +1,11 @@
-//! The Field - Main application view with unified realm-task layout.
+//! Synchronicity Engine - Main application view with unified realm-task layout.
 //!
 //! Where intentions manifest and synchronicities form.
 
 use dioxus::prelude::*;
 use std::collections::HashMap;
 use syncengine_core::{NetworkDebugInfo, RealmId, RealmInfo, SyncEvent, Task};
+use crate::components::IntentionData;
 
 use crate::app::Route;
 use crate::components::{
@@ -199,8 +200,8 @@ pub fn Field() -> Element {
     };
 
     // Handler for adding a task to a specific realm
-    let add_task = move |(realm_id, title): (RealmId, String)| {
-        if title.trim().is_empty() {
+    let add_task = move |(realm_id, data): (RealmId, IntentionData)| {
+        if data.title.trim().is_empty() {
             return;
         }
 
@@ -208,7 +209,21 @@ pub fn Field() -> Element {
             let shared = engine();
             let mut guard = shared.write().await;
             if let Some(ref mut eng) = *guard {
-                match eng.add_task(&realm_id, &title).await {
+                // Use add_quest if there's rich metadata, otherwise use simple add_task
+                let result = if data.subtitle.is_some() || !data.description.is_empty() || data.category.is_some() || data.image_blob_id.is_some() {
+                    eng.add_quest(
+                        &realm_id,
+                        &data.title,
+                        data.subtitle,
+                        &data.description,
+                        data.category,
+                        data.image_blob_id,
+                    ).await
+                } else {
+                    eng.add_task(&realm_id, &data.title).await
+                };
+
+                match result {
                     Ok(_) => {
                         // Refresh tasks for this realm
                         if let Ok(task_list) = eng.list_tasks(&realm_id) {
@@ -308,7 +323,7 @@ pub fn Field() -> Element {
         div { class: "app-shell",
             // Header
             header { class: "app-header",
-                h1 { class: "app-title", "The Field" }
+                h1 { class: "app-title", "Synchronicity Engine" }
 
                 // Header actions
                 div { class: "header-actions",

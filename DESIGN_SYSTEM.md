@@ -689,7 +689,7 @@ Use this terminology consistently throughout the app:
 | Loading | Synchronicities are forming |
 | User / Account | Steward |
 | Server / Node | Temple |
-| Dashboard / Home | The Field |
+| Dashboard / Home | Synchronicity Engine |
 | Category | Category (keep) |
 | Submit | Manifest |
 | Cancel | Release |

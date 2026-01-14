@@ -12,6 +12,7 @@
 use dioxus::prelude::*;
 use syncengine_core::{RealmId, RealmInfo, Task, TaskId};
 use crate::components::cards::QuestCard;
+use crate::components::{IntentionCreator, IntentionData};
 
 /// Props for the UnifiedFieldView component
 #[derive(Props, Clone, PartialEq)]
@@ -24,7 +25,7 @@ pub struct UnifiedFieldViewProps {
     #[props(default = 0)]
     pub generation: usize,
     /// Handler for adding a task to a specific realm
-    pub on_add_task: EventHandler<(RealmId, String)>,
+    pub on_add_task: EventHandler<(RealmId, IntentionData)>,
     /// Handler for toggling a task in a specific realm
     pub on_toggle_task: EventHandler<(RealmId, TaskId)>,
     /// Handler for deleting a task from a specific realm
@@ -167,7 +168,7 @@ struct RealmSectionProps {
     /// Tasks belonging to this realm
     tasks: Vec<Task>,
     /// Handler for adding a task
-    on_add_task: EventHandler<String>,
+    on_add_task: EventHandler<IntentionData>,
     /// Handler for toggling a task
     on_toggle_task: EventHandler<TaskId>,
     /// Handler for deleting a task
@@ -186,25 +187,16 @@ fn RealmSection(props: RealmSectionProps) -> Element {
     // Expansion state for this realm section
     let mut expanded = use_signal(|| true);
 
-    // Task input state
-    let mut task_input = use_signal(String::new);
+    // Intention creator visibility
+    let mut show_creator = use_signal(|| false);
 
-    let on_task_submit = move |_| {
-        let title = task_input.read().trim().to_string();
-        if !title.is_empty() {
-            props.on_add_task.call(title);
-            task_input.set(String::new());
-        }
+    let on_create_intention = move |data: IntentionData| {
+        props.on_add_task.call(data);
+        show_creator.set(false);
     };
 
-    let on_task_keydown = move |evt: KeyboardEvent| {
-        if evt.key() == Key::Enter {
-            let title = task_input.read().trim().to_string();
-            if !title.is_empty() {
-                props.on_add_task.call(title);
-                task_input.set(String::new());
-            }
-        }
+    let on_cancel_creator = move |_| {
+        show_creator.set(false);
     };
 
     let expand_icon = if expanded() { "▼" } else { "▶" };
@@ -245,23 +237,25 @@ fn RealmSection(props: RealmSectionProps) -> Element {
                 }
             }
 
-            // Expanded content: tasks + input
+            // Expanded content: tasks + creator button
             if expanded() {
                 div { class: "realm-content",
-                    // Manifest new intention input
+                    // Button to show intention creator
                     div { class: "realm-manifest-input",
-                        input {
-                            class: "input-field",
-                            placeholder: "manifest new intention...",
-                            value: "{task_input}",
-                            oninput: move |e| task_input.set(e.value()),
-                            onkeydown: on_task_keydown
-                        }
                         button {
-                            class: "btn-primary",
-                            onclick: on_task_submit,
-                            "manifest"
+                            class: "btn-manifest-new",
+                            onclick: move |_| show_creator.set(true),
+                            span { class: "btn-icon", "+" }
+                            " manifest new intention"
                         }
+                    }
+
+                    // Intention Creator Modal
+                    IntentionCreator {
+                        visible: show_creator(),
+                        initial_text: String::new(),
+                        on_create: on_create_intention,
+                        on_cancel: on_cancel_creator,
                     }
 
                     // Quest card grid

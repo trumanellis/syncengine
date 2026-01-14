@@ -52,16 +52,16 @@ const PRIVATE_REALM_NAME: &str = "Private";
 /// Sacred onboarding tasks for the Private realm
 const ONBOARDING_TASKS: &[(&str, &str)] = &[
     (
-        "🜃 Welcome to the Field",
-        "You have entered the Synchronicity Engine - a space where intentions become manifest. This Private realm is yours alone, a sanctuary for personal quests that need not be shared."
+        "🜃 Welcome to Synchronicity Engine",
+        "You have entered a space where intentions become manifest. This Private realm is yours alone, a sanctuary for personal quests that need not be shared."
     ),
     (
         "⚛︎ Manifest Your First Intention",
         "Try creating a new intention (task) by using the 'add' command or UI. Watch as your thought crystallizes into form. This is the beginning of conscious co-creation with the field."
     ),
     (
-        "◎ The Nature of the Field",
-        "The field is always listening. When you're ready to co-create with others, you can establish new realms and share them via invite links. Each realm is a quantum entanglement of intentions across peers."
+        "◎ The Nature of Synchronicity",
+        "Synchronicity is always listening. When you're ready to co-create with others, you can establish new realms and share them via invite links. Each realm is a quantum entanglement of intentions across peers."
     ),
     (
         "☍ Mark Synchronicities Complete",
@@ -883,6 +883,55 @@ impl SyncEngine {
         }
 
         debug!(%realm_id, %task_id, title, "Task added");
+        Ok(task_id)
+    }
+
+    /// Add a rich "quest" (task with metadata) to a realm
+    ///
+    /// Auto-saves the realm after adding the quest.
+    ///
+    /// # Errors
+    ///
+    /// Returns `SyncError::RealmNotFound` if the realm is not open.
+    pub async fn add_quest(
+        &mut self,
+        realm_id: &RealmId,
+        title: &str,
+        subtitle: Option<String>,
+        description: &str,
+        category: Option<String>,
+        image_blob_id: Option<String>,
+    ) -> Result<TaskId, SyncError> {
+        // First, ensure realm is open (load from storage if needed)
+        if !self.realms.contains_key(realm_id) {
+            self.open_realm(realm_id).await?;
+        }
+
+        let (task_id, sync_data) = {
+            let state = self
+                .realms
+                .get_mut(realm_id)
+                .ok_or_else(|| SyncError::RealmNotFound(realm_id.to_string()))?;
+
+            let task_id = state.doc.add_quest_full(title, subtitle, description, category, image_blob_id)?;
+
+            // Capture incremental changes BEFORE save (save resets the checkpoint)
+            let sync_data = state.doc.generate_sync_message();
+
+            (task_id, sync_data)
+        };
+
+        // Auto-save
+        self.save_realm(realm_id).await?;
+
+        // Broadcast changes to peers if syncing
+        if !sync_data.is_empty() {
+            if let Err(e) = self.broadcast_changes_with_data(realm_id, sync_data).await {
+                debug!(%realm_id, error = %e, "Failed to broadcast quest addition (may not be syncing)");
+            }
+        }
+
+        debug!(%realm_id, %task_id, title, "Quest added");
         Ok(task_id)
     }
 
