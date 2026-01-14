@@ -88,6 +88,10 @@ pub enum SyncError {
     /// Invalid DID format
     #[error("Invalid DID format: {0}")]
     InvalidDidFormat(String),
+
+    /// Operation not allowed on Private realm
+    #[error("Operation not allowed on Private realm: {0}")]
+    PrivateRealmOperation(String),
 }
 
 /// Result type alias using SyncError

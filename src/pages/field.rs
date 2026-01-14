@@ -1,16 +1,18 @@
-//! The Field - Main application view.
+//! The Field - Main application view with unified realm-task layout.
 //!
 //! Where intentions manifest and synchronicities form.
 
 use dioxus::prelude::*;
+use std::collections::HashMap;
 use syncengine_core::{NetworkDebugInfo, RealmId, RealmInfo, SyncEvent, Task};
 
+use crate::app::Route;
 use crate::components::{
-    InvitePanel, JoinRealmModal, NetworkResonance, NetworkState, RealmSelector, TaskList,
+    InvitePanel, JoinRealmModal, NetworkResonance, NetworkState, UnifiedFieldView,
 };
 use crate::context::{use_engine, use_engine_ready};
 
-/// Main application view component.
+/// Main application view component with unified realm-task interface.
 #[component]
 pub fn Field() -> Element {
     // Get shared engine from context (initialized in App)
@@ -19,22 +21,22 @@ pub fn Field() -> Element {
 
     // Local UI state
     let mut realms: Signal<Vec<RealmInfo>> = use_signal(Vec::new);
-    let mut selected_realm: Signal<Option<RealmId>> = use_signal(|| None);
-    let mut tasks: Signal<Vec<Task>> = use_signal(Vec::new);
+    let mut tasks_by_realm: Signal<HashMap<RealmId, Vec<Task>>> =
+        use_signal(HashMap::new);
+    let mut generation: Signal<usize> = use_signal(|| 0); // Force re-renders on HashMap changes
+    let mut data_loaded: Signal<bool> = use_signal(|| false); // Track if initial data loaded
     let mut error: Signal<Option<String>> = use_signal(|| None);
     let mut network_state: Signal<NetworkState> = use_signal(NetworkState::default);
     let mut network_debug: Signal<Option<NetworkDebugInfo>> = use_signal(|| None);
+
+    // Track currently opened realm for network status
+    let mut opened_realm: Signal<Option<RealmId>> = use_signal(|| None);
 
     // Invite UI state
     let mut show_join_modal: Signal<bool> = use_signal(|| false);
     let mut show_invite_panel: Signal<bool> = use_signal(|| false);
 
-    // Loading states for task operations
-    let mut adding_task: Signal<bool> = use_signal(|| false);
-    let mut toggling_task: Signal<Option<syncengine_core::TaskId>> = use_signal(|| None);
-    let mut deleting_task: Signal<Option<syncengine_core::TaskId>> = use_signal(|| None);
-
-    // Load realms when engine becomes ready, auto-select first realm
+    // Load all realms and their tasks when engine becomes ready
     use_effect(move || {
         if engine_ready() {
             spawn(async move {
@@ -43,27 +45,49 @@ pub fn Field() -> Element {
                 if let Some(ref mut eng) = *guard {
                     match eng.list_realms().await {
                         Ok(realm_list) => {
-                            // Auto-select the first realm if available
-                            let first_realm = realm_list.first().cloned();
-                            realms.set(realm_list);
+                            // Open ALL realms first (required for loading tasks)
+                            for realm in &realm_list {
+                                let _ = eng.open_realm(&realm.id).await;
+                            }
 
-                            if let Some(realm_info) = first_realm {
-                                // Open the realm (starts sync if shared)
-                                let _ = eng.open_realm(&realm_info.id).await;
+                            // Load tasks for each realm (AFTER opening all realms)
+                            let mut tasks_map = HashMap::new();
+                            for realm in &realm_list {
+                                match eng.list_tasks(&realm.id) {
+                                    Ok(task_list) => {
+                                        tracing::info!("Loaded {} tasks for realm {}", task_list.len(), realm.name);
+                                        tasks_map.insert(realm.id.clone(), task_list);
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!("Failed to load tasks for realm {}: {:?}", realm.name, e);
+                                    }
+                                }
+                            }
+                            tracing::info!("Total realms loaded: {}, total task entries: {}", realm_list.len(), tasks_map.len());
+
+                            // Set network status for first realm
+                            if let Some(first_realm) = realm_list.first() {
                                 let _ = eng.process_pending_sync();
 
-                                // Update network status
-                                let status = eng.sync_status(&realm_info.id);
+                                // Update network status for first realm
+                                let status = eng.sync_status(&first_realm.id);
                                 network_state.set(NetworkState::from_status(status));
-                                network_debug.set(Some(eng.network_debug_info(&realm_info.id)));
-
-                                // Load tasks
-                                if let Ok(task_list) = eng.list_tasks(&realm_info.id) {
-                                    tasks.set(task_list);
-                                }
-
-                                selected_realm.set(Some(realm_info.id));
+                                network_debug.set(Some(eng.network_debug_info(&first_realm.id)));
+                                opened_realm.set(Some(first_realm.id.clone()));
                             }
+
+                            // Log before setting signals
+                            tracing::info!("Setting signals - realms: {}, tasks_by_realm entries: {}", realm_list.len(), tasks_map.len());
+
+                            realms.set(realm_list);
+                            tasks_by_realm.set(tasks_map);
+                            // Increment generation to force re-render
+                            let current = *generation.peek();
+                            generation.set(current + 1);
+                            // Mark data as loaded
+                            data_loaded.set(true);
+
+                            tracing::info!("Signals set - generation now: {}, data_loaded: true", current + 1);
                         }
                         Err(e) => {
                             error.set(Some(format!("Failed to load realms: {}", e)));
@@ -71,27 +95,6 @@ pub fn Field() -> Element {
                     }
                 }
             });
-        }
-    });
-
-    // Load tasks when selected realm changes
-    use_effect(move || {
-        let selected = selected_realm();
-        if let Some(realm_id) = selected {
-            if engine_ready() {
-                spawn(async move {
-                    let shared = engine();
-                    let guard = shared.read().await;
-                    if let Some(ref eng) = *guard {
-                        match eng.list_tasks(&realm_id) {
-                            Ok(task_list) => tasks.set(task_list),
-                            Err(_) => tasks.set(vec![]),
-                        }
-                    }
-                });
-            }
-        } else {
-            tasks.set(vec![]);
         }
     });
 
@@ -108,25 +111,26 @@ pub fn Field() -> Element {
                     loop {
                         match events.recv().await {
                             Ok(SyncEvent::RealmChanged { realm_id, .. }) => {
-                                // Refresh tasks if this is the selected realm
-                                if selected_realm() == Some(realm_id.clone()) {
-                                    let shared = engine();
-                                    let mut guard = shared.write().await;
-                                    if let Some(ref mut eng) = *guard {
-                                        // Process any pending sync messages first!
-                                        // This applies received gossip messages to the document
-                                        let _ = eng.process_pending_sync();
+                                // Refresh tasks for this realm
+                                let shared = engine();
+                                let mut guard = shared.write().await;
+                                if let Some(ref mut eng) = *guard {
+                                    // Process any pending sync messages first
+                                    let _ = eng.process_pending_sync();
 
-                                        // Now read the updated task list
-                                        if let Ok(task_list) = eng.list_tasks(&realm_id) {
-                                            tasks.set(task_list);
-                                        }
+                                    // Update tasks for this realm
+                                    if let Ok(task_list) = eng.list_tasks(&realm_id) {
+                                        let mut map = tasks_by_realm.read().clone();
+                                        map.insert(realm_id, task_list);
+                                        tasks_by_realm.set(map);
+                                        let current = *generation.peek();
+                                        generation.set(current + 1);
                                     }
                                 }
                             }
                             Ok(SyncEvent::StatusChanged { realm_id, status }) => {
-                                // Update network state when sync status changes for selected realm
-                                if selected_realm() == Some(realm_id) {
+                                // Update network state if this is the opened realm
+                                if opened_realm() == Some(realm_id) {
                                     network_state.set(NetworkState::from_status(status));
                                 }
                             }
@@ -134,8 +138,8 @@ pub fn Field() -> Element {
                                 SyncEvent::PeerConnected { realm_id, .. }
                                 | SyncEvent::PeerDisconnected { realm_id, .. },
                             ) => {
-                                // Refresh sync status and debug info when peers connect/disconnect for selected realm
-                                if selected_realm() == Some(realm_id.clone()) {
+                                // Refresh sync status and debug info for opened realm
+                                if opened_realm() == Some(realm_id.clone()) {
                                     let shared = engine();
                                     let guard = shared.read().await;
                                     if let Some(ref eng) = *guard {
@@ -154,36 +158,6 @@ pub fn Field() -> Element {
         }
     });
 
-    // Handler for selecting a realm
-    let select_realm = move |realm_id: RealmId| {
-        spawn(async move {
-            let shared = engine();
-            let mut guard = shared.write().await;
-            if let Some(ref mut eng) = *guard {
-                let _ = eng.open_realm(&realm_id).await;
-
-                // Process any pending sync messages BEFORE reading tasks
-                // This handles messages that arrived when no realm was selected
-                let _ = eng.process_pending_sync();
-
-                // Update network status and debug info for this realm
-                let status = eng.sync_status(&realm_id);
-                network_state.set(NetworkState::from_status(status));
-                network_debug.set(Some(eng.network_debug_info(&realm_id)));
-
-                match eng.list_tasks(&realm_id) {
-                    Ok(task_list) => {
-                        tasks.set(task_list);
-                        selected_realm.set(Some(realm_id));
-                    }
-                    Err(e) => {
-                        error.set(Some(format!("Failed to load tasks: {}", e)));
-                    }
-                }
-            }
-        });
-    };
-
     // Handler for creating a new realm
     let create_realm = move |name: String| {
         if name.trim().is_empty() {
@@ -196,9 +170,25 @@ pub fn Field() -> Element {
             if let Some(ref mut eng) = *guard {
                 match eng.create_realm(&name).await {
                     Ok(realm_id) => {
+                        // Refresh realm list
                         let realm_list = eng.list_realms().await.unwrap_or_default();
                         realms.set(realm_list);
-                        selected_realm.set(Some(realm_id));
+
+                        // Initialize empty task list for new realm
+                        let mut map = tasks_by_realm.read().clone();
+                        map.insert(realm_id.clone(), vec![]);
+                        tasks_by_realm.set(map);
+                        let current = *generation.peek();
+                        generation.set(current + 1);
+
+                        // Open the new realm
+                        let _ = eng.open_realm(&realm_id).await;
+                        opened_realm.set(Some(realm_id.clone()));
+
+                        // Update network status
+                        let status = eng.sync_status(&realm_id);
+                        network_state.set(NetworkState::from_status(status));
+                        network_debug.set(Some(eng.network_debug_info(&realm_id)));
                     }
                     Err(e) => {
                         error.set(Some(format!("Failed to create realm: {}", e)));
@@ -208,53 +198,35 @@ pub fn Field() -> Element {
         });
     };
 
-    // Handler for adding a new task
-    let mut add_task = move |title: String| {
-        if title.trim().is_empty() || adding_task() {
+    // Handler for adding a task to a specific realm
+    let add_task = move |(realm_id, title): (RealmId, String)| {
+        if title.trim().is_empty() {
             return;
         }
 
-        let realm_id = match selected_realm() {
-            Some(id) => id,
-            None => return,
-        };
-
-        adding_task.set(true);
         spawn(async move {
             let shared = engine();
             let mut guard = shared.write().await;
             if let Some(ref mut eng) = *guard {
                 match eng.add_task(&realm_id, &title).await {
-                    Ok(_) => match eng.list_tasks(&realm_id) {
-                        Ok(task_list) => {
-                            tasks.set(task_list);
+                    Ok(_) => {
+                        // Refresh tasks for this realm
+                        if let Ok(task_list) = eng.list_tasks(&realm_id) {
+                            let mut map = tasks_by_realm.read().clone();
+                            map.insert(realm_id, task_list);
+                            tasks_by_realm.set(map);
                         }
-                        Err(e) => {
-                            error.set(Some(format!("Failed to refresh tasks: {}", e)));
-                        }
-                    },
+                    }
                     Err(e) => {
-                        error.set(Some(format!("Failed to add task: {}", e)));
+                        error.set(Some(format!("Failed to add intention: {}", e)));
                     }
                 }
             }
-            adding_task.set(false);
         });
     };
 
     // Handler for toggling a task
-    let mut toggle_task = move |task_id: syncengine_core::TaskId| {
-        // Prevent double-toggling
-        if toggling_task().is_some() {
-            return;
-        }
-
-        let realm_id = match selected_realm() {
-            Some(id) => id,
-            None => return,
-        };
-
-        toggling_task.set(Some(task_id.clone()));
+    let toggle_task = move |(realm_id, task_id): (RealmId, syncengine_core::TaskId)| {
         spawn(async move {
             let shared = engine();
             let mut guard = shared.write().await;
@@ -262,31 +234,21 @@ pub fn Field() -> Element {
                 match eng.toggle_task(&realm_id, &task_id).await {
                     Ok(_) => {
                         if let Ok(task_list) = eng.list_tasks(&realm_id) {
-                            tasks.set(task_list);
+                            let mut map = tasks_by_realm.read().clone();
+                            map.insert(realm_id, task_list);
+                            tasks_by_realm.set(map);
                         }
                     }
                     Err(e) => {
-                        error.set(Some(format!("Failed to toggle task: {}", e)));
+                        error.set(Some(format!("Failed to toggle intention: {}", e)));
                     }
                 }
             }
-            toggling_task.set(None);
         });
     };
 
     // Handler for deleting a task
-    let mut delete_task = move |task_id: syncengine_core::TaskId| {
-        // Prevent double-deleting
-        if deleting_task().is_some() {
-            return;
-        }
-
-        let realm_id = match selected_realm() {
-            Some(id) => id,
-            None => return,
-        };
-
-        deleting_task.set(Some(task_id.clone()));
+    let delete_task = move |(realm_id, task_id): (RealmId, syncengine_core::TaskId)| {
         spawn(async move {
             let shared = engine();
             let mut guard = shared.write().await;
@@ -294,7 +256,9 @@ pub fn Field() -> Element {
                 match eng.delete_task(&realm_id, &task_id).await {
                     Ok(_) => {
                         if let Ok(task_list) = eng.list_tasks(&realm_id) {
-                            tasks.set(task_list);
+                            let mut map = tasks_by_realm.read().clone();
+                            map.insert(realm_id, task_list);
+                            tasks_by_realm.set(map);
                         }
                     }
                     Err(e) => {
@@ -302,12 +266,16 @@ pub fn Field() -> Element {
                     }
                 }
             }
-            deleting_task.set(None);
         });
     };
 
+    // Handler for showing invite panel for a specific realm
+    let show_invite_for_realm = move |realm_id: RealmId| {
+        opened_realm.set(Some(realm_id));
+        show_invite_panel.set(true);
+    };
+
     // Handler called after JoinRealmModal successfully joins
-    // (the modal already called join_via_invite, we just need to refresh the UI)
     let on_realm_joined = move |_invite_string: String| {
         spawn(async move {
             let shared = engine();
@@ -317,18 +285,19 @@ pub fn Field() -> Element {
                 let realm_list = eng.list_realms().await.unwrap_or_default();
 
                 // Find the most recently added realm (highest created_at)
-                let newest_id = realm_list
-                    .iter()
-                    .max_by_key(|r| r.created_at)
-                    .map(|r| r.id.clone());
+                let newest_realm = realm_list.iter().max_by_key(|r| r.created_at).cloned();
 
-                realms.set(realm_list);
-
-                // Select the newly joined realm
-                if let Some(id) = newest_id {
-                    selected_realm.set(Some(id));
+                // Load tasks for new realm
+                let mut tasks_map = tasks_by_realm.read().clone();
+                if let Some(ref realm) = newest_realm {
+                    if let Ok(task_list) = eng.list_tasks(&realm.id) {
+                        tasks_map.insert(realm.id.clone(), task_list);
+                    }
                 }
 
+                realms.set(realm_list);
+                tasks_by_realm.set(tasks_map);
+                generation.set(generation() + 1);
                 show_join_modal.set(false);
             }
         });
@@ -348,6 +317,16 @@ pub fn Field() -> Element {
                         onclick: move |_| show_join_modal.set(true),
                         "Join Realm"
                     }
+
+                    // Profile navigation button
+                    Link {
+                        to: Route::Profile {},
+                        button {
+                            class: "profile-nav-button",
+                            title: "Profile",
+                            "👤"
+                        }
+                    }
                 }
 
                 NetworkResonance { state: network_state(), debug_info: network_debug() }
@@ -366,56 +345,33 @@ pub fn Field() -> Element {
             }
 
             // Loading state
-            if !engine_ready() {
+            if !engine_ready() || !data_loaded() {
                 div { class: "loading-state",
                     p { class: "loading-message", "synchronicities are forming..." }
                 }
             }
 
-            // Main content
+            // Main content - Unified Field View
             else {
-                div { class: "field-content",
-                    // Realm selector sidebar component
-                    RealmSelector {
-                        realms: realms(),
-                        selected: selected_realm(),
-                        on_select: select_realm,
-                        on_create: create_realm,
-                    }
+                div { class: "field-content-unified",
+                    // Main unified view
+                    main { class: "unified-main",
+                        {
+                            let gen = generation(); // Read generation to subscribe to changes
+                            let realms_list = realms();
+                            let tasks_map = tasks_by_realm();
 
-                    // Task list (center)
-                    main { class: "task-area",
-                        if selected_realm().is_some() {
-                            // Task area header with invite toggle
-                            div { class: "task-area-header",
-                                button {
-                                    class: if show_invite_panel() { "invite-toggle-btn active" } else { "invite-toggle-btn" },
-                                    onclick: move |_| show_invite_panel.set(!show_invite_panel()),
-                                    if show_invite_panel() { "Hide Invite" } else { "Summon Others" }
-                                }
-                            }
-
-                            TaskList {
-                                tasks: tasks(),
-                                on_toggle: move |id| toggle_task(id),
-                                on_delete: move |id| delete_task(id),
-                                on_add: move |title| add_task(title),
-                            }
-                        } else {
-                            div { class: "no-realm-selected",
-                                p { class: "body-text",
-                                    "Select a "
-                                    span { class: "sacred-term", "realm" }
-                                    " to view intentions, or manifest a new one."
-                                }
-                                p { class: "body-text hint-text",
-                                    "Or "
-                                    button {
-                                        class: "inline-link-btn",
-                                        onclick: move |_| show_join_modal.set(true),
-                                        "join an existing realm"
-                                    }
-                                    " with an invite sigil."
+                            rsx! {
+                                UnifiedFieldView {
+                                    key: "{gen}",
+                                    realms: realms_list,
+                                    tasks_by_realm: tasks_map,
+                                    generation: gen,
+                                    on_add_task: add_task,
+                                    on_toggle_task: toggle_task,
+                                    on_delete_task: delete_task,
+                                    on_create_realm: create_realm,
+                                    on_show_invite: show_invite_for_realm,
                                 }
                             }
                         }
@@ -423,7 +379,7 @@ pub fn Field() -> Element {
 
                     // Invite panel (right sidebar, shown when toggled)
                     if show_invite_panel() {
-                        if let Some(realm_id) = selected_realm() {
+                        if let Some(realm_id) = opened_realm() {
                             aside { class: "invite-sidebar",
                                 InvitePanel {
                                     realm_id: realm_id,

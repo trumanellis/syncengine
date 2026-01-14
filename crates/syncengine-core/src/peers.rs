@@ -63,7 +63,7 @@ impl std::fmt::Display for PeerStatus {
 }
 
 /// Information about a discovered peer
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PeerInfo {
     /// The peer's public key (iroh endpoint ID)
     pub endpoint_id: [u8; 32],

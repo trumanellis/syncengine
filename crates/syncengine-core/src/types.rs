@@ -6,6 +6,14 @@ use ulid::Ulid;
 
 use crate::invite::NodeAddrBytes;
 
+// Submodules for rich card types
+pub mod image;
+pub mod profile;
+
+// Re-export card types for convenience
+pub use image::CardImage;
+pub use profile::UserProfile;
+
 /// Unique identifier for a realm (gossip topic)
 ///
 /// A realm represents a shared space where tasks are synchronized
@@ -140,6 +148,7 @@ impl RealmInfo {
 /// Task in a realm
 ///
 /// Represents a single task item that can be synchronized between peers.
+/// Extended with rich "quest" fields for enhanced display in cards.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Task {
     /// Unique identifier for the task
@@ -152,6 +161,37 @@ pub struct Task {
     pub created_at: i64,
     /// Unix timestamp of completion (if completed)
     pub completed_at: Option<i64>,
+
+    // ─────────────────────────────────────────────────────────────────
+    // Rich quest fields (optional, backwards compatible)
+    // ─────────────────────────────────────────────────────────────────
+    /// Optional subtitle for quest cards
+    #[serde(default)]
+    pub subtitle: Option<String>,
+
+    /// Custom short link for this quest (e.g., "save-the-realm")
+    #[serde(default)]
+    pub quest_link: Option<String>,
+
+    /// Markdown-formatted description (shown in quest card)
+    #[serde(default)]
+    pub description: String,
+
+    /// Iroh blob hash for quest image
+    #[serde(default)]
+    pub image_blob_id: Option<String>,
+
+    /// Peer IDs of users involved in this quest
+    #[serde(default)]
+    pub involved_peers: Vec<String>,
+
+    /// Optional category for grouping/filtering
+    #[serde(default)]
+    pub category: Option<String>,
+
+    /// Peer ID of who created this quest
+    #[serde(default)]
+    pub created_by: Option<String>,
 }
 
 impl Task {
@@ -163,7 +203,41 @@ impl Task {
             completed: false,
             created_at: chrono::Utc::now().timestamp(),
             completed_at: None,
+            subtitle: None,
+            quest_link: None,
+            description: String::new(),
+            image_blob_id: None,
+            involved_peers: Vec::new(),
+            category: None,
+            created_by: None,
         }
+    }
+
+    /// Create a new "quest" with rich metadata
+    pub fn new_quest(
+        title: impl Into<String>,
+        subtitle: Option<String>,
+        description: impl Into<String>,
+    ) -> Self {
+        Self {
+            id: TaskId::new(),
+            title: title.into(),
+            completed: false,
+            created_at: chrono::Utc::now().timestamp(),
+            completed_at: None,
+            subtitle,
+            quest_link: None,
+            description: description.into(),
+            image_blob_id: None,
+            involved_peers: Vec::new(),
+            category: None,
+            created_by: None,
+        }
+    }
+
+    /// Check if this task is a "rich quest" (has extended metadata)
+    pub fn is_quest(&self) -> bool {
+        !self.description.is_empty() || self.image_blob_id.is_some()
     }
 
     /// Mark the task as completed

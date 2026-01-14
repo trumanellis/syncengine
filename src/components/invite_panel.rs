@@ -228,9 +228,64 @@ pub fn InvitePanel(
     // Get shared engine from context
     let engine = use_engine();
 
-    // Generate invite handler
+    // Clone realm_id for closures
+    let realm_id_for_auto_gen = realm_id.clone();
+    let realm_id_for_manual_gen = realm_id.clone();
+
+    // Auto-generate invite on mount
+    use_effect(move || {
+        let realm_id = realm_id_for_auto_gen.clone();
+        let on_created = on_invite_created.clone();
+
+        spawn(async move {
+            loading.set(true);
+            error.set(None);
+
+            // Use shared engine from context
+            let shared = engine();
+            let mut guard = shared.write().await;
+
+            if let Some(ref mut eng) = *guard {
+                match eng.generate_invite(&realm_id).await {
+                    Ok(ticket) => {
+                        // Calculate expiry if set
+                        if let Some(exp) = ticket.expires_at {
+                            let now = chrono::Utc::now().timestamp();
+                            expiry_seconds.set(Some(exp - now));
+                        }
+
+                        // Encode the ticket
+                        match ticket.encode() {
+                            Ok(encoded) => {
+                                invite_string.set(Some(encoded));
+
+                                // Call callback if provided
+                                if let Some(handler) = &on_created {
+                                    handler.call(ticket.clone());
+                                }
+
+                                invite_ticket.set(Some(ticket));
+                            }
+                            Err(e) => {
+                                error.set(Some(format!("Failed to encode sigil: {}", e)));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        error.set(Some(format!("Failed to summon sigil: {}", e)));
+                    }
+                }
+            } else {
+                error.set(Some("Engine not initialized".to_string()));
+            }
+
+            loading.set(false);
+        });
+    });
+
+    // Generate invite handler (kept for regenerate button)
     let generate_invite = move |_| {
-        let realm_id = realm_id.clone();
+        let realm_id = realm_id_for_manual_gen.clone();
         let on_created = on_invite_created.clone();
 
         spawn(async move {
@@ -283,6 +338,7 @@ pub fn InvitePanel(
     let copy_to_clipboard = move |_| {
         if let Some(ref invite) = invite_string() {
             let invite_text = invite.clone();
+            let close_handler = on_close.clone();
 
             spawn(async move {
                 // Use arboard for cross-platform clipboard access
@@ -290,17 +346,23 @@ pub fn InvitePanel(
                     Ok(mut clipboard) => {
                         if clipboard.set_text(&invite_text).is_ok() {
                             copied.set(true);
-                            // Reset copied state after 2 seconds
-                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                            copied.set(false);
+                            // Wait briefly to show feedback
+                            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                            // Close the panel
+                            if let Some(handler) = close_handler {
+                                handler.call(());
+                            }
                         }
                     }
                     Err(e) => {
                         tracing::warn!("Clipboard not available: {}", e);
                         // Still show feedback even if clipboard fails
                         copied.set(true);
-                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                        copied.set(false);
+                        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                        // Close the panel
+                        if let Some(handler) = close_handler {
+                            handler.call(());
+                        }
                     }
                 }
             });
@@ -350,15 +412,6 @@ pub fn InvitePanel(
                         onclick: move |_| error.set(None),
                         "dismiss"
                     }
-                }
-            }
-
-            // Generate button (shown when no invite)
-            if invite_string().is_none() && !loading() {
-                button {
-                    class: "btn-primary invite-generate-btn",
-                    onclick: generate_invite,
-                    "Generate Invite Sigil"
                 }
             }
 
@@ -418,11 +471,7 @@ pub fn InvitePanel(
                     // Generate new button
                     button {
                         class: "btn-badge invite-new-btn",
-                        onclick: move |_| {
-                            invite_ticket.set(None);
-                            invite_string.set(None);
-                            expiry_seconds.set(None);
-                        },
+                        onclick: generate_invite,
                         "generate new sigil"
                     }
                 }

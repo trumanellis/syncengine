@@ -22,6 +22,16 @@ dirs = "5.0"
 qrcode = "0.14"
 chrono.workspace = true
 arboard = "3.4"
+gloo = "0.11"
+hex = "0.4"
+
+# Markdown rendering
+pulldown-cmark.workspace = true
+
+# Image processing
+image.workspace = true
+rfd.workspace = true
+base64.workspace = true
 
 [workspace.dependencies]
 # UI Framework
@@ -71,6 +81,12 @@ chrono = "0.4"
 # Concurrency
 parking_lot = "0.12"
 futures = "0.3"
+
+# UI-specific
+pulldown-cmark = "0.12"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+rfd = "0.15"
+base64 = "0.22"
 
 # Testing
 tempfile = "3.14"
