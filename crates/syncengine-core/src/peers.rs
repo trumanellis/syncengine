@@ -77,6 +77,15 @@ pub struct PeerInfo {
     pub status: PeerStatus,
     /// List of realm IDs we share with this peer
     pub shared_realms: Vec<RealmId>,
+    /// Total number of connection attempts
+    #[serde(default)]
+    pub connection_attempts: u32,
+    /// Number of successful connections
+    #[serde(default)]
+    pub successful_connections: u32,
+    /// Unix timestamp of last connection attempt
+    #[serde(default)]
+    pub last_attempt: u64,
 }
 
 impl PeerInfo {
@@ -89,6 +98,9 @@ impl PeerInfo {
             source,
             status: PeerStatus::Unknown,
             shared_realms: Vec::new(),
+            connection_attempts: 0,
+            successful_connections: 0,
+            last_attempt: 0,
         }
     }
 
@@ -127,6 +139,95 @@ impl PeerInfo {
     /// Get the endpoint ID as a PublicKey
     pub fn public_key(&self) -> PublicKey {
         PublicKey::from_bytes(&self.endpoint_id).expect("stored endpoint_id should always be valid")
+    }
+
+    /// Record a connection attempt
+    pub fn record_attempt(&mut self) {
+        self.connection_attempts += 1;
+        self.last_attempt = Self::current_timestamp();
+    }
+
+    /// Record a successful connection
+    pub fn record_success(&mut self) {
+        self.successful_connections += 1;
+        self.status = PeerStatus::Online;
+        self.touch();
+    }
+
+    /// Record a connection failure
+    pub fn record_failure(&mut self) {
+        self.status = PeerStatus::Offline;
+    }
+
+    /// Calculate success rate (0.0 to 1.0)
+    pub fn success_rate(&self) -> f64 {
+        if self.connection_attempts == 0 {
+            0.0
+        } else {
+            self.successful_connections as f64 / self.connection_attempts as f64
+        }
+    }
+
+    /// Calculate the number of consecutive failures
+    fn consecutive_failures(&self) -> u32 {
+        // If we have no attempts or no successes, count all attempts as failures
+        if self.connection_attempts == 0 {
+            return 0;
+        }
+        // Since we don't track consecutive failures explicitly,
+        // we'll use a simple heuristic: total attempts - successful connections
+        // This is an approximation that works well enough for backoff purposes
+        self.connection_attempts.saturating_sub(self.successful_connections)
+    }
+
+    /// Calculate Fibonacci backoff delay in seconds
+    /// Sequence: 1min, 1min, 2min, 3min, 5min, 8min, 13min, 21min, 34min, 55min, capped at 60min
+    pub fn backoff_delay(&self) -> u64 {
+        let failures = self.consecutive_failures();
+        let base_unit = 60u64; // 1 minute in seconds
+        let max_delay = 3600u64; // 60 minutes in seconds
+
+        // Calculate Fibonacci number for the failure count
+        let fib = Self::fibonacci(failures);
+
+        // Convert to seconds (Fibonacci number * 1 minute)
+        let delay = fib.saturating_mul(base_unit);
+
+        // Cap at 60 minutes
+        delay.min(max_delay)
+    }
+
+    /// Calculate the nth Fibonacci number efficiently (iterative)
+    /// F(0) = 1, F(1) = 1, F(n) = F(n-1) + F(n-2)
+    fn fibonacci(n: u32) -> u64 {
+        match n {
+            0 => 1,
+            1 => 1,
+            _ => {
+                let mut a = 1u64;
+                let mut b = 1u64;
+                for _ in 2..=n {
+                    let next = a.saturating_add(b);
+                    a = b;
+                    b = next;
+                }
+                b
+            }
+        }
+    }
+
+    /// Check if enough time has passed since last attempt to retry
+    pub fn should_retry_now(&self) -> bool {
+        if self.last_attempt == 0 {
+            // Never attempted, can retry immediately
+            return true;
+        }
+
+        let now = Self::current_timestamp();
+        let elapsed = now.saturating_sub(self.last_attempt);
+        let required_delay = self.backoff_delay();
+
+        elapsed >= required_delay
     }
 }
 
@@ -550,5 +651,235 @@ mod tests {
             assert_eq!(retrieved.nickname, Some("Alice".to_string()));
             assert_eq!(retrieved.status, PeerStatus::Online);
         }
+    }
+
+    #[test]
+    fn test_connection_metrics_record_attempt() {
+        let endpoint_id = create_test_public_key();
+        let mut peer = PeerInfo::new(endpoint_id, PeerSource::FromInvite);
+
+        assert_eq!(peer.connection_attempts, 0);
+        assert_eq!(peer.last_attempt, 0);
+
+        peer.record_attempt();
+        assert_eq!(peer.connection_attempts, 1);
+        assert!(peer.last_attempt > 0);
+
+        let first_attempt = peer.last_attempt;
+        peer.record_attempt();
+        assert_eq!(peer.connection_attempts, 2);
+        assert!(peer.last_attempt >= first_attempt);
+    }
+
+    #[test]
+    fn test_connection_metrics_record_success() {
+        let endpoint_id = create_test_public_key();
+        let mut peer = PeerInfo::new(endpoint_id, PeerSource::FromInvite);
+
+        assert_eq!(peer.successful_connections, 0);
+        assert_eq!(peer.status, PeerStatus::Unknown);
+
+        peer.record_success();
+        assert_eq!(peer.successful_connections, 1);
+        assert_eq!(peer.status, PeerStatus::Online);
+        assert!(peer.last_seen > 0);
+    }
+
+    #[test]
+    fn test_connection_metrics_record_failure() {
+        let endpoint_id = create_test_public_key();
+        let mut peer = PeerInfo::new(endpoint_id, PeerSource::FromInvite);
+
+        peer.record_failure();
+        assert_eq!(peer.status, PeerStatus::Offline);
+    }
+
+    #[test]
+    fn test_connection_metrics_success_rate() {
+        let endpoint_id = create_test_public_key();
+        let mut peer = PeerInfo::new(endpoint_id, PeerSource::FromInvite);
+
+        // No attempts yet
+        assert_eq!(peer.success_rate(), 0.0);
+
+        // 1 success out of 1 attempt
+        peer.connection_attempts = 1;
+        peer.successful_connections = 1;
+        assert_eq!(peer.success_rate(), 1.0);
+
+        // 1 success out of 2 attempts
+        peer.connection_attempts = 2;
+        assert_eq!(peer.success_rate(), 0.5);
+
+        // 2 successes out of 5 attempts
+        peer.connection_attempts = 5;
+        peer.successful_connections = 2;
+        assert_eq!(peer.success_rate(), 0.4);
+    }
+
+    #[test]
+    fn test_fibonacci_backoff_no_failures() {
+        let endpoint_id = create_test_public_key();
+        let peer = PeerInfo::new(endpoint_id, PeerSource::FromInvite);
+
+        // No attempts = no backoff, F(0) = 1 minute
+        assert_eq!(peer.backoff_delay(), 60); // 1 minute
+    }
+
+    #[test]
+    fn test_fibonacci_backoff_progression() {
+        let endpoint_id = create_test_public_key();
+        let mut peer = PeerInfo::new(endpoint_id, PeerSource::FromInvite);
+
+        // 0 failures (0 attempts, 0 successes) - F(0) = 1
+        assert_eq!(peer.backoff_delay(), 60); // 1 minute
+
+        // 1 failure (1 attempt, 0 successes) - F(1) = 1
+        peer.connection_attempts = 1;
+        peer.successful_connections = 0;
+        assert_eq!(peer.backoff_delay(), 60); // 1 minute
+
+        // 2 failures (2 attempts, 0 successes) - F(2) = 2
+        peer.connection_attempts = 2;
+        peer.successful_connections = 0;
+        assert_eq!(peer.backoff_delay(), 120); // 2 minutes
+
+        // 3 failures (3 attempts, 0 successes) - F(3) = 3
+        peer.connection_attempts = 3;
+        peer.successful_connections = 0;
+        assert_eq!(peer.backoff_delay(), 180); // 3 minutes
+
+        // 4 failures (4 attempts, 0 successes) - F(4) = 5
+        peer.connection_attempts = 4;
+        peer.successful_connections = 0;
+        assert_eq!(peer.backoff_delay(), 300); // 5 minutes
+
+        // 5 failures (5 attempts, 0 successes) - F(5) = 8
+        peer.connection_attempts = 5;
+        peer.successful_connections = 0;
+        assert_eq!(peer.backoff_delay(), 480); // 8 minutes
+
+        // 6 failures (6 attempts, 0 successes) - F(6) = 13
+        peer.connection_attempts = 6;
+        peer.successful_connections = 0;
+        assert_eq!(peer.backoff_delay(), 780); // 13 minutes
+
+        // 7 failures (7 attempts, 0 successes) - F(7) = 21
+        peer.connection_attempts = 7;
+        peer.successful_connections = 0;
+        assert_eq!(peer.backoff_delay(), 1260); // 21 minutes
+
+        // 8 failures (8 attempts, 0 successes) - F(8) = 34
+        peer.connection_attempts = 8;
+        peer.successful_connections = 0;
+        assert_eq!(peer.backoff_delay(), 2040); // 34 minutes
+
+        // 9 failures (9 attempts, 0 successes) - F(9) = 55
+        peer.connection_attempts = 9;
+        peer.successful_connections = 0;
+        assert_eq!(peer.backoff_delay(), 3300); // 55 minutes
+
+        // 10 failures (10 attempts, 0 successes) - F(10) = 89, but capped at 60 min
+        peer.connection_attempts = 10;
+        peer.successful_connections = 0;
+        assert_eq!(peer.backoff_delay(), 3600); // 60 minutes (capped)
+
+        // 15 failures - still capped
+        peer.connection_attempts = 15;
+        peer.successful_connections = 0;
+        assert_eq!(peer.backoff_delay(), 3600); // Still capped at 60 minutes
+    }
+
+    #[test]
+    fn test_fibonacci_backoff_success_resets() {
+        let endpoint_id = create_test_public_key();
+        let mut peer = PeerInfo::new(endpoint_id, PeerSource::FromInvite);
+
+        // Build up failures - F(9) = 55 minutes
+        peer.connection_attempts = 9;
+        peer.successful_connections = 0;
+        assert_eq!(peer.backoff_delay(), 3300); // 55 minutes
+
+        // Record a success
+        peer.successful_connections = 1;
+        // Now we have 8 failures (9 - 1), F(8) = 34
+        assert_eq!(peer.backoff_delay(), 2040); // 34 minutes
+
+        // Another success
+        peer.successful_connections = 2;
+        // Now we have 7 failures (9 - 2), F(7) = 21
+        assert_eq!(peer.backoff_delay(), 1260); // 21 minutes
+
+        // All successes
+        peer.successful_connections = 9;
+        // Now we have 0 failures (9 - 9), F(0) = 1
+        assert_eq!(peer.backoff_delay(), 60); // Back to 1 minute
+    }
+
+    #[test]
+    fn test_should_retry_now_never_attempted() {
+        let endpoint_id = create_test_public_key();
+        let peer = PeerInfo::new(endpoint_id, PeerSource::FromInvite);
+
+        // Never attempted, should be able to retry immediately
+        assert!(peer.should_retry_now());
+    }
+
+    #[test]
+    fn test_should_retry_now_with_backoff() {
+        let endpoint_id = create_test_public_key();
+        let mut peer = PeerInfo::new(endpoint_id, PeerSource::FromInvite);
+
+        // Set up a failure scenario (1 failure = F(1) = 1 min)
+        peer.connection_attempts = 1;
+        peer.successful_connections = 0;
+        peer.last_attempt = PeerInfo::current_timestamp();
+
+        // Should not be able to retry immediately (needs 1 min backoff)
+        assert!(!peer.should_retry_now());
+
+        // Simulate time passing (set last_attempt to 1 minute ago)
+        peer.last_attempt = PeerInfo::current_timestamp() - 60;
+        assert!(peer.should_retry_now());
+    }
+
+    #[test]
+    fn test_should_retry_now_respects_backoff_increase() {
+        let endpoint_id = create_test_public_key();
+        let mut peer = PeerInfo::new(endpoint_id, PeerSource::FromInvite);
+
+        // Set up 5 failures (F(5) = 8 min backoff)
+        peer.connection_attempts = 5;
+        peer.successful_connections = 0;
+        peer.last_attempt = PeerInfo::current_timestamp() - 300; // 5 minutes ago
+
+        // 5 minutes passed, but needs 8 minutes
+        assert!(!peer.should_retry_now());
+
+        // Simulate 8 minutes passing
+        peer.last_attempt = PeerInfo::current_timestamp() - 480;
+        assert!(peer.should_retry_now());
+    }
+
+    #[test]
+    fn test_connection_metrics_persist() {
+        let (registry, _temp) = create_test_registry();
+
+        let endpoint_id = create_test_public_key();
+        let mut peer = PeerInfo::new(endpoint_id, PeerSource::FromInvite);
+
+        // Set up metrics
+        peer.connection_attempts = 5;
+        peer.successful_connections = 2;
+        peer.last_attempt = 123456;
+
+        // Save to registry
+        registry.add_or_update(&peer).unwrap();
+
+        // Retrieve and verify
+        let retrieved = registry.get(&endpoint_id).unwrap().unwrap();
+        assert_eq!(retrieved.connection_attempts, 5);
+        assert_eq!(retrieved.successful_connections, 2);
+        assert_eq!(retrieved.last_attempt, 123456);
     }
 }

@@ -18,6 +18,7 @@ const REALMS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("realms"
 const DOCUMENTS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("documents");
 const IDENTITY_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("identity");
 const REALM_KEYS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("realm_keys");
+const ENDPOINT_SECRET_KEY_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("endpoint_secret_key");
 
 /// Storage layer using redb for ACID-compliant persistence
 #[derive(Clone)]
@@ -60,6 +61,7 @@ impl Storage {
             let _ = write_txn.open_table(DOCUMENTS_TABLE)?;
             let _ = write_txn.open_table(IDENTITY_TABLE)?;
             let _ = write_txn.open_table(REALM_KEYS_TABLE)?;
+            let _ = write_txn.open_table(ENDPOINT_SECRET_KEY_TABLE)?;
         }
         write_txn.commit()?;
 
@@ -255,6 +257,46 @@ impl Storage {
         let table = read_txn.open_table(IDENTITY_TABLE)?;
 
         Ok(table.get(Self::IDENTITY_KEY)?.is_some())
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Endpoint Secret Key Operations
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Endpoint secret key storage key (there's only one endpoint per node)
+    const ENDPOINT_SECRET_KEY: &'static str = "endpoint_secret_key";
+
+    /// Save the endpoint's secret key to storage.
+    ///
+    /// There is only one endpoint per node, stored with a fixed key.
+    /// This ensures stable node identity across restarts.
+    pub fn save_endpoint_secret_key(&self, secret_key: &[u8; 32]) -> Result<(), SyncError> {
+        let db = self.db.read();
+        let write_txn = db.begin_write()?;
+        {
+            let mut table = write_txn.open_table(ENDPOINT_SECRET_KEY_TABLE)?;
+            table.insert(Self::ENDPOINT_SECRET_KEY, secret_key.as_slice())?;
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
+
+    /// Load the endpoint's secret key from storage.
+    ///
+    /// Returns `None` if no endpoint secret key has been created yet.
+    pub fn load_endpoint_secret_key(&self) -> Result<Option<[u8; 32]>, SyncError> {
+        let db = self.db.read();
+        let read_txn = db.begin_read()?;
+        let table = read_txn.open_table(ENDPOINT_SECRET_KEY_TABLE)?;
+
+        match table.get(Self::ENDPOINT_SECRET_KEY)? {
+            Some(v) => {
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(v.value());
+                Ok(Some(arr))
+            }
+            None => Ok(None),
+        }
     }
 }
 
@@ -468,5 +510,56 @@ mod tests {
             let loaded = storage.load_identity().unwrap().unwrap();
             assert_eq!(loaded.public_key(), public_key);
         }
+    }
+
+    #[test]
+    fn test_save_and_load_endpoint_secret_key() {
+        let (storage, _temp) = create_test_storage();
+
+        // Initially no endpoint secret key
+        assert!(storage.load_endpoint_secret_key().unwrap().is_none());
+
+        // Generate and save endpoint secret key
+        let secret_key = [42u8; 32];
+        storage.save_endpoint_secret_key(&secret_key).unwrap();
+
+        // Load endpoint secret key and verify it matches
+        let loaded = storage.load_endpoint_secret_key().unwrap().unwrap();
+        assert_eq!(loaded, secret_key);
+    }
+
+    #[test]
+    fn test_endpoint_secret_key_persists_across_instances() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+
+        // Save endpoint secret key in first storage instance
+        let secret_key = [137u8; 32];
+        {
+            let storage = Storage::new(&db_path).unwrap();
+            storage.save_endpoint_secret_key(&secret_key).unwrap();
+        }
+
+        // Load endpoint secret key in second storage instance
+        {
+            let storage = Storage::new(&db_path).unwrap();
+            let loaded = storage.load_endpoint_secret_key().unwrap().unwrap();
+            assert_eq!(loaded, secret_key);
+        }
+    }
+
+    #[test]
+    fn test_endpoint_secret_key_can_be_overwritten() {
+        let (storage, _temp) = create_test_storage();
+
+        // Save first key
+        let key1 = [1u8; 32];
+        storage.save_endpoint_secret_key(&key1).unwrap();
+        assert_eq!(storage.load_endpoint_secret_key().unwrap().unwrap(), key1);
+
+        // Overwrite with second key
+        let key2 = [2u8; 32];
+        storage.save_endpoint_secret_key(&key2).unwrap();
+        assert_eq!(storage.load_endpoint_secret_key().unwrap().unwrap(), key2);
     }
 }

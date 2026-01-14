@@ -441,6 +441,86 @@ body {
   margin: 0;
 }
 
+/* === Peer List === */
+.peer-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+  margin-top: 0.5rem;
+  padding: 0.5rem;
+  background: var(--void-black);
+  border-radius: 2px;
+}
+
+.peer-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.25rem 0.5rem;
+  border-radius: 2px;
+  transition: background 0.2s ease;
+}
+
+.peer-row:hover {
+  background: rgba(124, 184, 124, 0.05);
+}
+
+/* Peer Status Dot */
+.peer-status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.peer-status-dot.online {
+  background: var(--moss-glow);
+  box-shadow: 0 0 6px var(--moss-glow);
+  animation: peer-pulse 2s ease-in-out infinite;
+}
+
+.peer-status-dot.offline {
+  background: var(--text-muted);
+  opacity: 0.5;
+}
+
+@keyframes peer-pulse {
+  0%, 100% {
+    opacity: 1;
+    box-shadow: 0 0 6px var(--moss-glow);
+  }
+  50% {
+    opacity: 0.7;
+    box-shadow: 0 0 10px var(--moss-glow);
+  }
+}
+
+/* Peer ID */
+.peer-id {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.peer-id.online {
+  color: var(--cyan);
+}
+
+.peer-id.offline {
+  color: var(--text-muted);
+}
+
+/* Peer Duration */
+.peer-duration {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+
 /* === Buttons === */
 .btn-primary {
   padding: 0.75rem 2rem;
@@ -1429,6 +1509,239 @@ body {
   .header-actions {
     margin-left: 0;
     margin-right: 0;
+  }
+}
+
+/* === Unified Field View Layout === */
+.field-content-unified {
+  display: flex;
+  gap: 2rem;
+  min-height: calc(100vh - 200px);
+  padding-bottom: 5rem;
+}
+
+.unified-main {
+  flex: 1;
+  max-width: 1000px;
+  margin: 0 auto;
+}
+
+/* === Unified Field View === */
+.unified-field-view {
+  width: 100%;
+  padding: 0 1rem 5rem 1rem;
+}
+
+.realm-sections {
+  display: flex;
+  flex-direction: column;
+  gap: 2rem;
+}
+
+/* === Realm Section === */
+.realm-section {
+  border-left: 2px solid var(--moss);
+  padding-left: 1.5rem;
+  transition: border-color 0.3s ease;
+}
+
+.realm-section:hover {
+  border-color: var(--moss-glow);
+}
+
+/* Realm Header (collapsible) */
+.realm-header {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.5rem 0;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  text-align: left;
+  transition: all 0.2s ease;
+}
+
+.realm-header:hover .realm-title {
+  text-shadow: 0 0 20px var(--gold-glow);
+}
+
+.expand-icon {
+  color: var(--moss-glow);
+  font-size: var(--text-sm);
+  transition: transform 0.2s ease;
+  width: 1rem;
+  text-align: center;
+}
+
+.realm-title {
+  flex: 1;
+  margin: 0;
+  transition: text-shadow 0.3s ease;
+}
+
+.realm-meta {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  margin-left: auto;
+}
+
+.realm-badge {
+  padding: 0.25rem 0.5rem;
+  border-radius: 3px;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  border: 1px solid;
+}
+
+.shared-badge {
+  border-color: var(--cyan);
+  color: var(--cyan);
+  background: rgba(0, 212, 170, 0.1);
+}
+
+.count-badge {
+  border-color: var(--moss);
+  color: var(--text-secondary);
+  background: transparent;
+}
+
+/* Realm Invite Button */
+.realm-invite-btn {
+  padding: 0.25rem 0.5rem;
+  border-radius: 3px;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  border: 1px solid var(--gold);
+  color: var(--gold);
+  background: transparent;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  margin-left: 0.5rem;
+}
+
+.realm-invite-btn:hover {
+  background: rgba(212, 175, 55, 0.1);
+  box-shadow: 0 0 8px var(--gold-glow);
+  border-color: var(--gold);
+}
+
+/* Realm Content (expandable) */
+.realm-content {
+  margin-top: 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  animation: fadeIn 0.3s ease;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(-8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Realm Manifest Input */
+.realm-manifest-input {
+  display: flex;
+  gap: 1rem;
+  align-items: center;
+  padding: 0.5rem;
+  background: rgba(10, 14, 15, 0.3);
+  border-radius: 4px;
+  border: 1px solid var(--void-border);
+}
+
+.realm-manifest-input .input-field {
+  flex: 1;
+}
+
+/* Realm Task List */
+.realm-task-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-left: 0.5rem;
+}
+
+.empty-task-state {
+  color: var(--text-muted);
+  font-style: italic;
+  font-size: var(--text-sm);
+  padding: 1rem;
+  text-align: center;
+  border: 1px dashed var(--void-border);
+  border-radius: 4px;
+}
+
+/* === Create Realm Section === */
+.create-realm-section {
+  margin-top: 3rem;
+  padding-top: 2rem;
+  border-top: 1px solid var(--void-border);
+  display: flex;
+  justify-content: center;
+}
+
+.create-realm-btn {
+  padding: 0.75rem 1.5rem;
+  font-size: var(--text-sm);
+}
+
+.new-realm-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  max-width: 400px;
+  width: 100%;
+  padding: 1rem;
+  background: var(--void-lighter);
+  border: 1px solid var(--void-border);
+  border-radius: 4px;
+}
+
+.form-actions {
+  display: flex;
+  gap: 0.5rem;
+  justify-content: flex-end;
+}
+
+/* Empty Realms State */
+.empty-realms-state {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 200px;
+  border: 1px dashed var(--void-border);
+  border-radius: 8px;
+  padding: 2rem;
+  text-align: center;
+}
+
+/* === Responsive Adjustments for Unified View === */
+@media (max-width: 700px) {
+  .unified-field-view {
+    padding: 0 0.5rem 5rem 0.5rem;
+  }
+
+  .realm-section {
+    padding-left: 1rem;
+  }
+
+  .realm-manifest-input {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .realm-manifest-input .btn-primary {
+    width: 100%;
   }
 }
 "#;

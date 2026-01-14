@@ -937,6 +937,56 @@ impl SyncEngine {
         self.gossip.is_some()
     }
 
+    /// Get effective bootstrap peers by combining static peers from storage
+    /// with online peers from the peer registry.
+    ///
+    /// This enables dynamic peer discovery - peers discovered in previous sessions
+    /// automatically become bootstrap peers for reconnection.
+    fn get_effective_bootstrap_peers(&self, realm_id: &RealmId) -> Result<Vec<iroh::PublicKey>, SyncError> {
+        let mut peer_ids = std::collections::HashSet::new();
+
+        // 1. Add static peers from invite/storage
+        if let Some(realm_info) = self.storage.load_realm(realm_id)? {
+            for peer_bytes in &realm_info.bootstrap_peers {
+                match peer_bytes.to_endpoint_addr() {
+                    Ok(endpoint_addr) => {
+                        peer_ids.insert(endpoint_addr.id);
+                    }
+                    Err(e) => {
+                        warn!(%realm_id, error = ?e, "Failed to parse saved peer address");
+                    }
+                }
+            }
+        }
+
+        // 2. Add online peers from registry that share this realm
+        match self.peer_registry.list_by_status(PeerStatus::Online) {
+            Ok(online_peers) => {
+                for peer_info in online_peers {
+                    if peer_info.shared_realms.contains(realm_id) {
+                        match iroh::PublicKey::from_bytes(&peer_info.endpoint_id) {
+                            Ok(peer_id) => {
+                                peer_ids.insert(peer_id);
+                            }
+                            Err(e) => {
+                                warn!(error = ?e, "Failed to parse peer endpoint ID from registry");
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                warn!(error = ?e, "Failed to query online peers from registry");
+            }
+        }
+
+        let peers: Vec<iroh::PublicKey> = peer_ids.into_iter().collect();
+        if !peers.is_empty() {
+            debug!(%realm_id, peer_count = peers.len(), "Effective bootstrap peers (static + registry)");
+        }
+        Ok(peers)
+    }
+
     /// Ensure gossip networking is initialized
     async fn ensure_gossip(&mut self) -> Result<Arc<GossipSync>, SyncError> {
         if let Some(ref gossip) = self.gossip {
@@ -944,7 +994,24 @@ impl SyncEngine {
         }
 
         info!("Initializing gossip networking");
-        let gossip = Arc::new(GossipSync::new().await?);
+
+        // Load or generate persistent endpoint secret key
+        let secret_key = match self.storage.load_endpoint_secret_key()? {
+            Some(key_bytes) => {
+                info!("Loaded persistent endpoint secret key from storage");
+                iroh::SecretKey::from(key_bytes)
+            }
+            None => {
+                info!("No endpoint secret key found, generating new one");
+                let secret_key = iroh::SecretKey::generate(&mut rand::rng());
+                let key_bytes: [u8; 32] = secret_key.to_bytes();
+                self.storage.save_endpoint_secret_key(&key_bytes)?;
+                info!("Saved new endpoint secret key to storage");
+                secret_key
+            }
+        };
+
+        let gossip = Arc::new(GossipSync::with_secret_key(Some(secret_key)).await?);
         self.gossip = Some(gossip.clone());
         Ok(gossip)
     }
@@ -971,8 +1038,11 @@ impl SyncEngine {
     /// Attempt to reconnect to all inactive peers
     ///
     /// This iterates through all peers with status Offline or Unknown and
-    /// attempts to establish a connection. The peer status is updated based
-    /// on the connection result.
+    /// attempts to establish a connection using exponential backoff.
+    ///
+    /// Peers are only retried if enough time has passed according to their
+    /// backoff delay (5min * 2^failures, capped at 1 hour). Connection attempts
+    /// and results are tracked to calculate success rates and adjust backoff.
     ///
     /// This is called automatically by the background reconnection task.
     pub async fn attempt_reconnect_inactive_peers(&self) -> Result<(), SyncError> {
@@ -983,21 +1053,38 @@ impl SyncEngine {
             return Ok(());
         }
 
+        // Skip if gossip not initialized
+        let Some(ref gossip) = self.gossip else {
+            debug!("Gossip not initialized, skipping peer reconnection");
+            return Ok(());
+        };
+
+        let mut attempted = 0;
+        let mut succeeded = 0;
+        let mut skipped = 0;
+
         info!(
-            "Attempting to reconnect to {} inactive peers",
+            "Checking {} inactive peers for reconnection (with exponential backoff)",
             inactive.len()
         );
 
-        for peer_info in inactive {
+        for mut peer_info in inactive {
             let peer_id = peer_info.public_key();
 
-            // Skip if gossip not initialized
-            let Some(ref gossip) = self.gossip else {
-                debug!("Gossip not initialized, skipping peer reconnection");
-                return Ok(());
-            };
+            // Check if enough time has passed for retry (exponential backoff)
+            if !peer_info.should_retry_now() {
+                skipped += 1;
+                debug!(
+                    ?peer_id,
+                    backoff_secs = peer_info.backoff_delay(),
+                    "Skipping peer - backoff not elapsed"
+                );
+                continue;
+            }
 
-            debug!(?peer_id, "Attempting to reconnect to peer");
+            attempted += 1;
+            peer_info.record_attempt();
+            debug!(?peer_id, attempt_number = peer_info.connection_attempts, "Attempting to reconnect");
 
             // Try to connect using the endpoint
             match gossip
@@ -1006,16 +1093,34 @@ impl SyncEngine {
                 .await
             {
                 Ok(_conn) => {
-                    info!(?peer_id, "Successfully reconnected to peer");
-                    self.peer_registry
-                        .update_status(&peer_id, crate::peers::PeerStatus::Online)?;
+                    peer_info.record_success();
+                    succeeded += 1;
+                    info!(
+                        ?peer_id,
+                        success_rate = format!("{:.1}%", peer_info.success_rate() * 100.0),
+                        "Successfully reconnected to peer"
+                    );
                 }
                 Err(e) => {
-                    debug!(?peer_id, error = ?e, "Failed to reconnect to peer");
-                    self.peer_registry
-                        .update_status(&peer_id, crate::peers::PeerStatus::Offline)?;
+                    peer_info.record_failure();
+                    debug!(
+                        ?peer_id,
+                        error = ?e,
+                        next_retry_in = format!("{:?}", peer_info.backoff_delay()),
+                        "Failed to reconnect, will retry after backoff"
+                    );
                 }
             }
+
+            // Save updated peer info (with metrics and status)
+            self.peer_registry.add_or_update(&peer_info)?;
+        }
+
+        if attempted > 0 || skipped > 0 {
+            info!(
+                "Reconnection summary: attempted={}, succeeded={}, skipped={} (backoff)",
+                attempted, succeeded, skipped
+            );
         }
 
         Ok(())
@@ -1063,12 +1168,11 @@ impl SyncEngine {
         // Initialize gossip
         let gossip = self.ensure_gossip().await?;
 
-        // Load saved bootstrap peers from storage for reconnection
-        // We need to:
-        // 1. Add full endpoint addresses to static discovery (for connection info)
-        // 2. Collect just the node IDs for the gossip subscription
-        let bootstrap_node_ids = if let Some(realm_info) = self.storage.load_realm(realm_id)? {
-            let mut node_ids = Vec::new();
+        // Get effective bootstrap peers (static from storage + online from registry)
+        let bootstrap_node_ids = self.get_effective_bootstrap_peers(realm_id)?;
+
+        // Add full address info to static discovery for faster reconnection
+        if let Some(realm_info) = self.storage.load_realm(realm_id)? {
             for peer_bytes in &realm_info.bootstrap_peers {
                 match peer_bytes.to_endpoint_addr() {
                     Ok(endpoint_addr) => {
@@ -1079,23 +1183,18 @@ impl SyncEngine {
                             addrs = peer_bytes.direct_addresses.len(),
                             "Adding saved bootstrap peer to static discovery"
                         );
-                        // Add full address info to static discovery for faster reconnection
                         gossip.add_peer_addr(endpoint_addr.clone());
-                        // Collect just the node ID for subscription
-                        node_ids.push(endpoint_addr.id);
                     }
                     Err(e) => {
                         warn!(%realm_id, error = ?e, "Failed to convert saved peer address");
                     }
                 }
             }
-            if !node_ids.is_empty() {
-                info!(%realm_id, peer_count = node_ids.len(), "Loaded saved bootstrap peers for reconnection");
-            }
-            node_ids
-        } else {
-            Vec::new()
-        };
+        }
+
+        if !bootstrap_node_ids.is_empty() {
+            info!(%realm_id, peer_count = bootstrap_node_ids.len(), "Using bootstrap peers (static + registry) for reconnection");
+        }
 
         // Subscribe to topic using split API (receiver not wrapped in mutex)
         let topic_id = TopicId::from_bytes(*realm_id.as_bytes());
@@ -1161,6 +1260,10 @@ impl SyncEngine {
                             // Also record the realm for this peer
                             let _ = peer_registry.add_peer_realm(&peer, &listener_realm_id);
                             debug!(?peer, "Recorded peer in registry");
+
+                            // Note: We don't automatically add gossip-discovered peers to
+                            // bootstrap_peers in storage, as we don't have their full EndpointAddr
+                            // at this point. The peer_registry tracks them for reconnection purposes.
                         }
 
                         // Update peer count in sync_status (thread-safe)
@@ -1447,6 +1550,45 @@ impl SyncEngine {
         // TODO: Track actual peer IDs in sync_status for display
         let connected_peers = Vec::new();
 
+        // Get detailed peer information from the peer registry
+        // Filter peers by those that share this realm
+        let peers = self
+            .peer_registry
+            .list_all()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|peer| peer.shared_realms.contains(realm_id))
+            .map(|peer| {
+                use crate::sync::events::PeerDebugInfo;
+                let pk = peer.public_key();
+                let full = format!("{:?}", pk);
+                let short = full
+                    .strip_prefix("PublicKey(")
+                    .and_then(|s| s.strip_suffix(")"))
+                    .map(|s| s.chars().take(8).collect::<String>())
+                    .unwrap_or_else(|| "unknown".to_string());
+
+                // Calculate connection duration (simple: how long since last_seen)
+                let connection_duration_secs = if peer.status == crate::peers::PeerStatus::Online {
+                    // For online peers, calculate time since last_seen
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs();
+                    Some(now.saturating_sub(peer.last_seen))
+                } else {
+                    None
+                };
+
+                PeerDebugInfo {
+                    peer_id: short,
+                    peer_id_full: full,
+                    is_connected: peer.status == crate::peers::PeerStatus::Online,
+                    connection_duration_secs,
+                }
+            })
+            .collect();
+
         NetworkDebugInfo {
             node_id,
             node_id_full,
@@ -1456,6 +1598,7 @@ impl SyncEngine {
             sync_active,
             last_error,
             connected_peers,
+            peers,
         }
     }
 

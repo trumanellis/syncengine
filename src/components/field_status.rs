@@ -18,6 +18,19 @@
 use dioxus::prelude::*;
 use syncengine_core::{NetworkDebugInfo, SyncStatus};
 
+/// Format a duration in seconds into a human-readable string
+fn format_duration(seconds: u64) -> String {
+    if seconds < 60 {
+        format!("{}s", seconds)
+    } else if seconds < 3600 {
+        format!("{}m", seconds / 60)
+    } else if seconds < 86400 {
+        format!("{}h", seconds / 3600)
+    } else {
+        format!("{}d", seconds / 86400)
+    }
+}
+
 /// Legacy field state enum for backwards compatibility.
 /// New code should use NetworkState with actual SyncStatus.
 #[derive(Clone, Copy, PartialEq, Eq, Default)]
@@ -216,6 +229,45 @@ pub fn NetworkResonance(
                                 div { class: "debug-row error",
                                     span { class: "debug-label", "Error:" }
                                     span { class: "debug-value error", "{err}" }
+                                }
+                            }
+                        }
+
+                        // Peer List
+                        if !info.peers.is_empty() {
+                            div { class: "debug-section",
+                                div { class: "debug-row",
+                                    span { class: "debug-label", "Connected Peers:" }
+                                }
+                                div { class: "peer-list",
+                                    for peer in &info.peers {
+                                        div { class: "peer-row",
+                                            // Status dot (moss green for online, muted for offline)
+                                            span {
+                                                class: if peer.is_connected {
+                                                    "peer-status-dot online"
+                                                } else {
+                                                    "peer-status-dot offline"
+                                                },
+                                                title: if peer.is_connected { "Online" } else { "Offline" }
+                                            }
+                                            // Peer ID (cyan for online, muted for offline)
+                                            span {
+                                                class: if peer.is_connected {
+                                                    "peer-id online"
+                                                } else {
+                                                    "peer-id offline"
+                                                },
+                                                "{peer.peer_id}"
+                                            }
+                                            // Connection duration (if connected)
+                                            if let Some(duration) = peer.connection_duration_secs {
+                                                span { class: "peer-duration",
+                                                    "{format_duration(duration)}"
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }

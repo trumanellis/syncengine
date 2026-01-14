@@ -25,6 +25,19 @@ use std::fmt;
 
 use crate::types::RealmId;
 
+/// Debug information about a single peer connection.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PeerDebugInfo {
+    /// Short peer ID (first 8 chars for display)
+    pub peer_id: String,
+    /// Full peer ID (for copying)
+    pub peer_id_full: String,
+    /// Whether this peer is currently connected
+    pub is_connected: bool,
+    /// How long this peer has been connected (seconds), if connected
+    pub connection_duration_secs: Option<u64>,
+}
+
 /// Debug information about the network state for a realm.
 /// Used by UI to show detailed sync status in a debug dropdown.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -43,8 +56,10 @@ pub struct NetworkDebugInfo {
     pub sync_active: bool,
     /// Last error message, if any
     pub last_error: Option<String>,
-    /// List of connected peer IDs (short form)
+    /// List of connected peer IDs (short form) - DEPRECATED, use peers instead
     pub connected_peers: Vec<String>,
+    /// Detailed peer information
+    pub peers: Vec<PeerDebugInfo>,
 }
 
 /// Status of synchronization for a realm
