@@ -11,6 +11,7 @@
 
 use dioxus::prelude::*;
 use syncengine_core::{RealmId, RealmInfo, Task, TaskId};
+use crate::components::cards::QuestCard;
 
 /// Props for the UnifiedFieldView component
 #[derive(Props, Clone, PartialEq)]
@@ -261,8 +262,8 @@ fn RealmSection(props: RealmSectionProps) -> Element {
                         }
                     }
 
-                    // Task list
-                    div { class: "realm-task-list",
+                    // Quest card grid
+                    div { class: "realm-quest-grid",
                         if props.tasks.is_empty() {
                             p { class: "empty-task-state",
                                 "No intentions yet in this realm."
@@ -273,13 +274,33 @@ fn RealmSection(props: RealmSectionProps) -> Element {
                                     let task_id_key = task.id.to_string();
                                     let task_id_for_toggle = task.id.clone();
                                     let task_id_for_delete = task.id.clone();
+                                    let task_for_card = task.clone();
 
                                     rsx! {
-                                        TaskItem {
+                                        div {
                                             key: "{task_id_key}",
-                                            task: task.clone(),
-                                            on_toggle: move |_| props.on_toggle_task.call(task_id_for_toggle.clone()),
-                                            on_delete: move |_| props.on_delete_task.call(task_id_for_delete.clone()),
+                                            class: "quest-card-wrapper",
+
+                                            QuestCard {
+                                                quest: task_for_card,
+                                                expanded: false,
+                                                on_click: move |_| {
+                                                    // Toggle task on card click
+                                                    props.on_toggle_task.call(task_id_for_toggle.clone());
+                                                }
+                                            }
+
+                                            // Delete button overlay
+                                            button {
+                                                class: "quest-card-delete",
+                                                onclick: move |e| {
+                                                    e.stop_propagation();
+                                                    props.on_delete_task.call(task_id_for_delete.clone());
+                                                },
+                                                title: "dissolve intention",
+                                                "aria-label": "Dissolve intention",
+                                                "\u{00D7}" // ×
+                                            }
                                         }
                                     }
                                 }
@@ -292,54 +313,3 @@ fn RealmSection(props: RealmSectionProps) -> Element {
     }
 }
 
-/// Props for a task item
-#[derive(Props, Clone, PartialEq)]
-struct TaskItemProps {
-    /// The task to display
-    task: Task,
-    /// Handler for toggling completion
-    on_toggle: EventHandler<()>,
-    /// Handler for deleting
-    on_delete: EventHandler<()>,
-}
-
-/// Individual task item nested under a realm
-#[component]
-fn TaskItem(props: TaskItemProps) -> Element {
-    let check_class = if props.task.completed {
-        "check completed"
-    } else {
-        "check"
-    };
-
-    let title_class = if props.task.completed {
-        "intention-title completed"
-    } else {
-        "intention-title"
-    };
-
-    let check_symbol = if props.task.completed {
-        "\u{2713}" // checkmark
-    } else {
-        "\u{25CB}" // circle
-    };
-
-    rsx! {
-        div { class: "intention-item",
-            button {
-                class: "intention-toggle",
-                onclick: move |_| props.on_toggle.call(()),
-                "aria-label": if props.task.completed { "Mark as incomplete" } else { "Mark as complete" },
-                span { class: "{check_class}", "{check_symbol}" }
-            }
-            span { class: "{title_class}", "{props.task.title}" }
-            button {
-                class: "intention-delete",
-                onclick: move |_| props.on_delete.call(()),
-                title: "dissolve",
-                "aria-label": "Dissolve intention",
-                "\u{00D7}" // multiplication sign (×)
-            }
-        }
-    }
-}

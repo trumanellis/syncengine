@@ -1671,6 +1671,65 @@ body {
   margin-left: 0.5rem;
 }
 
+/* === Quest Card Grid === */
+.realm-quest-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(400px, 1fr));
+  gap: 1.5rem;
+  padding: 1rem 0;
+  margin-left: 0.5rem;
+}
+
+@media (max-width: 768px) {
+  .realm-quest-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.quest-card-wrapper {
+  position: relative;
+  transition: transform 0.2s ease-in-out;
+}
+
+.quest-card-wrapper:hover {
+  transform: translateY(-2px);
+}
+
+.quest-card-delete {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.5rem;
+  width: 2rem;
+  height: 2rem;
+  border-radius: 50%;
+  background: rgba(10, 10, 10, 0.7);
+  border: 1px solid var(--gold);
+  color: var(--gold);
+  font-size: 1.5rem;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.2s ease-in-out, background 0.2s ease-in-out;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10;
+}
+
+.quest-card-wrapper:hover .quest-card-delete {
+  opacity: 1;
+}
+
+.quest-card-delete:hover {
+  background: rgba(212, 175, 55, 0.2);
+  border-color: var(--gold-bright);
+  color: var(--gold-bright);
+}
+
+.quest-card-delete:active {
+  transform: scale(0.95);
+}
+
 .empty-task-state {
   color: var(--text-muted);
   font-style: italic;
@@ -1679,6 +1738,7 @@ body {
   text-align: center;
   border: 1px dashed var(--void-border);
   border-radius: 4px;
+  grid-column: 1 / -1; /* Span full width in grid */
 }
 
 /* === Create Realm Section === */
