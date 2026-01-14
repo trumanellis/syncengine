@@ -229,16 +229,18 @@ fn RealmSection(props: RealmSectionProps) -> Element {
                     span { class: "realm-badge count-badge",
                         "{completed_count}/{task_count}"
                     }
-                    // Invite button
-                    button {
-                        class: "realm-invite-btn",
-                        onclick: move |e| {
-                            e.stop_propagation(); // Prevent realm collapse/expand
-                            props.on_show_invite.call(props.realm.id.clone());
-                        },
-                        title: "Summon others to this realm",
-                        "aria-label": "Show invite for this realm",
-                        "+"
+                    // Invite button (only for non-Private realms)
+                    if !props.realm.name.eq_ignore_ascii_case("Private") {
+                        button {
+                            class: "realm-invite-btn",
+                            onclick: move |e| {
+                                e.stop_propagation(); // Prevent realm collapse/expand
+                                props.on_show_invite.call(props.realm.id.clone());
+                            },
+                            title: "Summon others to this realm",
+                            "aria-label": "Show invite for this realm",
+                            "+"
+                        }
                     }
                 }
             }
