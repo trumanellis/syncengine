@@ -2,8 +2,11 @@
 //!
 //! Cyber-mystical terminal aesthetic components.
 
+pub mod cards;
 mod field_status;
+pub mod images;
 mod invite_panel;
+pub mod profile;
 mod realm_selector;
 mod task_list;
 mod unified_field;

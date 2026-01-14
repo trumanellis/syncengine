@@ -4,7 +4,7 @@ use dioxus::prelude::*;
 use tokio::sync::RwLock;
 
 use crate::context::{get_data_dir, SharedEngine};
-use crate::pages::{Field, Landing, RealmView};
+use crate::pages::{Field, Landing, Profile, RealmView};
 use crate::theme::GLOBAL_STYLES;
 
 /// Application routes.
@@ -12,6 +12,7 @@ use crate::theme::GLOBAL_STYLES;
 /// - `/` - Landing page with "Enter the Field" button
 /// - `/field` - Main app view with realm sidebar and task list
 /// - `/realms/:id` - Direct link to a specific realm
+/// - `/profile` - Profile page with identity, peers, and stats
 #[derive(Clone, Routable, PartialEq)]
 pub enum Route {
     #[route("/")]
@@ -20,6 +21,8 @@ pub enum Route {
     Field {},
     #[route("/realms/:id")]
     RealmView { id: String },
+    #[route("/profile")]
+    Profile {},
 }
 
 /// Root application component.

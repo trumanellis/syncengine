@@ -46,6 +46,38 @@ use crate::sync::{
 };
 use crate::types::{RealmId, RealmInfo, Task, TaskId};
 
+/// Reserved name for the default Private realm
+const PRIVATE_REALM_NAME: &str = "Private";
+
+/// Sacred onboarding tasks for the Private realm
+const ONBOARDING_TASKS: &[(&str, &str)] = &[
+    (
+        "🜃 Welcome to the Field",
+        "You have entered the Synchronicity Engine - a space where intentions become manifest. This Private realm is yours alone, a sanctuary for personal quests that need not be shared."
+    ),
+    (
+        "⚛︎ Manifest Your First Intention",
+        "Try creating a new intention (task) by using the 'add' command or UI. Watch as your thought crystallizes into form. This is the beginning of conscious co-creation with the field."
+    ),
+    (
+        "◎ The Nature of the Field",
+        "The field is always listening. When you're ready to co-create with others, you can establish new realms and share them via invite links. Each realm is a quantum entanglement of intentions across peers."
+    ),
+    (
+        "☍ Mark Synchronicities Complete",
+        "As intentions manifest in reality, mark them complete. Notice how the act of acknowledgment closes one loop and opens space for new possibilities to emerge."
+    ),
+    (
+        "∞ This Space Remains Private",
+        "Unlike shared realms, this Private realm cannot be synchronized with others. It's your personal laboratory for experimenting with manifestation before sharing intentions with the collective."
+    ),
+];
+
+/// Check if a realm name is the reserved "Private" name (case-insensitive)
+fn is_private_realm_name(name: &str) -> bool {
+    name.eq_ignore_ascii_case(PRIVATE_REALM_NAME)
+}
+
 /// Internal state for an open realm
 struct RealmState {
     /// The Automerge document containing tasks
@@ -140,7 +172,7 @@ impl SyncEngine {
 
         let (sync_tx, sync_rx) = tokio::sync::mpsc::unbounded_channel();
 
-        Ok(Self {
+        let mut engine = Self {
             storage,
             peer_registry,
             gossip: None,
@@ -151,7 +183,53 @@ impl SyncEngine {
             event_tx,
             sync_rx,
             sync_tx,
-        })
+        };
+
+        // Initialize the Private realm if it doesn't exist
+        engine.ensure_private_realm().await?;
+
+        Ok(engine)
+    }
+
+    /// Ensure the Private realm exists, creating it if necessary
+    ///
+    /// This is called automatically during engine initialization.
+    /// The Private realm is a special, non-shareable realm that contains
+    /// sacred onboarding tasks to guide new users.
+    async fn ensure_private_realm(&mut self) -> Result<(), SyncError> {
+        // Check if Private realm already exists
+        let existing_realms = self.storage.list_realms()?;
+        if existing_realms
+            .iter()
+            .any(|r| r.name.eq_ignore_ascii_case(PRIVATE_REALM_NAME))
+        {
+            debug!("Private realm already exists");
+            return Ok(());
+        }
+
+        info!("Creating default Private realm with sacred onboarding");
+
+        // Create realm info
+        let realm_info = RealmInfo::new(PRIVATE_REALM_NAME);
+        let realm_id = realm_info.id.clone();
+
+        // Generate encryption key
+        let mut realm_key = [0u8; 32];
+        rand::rng().fill_bytes(&mut realm_key);
+
+        // Create document with onboarding tasks
+        let mut doc = RealmDoc::new();
+        for (title, description) in ONBOARDING_TASKS {
+            doc.add_quest(title, None, description)?;
+        }
+
+        // Save to storage
+        self.storage.save_realm(&realm_info)?;
+        self.storage.save_realm_key(&realm_id, &realm_key)?;
+        self.storage.save_document(&realm_id, &doc.save())?;
+
+        debug!(%realm_id, "Private realm created with {} onboarding tasks", ONBOARDING_TASKS.len());
+        Ok(())
     }
 
     /// Get the data directory path
@@ -213,6 +291,14 @@ impl SyncEngine {
     /// Returns `None` if identity has not been initialized.
     pub fn public_key(&self) -> Option<HybridPublicKey> {
         self.identity.as_ref().map(|kp| kp.public_key())
+    }
+
+    /// Get this node's endpoint ID.
+    ///
+    /// Returns the endpoint ID used for P2P networking.
+    /// Returns `None` if networking has not been started.
+    pub fn endpoint_id(&self) -> Option<iroh::PublicKey> {
+        self.gossip.as_ref().map(|g| g.endpoint_id())
     }
 
     /// Check if identity has been initialized.
@@ -310,6 +396,13 @@ impl SyncEngine {
     ///
     /// The ID of the newly created realm.
     pub async fn create_realm(&mut self, name: &str) -> Result<RealmId, SyncError> {
+        // Prevent creating realms with reserved "Private" name
+        if is_private_realm_name(name) {
+            return Err(SyncError::PrivateRealmOperation(
+                "Cannot create realm with reserved name 'Private'".to_string(),
+            ));
+        }
+
         info!(name, "Creating new realm");
 
         let realm_info = RealmInfo::new(name);
@@ -449,6 +542,15 @@ impl SyncEngine {
 
     /// Delete a realm and all its data
     pub async fn delete_realm(&mut self, realm_id: &RealmId) -> Result<(), SyncError> {
+        // Check if this is the Private realm
+        if let Ok(Some(info)) = self.storage.load_realm(realm_id) {
+            if is_private_realm_name(&info.name) {
+                return Err(SyncError::PrivateRealmOperation(
+                    "Cannot delete Private realm".to_string(),
+                ));
+            }
+        }
+
         // Remove from open realms
         self.realms.remove(realm_id);
 
@@ -2038,6 +2140,15 @@ impl SyncEngine {
     ///
     /// Returns `SyncError::RealmNotFound` if the realm is not open.
     pub async fn generate_invite(&mut self, realm_id: &RealmId) -> Result<InviteTicket, SyncError> {
+        // Check if this is the Private realm
+        if let Ok(Some(info)) = self.storage.load_realm(realm_id) {
+            if is_private_realm_name(&info.name) {
+                return Err(SyncError::PrivateRealmOperation(
+                    "Cannot generate invite for Private realm".to_string(),
+                ));
+            }
+        }
+
         // Ensure realm is open
         if !self.realms.contains_key(realm_id) {
             self.open_realm(realm_id).await?;
@@ -2394,6 +2505,86 @@ impl SyncEngine {
         })
     }
 
+    // ═══════════════════════════════════════════════════════════════════════
+    // Profile Operations
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Save a user profile
+    pub fn save_profile(&self, profile: &crate::types::UserProfile) -> Result<(), SyncError> {
+        self.storage.save_profile(profile)
+    }
+
+    /// Load a profile by peer ID
+    pub fn load_profile(&self, peer_id: &str) -> Result<Option<crate::types::UserProfile>, SyncError> {
+        self.storage.load_profile(peer_id)
+    }
+
+    /// Delete a profile by peer ID
+    pub fn delete_profile(&self, peer_id: &str) -> Result<(), SyncError> {
+        self.storage.delete_profile(peer_id)
+    }
+
+    /// List all profiles
+    pub fn list_profiles(&self) -> Result<Vec<crate::types::UserProfile>, SyncError> {
+        self.storage.list_profiles()
+    }
+
+    /// Get or create profile for this node
+    pub fn get_own_profile(&self) -> Result<crate::types::UserProfile, SyncError> {
+        // Use DID as peer_id (stable identifier, available immediately)
+        let peer_id = self.did()
+            .ok_or_else(|| SyncError::Identity("Identity not initialized".to_string()))?
+            .to_string();
+
+        // Try to load existing profile
+        if let Some(profile) = self.storage.load_profile(&peer_id)? {
+            Ok(profile)
+        } else {
+            // Create default profile with placeholder text to trigger edit mode
+            let mut profile = crate::types::UserProfile::new(
+                peer_id.clone(),
+                String::new(),
+            );
+            profile.bio = "**Add your bio here**\n\nDescribe yourself, your interests, or your role in the network.\n\n- Use *markdown* for formatting\n- Add links, lists, and more\n- Express your unique identity".to_string();
+            self.storage.save_profile(&profile)?;
+            Ok(profile)
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Image Blob Operations
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Upload an image and return its content hash
+    ///
+    /// The image data is stored content-addressed using BLAKE3.
+    /// Returns the hash hex string that can be used as image_blob_id.
+    pub fn upload_image(&self, data: Vec<u8>) -> Result<String, SyncError> {
+        self.storage.save_image_blob(data)
+    }
+
+    /// Load an image by its content hash
+    pub fn load_image(&self, hash_hex: &str) -> Result<Option<Vec<u8>>, SyncError> {
+        self.storage.load_image_blob(hash_hex)
+    }
+
+    /// Check if an image blob exists
+    pub fn image_exists(&self, hash_hex: &str) -> Result<bool, SyncError> {
+        self.storage.blob_exists(hash_hex)
+    }
+
+    /// Get the size of an image blob in bytes
+    pub fn image_size(&self, hash_hex: &str) -> Result<Option<usize>, SyncError> {
+        self.storage.blob_size(hash_hex)
+    }
+
+    /// Delete an image blob
+    ///
+    /// Warning: This may affect multiple references if they share the same content.
+    pub fn delete_image(&self, hash_hex: &str) -> Result<(), SyncError> {
+        self.storage.delete_image_blob(hash_hex)
+    }
+
     /// Get this node's endpoint address
     ///
     /// Returns the EndpointAddr which can be used by other nodes to connect.
@@ -2517,7 +2708,8 @@ mod tests {
     async fn test_engine_creates() {
         let (engine, _temp) = create_test_engine().await;
         let info = engine.node_info().await.unwrap();
-        assert_eq!(info.realm_count, 0);
+        // Private realm is auto-created
+        assert_eq!(info.realm_count, 1);
     }
 
     #[tokio::test]
@@ -2527,11 +2719,11 @@ mod tests {
         // Create a realm
         let realm_id = engine.create_realm("Test Realm").await.unwrap();
 
-        // Verify it's in storage
+        // Verify it's in storage (should have Private + Test Realm)
         let realms = engine.list_realms().await.unwrap();
-        assert_eq!(realms.len(), 1);
-        assert_eq!(realms[0].name, "Test Realm");
-        assert_eq!(realms[0].id, realm_id);
+        assert_eq!(realms.len(), 2);
+        let test_realm = realms.iter().find(|r| r.name == "Test Realm").unwrap();
+        assert_eq!(test_realm.id, realm_id);
 
         // Verify document exists
         let doc_bytes = engine.storage.load_document(&realm_id).unwrap();
@@ -2734,12 +2926,16 @@ mod tests {
         {
             let mut engine = SyncEngine::new(temp_dir.path()).await.unwrap();
             let realms = engine.list_realms().await.unwrap();
-            assert_eq!(realms.len(), 1);
-            assert_eq!(realms[0].name, "Persistent");
+            // Should have Private + Persistent
+            assert_eq!(realms.len(), 2);
+            let persistent_realm = realms
+                .iter()
+                .find(|r| r.name == "Persistent")
+                .expect("Persistent realm should exist");
 
             // Need to open the realm to access tasks
-            engine.open_realm(&realms[0].id).await.unwrap();
-            let tasks = engine.list_tasks(&realms[0].id).unwrap();
+            engine.open_realm(&persistent_realm.id).await.unwrap();
+            let tasks = engine.list_tasks(&persistent_realm.id).unwrap();
             assert_eq!(tasks.len(), 1);
             assert_eq!(tasks[0].title, "Persisted task");
         }
@@ -2759,9 +2955,9 @@ mod tests {
         engine.add_task(&realm2, "Task in Realm 2").await.unwrap();
         engine.add_task(&realm3, "Task in Realm 3").await.unwrap();
 
-        // Verify list_realms
+        // Verify list_realms (Private + 3 created = 4)
         let realms = engine.list_realms().await.unwrap();
-        assert_eq!(realms.len(), 3);
+        assert_eq!(realms.len(), 4);
 
         // Verify tasks are isolated
         assert_eq!(engine.list_tasks(&realm1).unwrap().len(), 1);
@@ -4338,6 +4534,9 @@ mod tests {
 
         info!("Phase 2 complete - both added offline tasks");
 
+        // Allow database handles to fully release
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
         // === Phase 3: Restart and sync ===
         let mut alice = SyncEngine::new(&alice_path).await.unwrap();
         alice.init_identity().unwrap();
@@ -4455,5 +4654,168 @@ mod tests {
         // Cleanup
         alice.shutdown().await.unwrap();
         bob.shutdown().await.unwrap();
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Private Realm Tests
+    // ═══════════════════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    async fn test_private_realm_auto_created() {
+        let (mut engine, _temp) = create_test_engine().await;
+        engine.init_identity().unwrap();
+
+        // Private realm should exist after engine creation
+        let realms = engine.list_realms().await.unwrap();
+        assert_eq!(realms.len(), 1, "Private realm should auto-create");
+        assert_eq!(realms[0].name, "Private");
+        assert!(!realms[0].is_shared, "Private realm should not be shared");
+    }
+
+    #[tokio::test]
+    async fn test_private_realm_has_onboarding_tasks() {
+        let (mut engine, _temp) = create_test_engine().await;
+        engine.init_identity().unwrap();
+
+        // Find Private realm
+        let realms = engine.list_realms().await.unwrap();
+        let private_realm = realms.iter().find(|r| r.name == "Private").unwrap();
+
+        // Open and check tasks
+        engine.open_realm(&private_realm.id).await.unwrap();
+        let tasks = engine.list_tasks(&private_realm.id).unwrap();
+
+        // Should have sacred onboarding tasks
+        assert!(
+            tasks.len() >= 3,
+            "Private realm should have onboarding tasks"
+        );
+
+        // Verify sacred language in task titles
+        let titles: Vec<&str> = tasks.iter().map(|t| t.title.as_str()).collect();
+        let has_sacred_language = titles.iter().any(|t| {
+            let lower = t.to_lowercase();
+            lower.contains("field")
+                || lower.contains("intention")
+                || lower.contains("manifest")
+                || lower.contains("synchronicities")
+        });
+        assert!(
+            has_sacred_language,
+            "Onboarding tasks should use sacred language"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cannot_share_private_realm() {
+        let (mut engine, _temp) = create_test_engine().await;
+        engine.init_identity().unwrap();
+
+        // Find Private realm
+        let realms = engine.list_realms().await.unwrap();
+        let private_realm = realms.iter().find(|r| r.name == "Private").unwrap();
+
+        // Attempt to generate invite should fail
+        let result = engine.generate_invite(&private_realm.id).await;
+        assert!(
+            result.is_err(),
+            "Should not be able to generate invite for Private realm"
+        );
+
+        // Shutdown to avoid gossip background tasks
+        engine.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_cannot_create_realm_named_private() {
+        let (mut engine, _temp) = create_test_engine().await;
+        engine.init_identity().unwrap();
+
+        // Attempt to create another "Private" realm should fail
+        let result = engine.create_realm("Private").await;
+        assert!(
+            result.is_err(),
+            "Should not be able to create realm named 'Private'"
+        );
+
+        // Case variations should also fail
+        let result = engine.create_realm("private").await;
+        assert!(
+            result.is_err(),
+            "Should not be able to create realm named 'private'"
+        );
+
+        let result = engine.create_realm("PRIVATE").await;
+        assert!(
+            result.is_err(),
+            "Should not be able to create realm named 'PRIVATE'"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cannot_delete_private_realm() {
+        let (mut engine, _temp) = create_test_engine().await;
+        engine.init_identity().unwrap();
+
+        // Find Private realm
+        let realms = engine.list_realms().await.unwrap();
+        let private_realm = realms.iter().find(|r| r.name == "Private").unwrap();
+
+        // Attempt to delete should fail
+        let result = engine.delete_realm(&private_realm.id).await;
+        assert!(
+            result.is_err(),
+            "Should not be able to delete Private realm"
+        );
+
+        // Verify it still exists
+        let realms = engine.list_realms().await.unwrap();
+        assert!(
+            realms.iter().any(|r| r.name == "Private"),
+            "Private realm should still exist after delete attempt"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_private_realm_persists_across_restarts() {
+        let temp_dir = TempDir::new().unwrap();
+
+        // First engine instance
+        {
+            let mut engine = SyncEngine::new(temp_dir.path()).await.unwrap();
+            engine.init_identity().unwrap();
+
+            let realms = engine.list_realms().await.unwrap();
+            assert_eq!(realms.len(), 1);
+            assert_eq!(realms[0].name, "Private");
+        }
+
+        // Second engine instance (simulating restart)
+        {
+            let engine = SyncEngine::new(temp_dir.path()).await.unwrap();
+            let realms = engine.list_realms().await.unwrap();
+            assert_eq!(
+                realms.len(),
+                1,
+                "Private realm should not be duplicated on restart"
+            );
+            assert_eq!(realms[0].name, "Private");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_private_realm_independent_from_identity() {
+        let (mut engine, _temp) = create_test_engine().await;
+
+        // Private realm should exist even before identity init
+        let realms = engine.list_realms().await.unwrap();
+        assert_eq!(realms.len(), 1);
+        assert_eq!(realms[0].name, "Private");
+
+        // Identity init should not affect Private realm
+        engine.init_identity().unwrap();
+        let realms = engine.list_realms().await.unwrap();
+        assert_eq!(realms.len(), 1);
+        assert_eq!(realms[0].name, "Private");
     }
 }

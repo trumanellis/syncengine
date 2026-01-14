@@ -115,6 +115,41 @@ impl RealmDoc {
         Ok(task_id)
     }
 
+    /// Add a new "quest" (rich task with metadata) to the document
+    ///
+    /// Returns the TaskId of the newly created quest.
+    ///
+    /// # Errors
+    ///
+    /// Returns `SyncError::Serialization` if the quest cannot be serialized.
+    pub fn add_quest(
+        &mut self,
+        title: &str,
+        subtitle: Option<String>,
+        description: &str,
+    ) -> Result<TaskId, SyncError> {
+        let task = Task::new_quest(title, subtitle, description);
+        let task_id = task.id.clone();
+
+        let tasks = self
+            .doc
+            .get(ROOT, "tasks")
+            .map_err(|e| SyncError::Serialization(e.to_string()))?
+            .ok_or_else(|| SyncError::Serialization("tasks map not found".into()))?;
+
+        let (_, tasks_obj_id) = tasks;
+
+        // Store task as JSON string in the map
+        let task_json =
+            serde_json::to_string(&task).map_err(|e| SyncError::Serialization(e.to_string()))?;
+
+        self.doc
+            .put(&tasks_obj_id, task_id.to_string(), task_json)
+            .map_err(|e| SyncError::Serialization(e.to_string()))?;
+
+        Ok(task_id)
+    }
+
     /// Get a task by its ID
     ///
     /// Returns `None` if the task does not exist.

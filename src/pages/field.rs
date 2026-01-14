@@ -6,6 +6,7 @@ use dioxus::prelude::*;
 use std::collections::HashMap;
 use syncengine_core::{NetworkDebugInfo, RealmId, RealmInfo, SyncEvent, Task};
 
+use crate::app::Route;
 use crate::components::{
     InvitePanel, JoinRealmModal, NetworkResonance, NetworkState, UnifiedFieldView,
 };
@@ -315,6 +316,16 @@ pub fn Field() -> Element {
                         class: "header-btn join-btn",
                         onclick: move |_| show_join_modal.set(true),
                         "Join Realm"
+                    }
+
+                    // Profile navigation button
+                    Link {
+                        to: Route::Profile {},
+                        button {
+                            class: "profile-nav-button",
+                            title: "Profile",
+                            "👤"
+                        }
                     }
                 }
 

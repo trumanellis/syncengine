@@ -5,6 +5,8 @@
 //! - Documents (Automerge CRDT blobs)
 //! - Identity and device credentials
 //! - Realm encryption keys
+//! - User profiles
+//! - Image blobs (content-addressed)
 
 use crate::error::SyncError;
 use crate::types::{RealmId, RealmInfo};
@@ -12,6 +14,14 @@ use parking_lot::RwLock;
 use redb::{Database, ReadableTable, TableDefinition};
 use std::path::Path;
 use std::sync::Arc;
+
+// Submodules
+mod blobs;
+mod profiles;
+
+// Re-export initialization helpers (used in Storage::new)
+use blobs::BLOBS_TABLE;
+use profiles::PROFILES_TABLE;
 
 // Table definitions
 const REALMS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("realms");
@@ -62,6 +72,8 @@ impl Storage {
             let _ = write_txn.open_table(IDENTITY_TABLE)?;
             let _ = write_txn.open_table(REALM_KEYS_TABLE)?;
             let _ = write_txn.open_table(ENDPOINT_SECRET_KEY_TABLE)?;
+            let _ = write_txn.open_table(PROFILES_TABLE)?;
+            let _ = write_txn.open_table(BLOBS_TABLE)?;
         }
         write_txn.commit()?;
 
