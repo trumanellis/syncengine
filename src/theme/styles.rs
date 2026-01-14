@@ -2397,12 +2397,15 @@ body {
 
 .card-header__title {
   font-family: var(--font-serif);
-  font-size: 1.125rem;
+  font-size: 1rem;
   font-weight: 600;
   color: var(--gold);
   margin: 0 0 0.25rem 0;
   letter-spacing: 0.02em;
   line-height: 1.3;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .card-header__subtitle {

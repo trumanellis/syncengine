@@ -8,8 +8,17 @@ title = "Synchronicity Engine"
 [web.resource]
 style = ["assets/style.css"]
 
+[web.resource.dev]
+# Serve assets folder in dev mode
+dir = "assets"
+serve_from_root = true
+
 [desktop]
 # icon = "assets/icon.png"  # Uncomment when icon is available
+
+[bundle.resources]
+# Include assets in the bundle
+assets = ["assets/*"]
 
 [desktop.window]
 title = "Synchronicity Engine"
