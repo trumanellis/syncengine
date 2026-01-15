@@ -1708,15 +1708,48 @@ body {
 /* === Quest Card Grid === */
 .realm-quest-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(400px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(300px, 100%), 1fr));
   gap: 1.5rem;
   padding: 1rem 0;
   margin-left: 0.5rem;
 }
 
+/* Responsive breakpoints for quest cards */
+/* Wide screens: Show 3 columns */
+@media (min-width: 1400px) {
+  .realm-quest-grid {
+    grid-template-columns: repeat(3, 1fr);
+    gap: 2rem;
+  }
+}
+
+/* Large screens: Show 2 columns */
+@media (min-width: 1025px) and (max-width: 1399px) {
+  .realm-quest-grid {
+    grid-template-columns: repeat(2, 1fr);
+    gap: 1.5rem;
+  }
+}
+
+@media (max-width: 1024px) {
+  .realm-quest-grid {
+    grid-template-columns: repeat(auto-fill, minmax(min(280px, 100%), 1fr));
+    gap: 1rem;
+  }
+}
+
 @media (max-width: 768px) {
   .realm-quest-grid {
     grid-template-columns: 1fr;
+    gap: 1rem;
+    margin-left: 0;
+    padding: 0.5rem 0;
+  }
+}
+
+@media (max-width: 500px) {
+  .realm-quest-grid {
+    gap: 0.75rem;
   }
 }
 
@@ -2238,7 +2271,7 @@ body {
   overflow: hidden;
   width: 100%;
   max-width: 1100px;
-  flex-shrink: 0;
+  flex-shrink: 1;
 
   box-shadow:
     0 4px 12px rgba(0, 0, 0, 0.6),
@@ -2967,9 +3000,16 @@ body {
     --card-base-width: calc(100vw - 2rem);
   }
 
-  .golden-card__interior {
-    grid-template-columns: 1fr !important;
-    grid-template-rows: auto 1fr !important;
+  /* Keep landscape cards horizontal, just scale them down */
+  .golden-card--landscape .golden-card__interior {
+    /* Maintain horizontal layout */
+    grid-template-columns: var(--split-minor) var(--split-major);
+  }
+
+  /* Portrait cards can stack on very small screens */
+  .golden-card--portrait .golden-card__interior {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto 1fr;
   }
 
   .card-content {
@@ -2977,7 +3017,7 @@ body {
   }
 
   .card-header__title {
-    font-size: 1rem;
+    font-size: 0.95rem;
   }
 
   .card-gallery {
@@ -2991,6 +3031,54 @@ body {
   .btn-primary,
   .btn-secondary {
     width: 100%;
+  }
+}
+
+/* Extra small screens - optimize for mobile */
+@media (max-width: 500px) {
+  :root {
+    --card-base-width: calc(100vw - 1rem);
+  }
+
+  .golden-card {
+    border-radius: 6px;
+  }
+
+  /* Keep landscape layout even on small screens */
+  .golden-card--landscape .golden-card__interior {
+    grid-template-columns: var(--split-minor) var(--split-major);
+  }
+
+  .card-content {
+    padding: var(--spacing-phi-sm);
+  }
+
+  .card-header__title {
+    font-size: 0.85rem;
+    line-height: 1.2;
+  }
+
+  .card-header__subtitle,
+  .card-header__link {
+    font-size: var(--text-xs);
+  }
+
+  .card-image-area {
+    min-height: 120px;
+  }
+
+  .card-footer {
+    font-size: var(--text-xs);
+  }
+
+  /* Adjust markdown content for readability */
+  .card-markdown-section {
+    font-size: var(--text-xs);
+  }
+
+  /* Smaller gallery items */
+  .card-gallery {
+    grid-template-columns: repeat(auto-fill, minmax(32px, 1fr));
   }
 }
 

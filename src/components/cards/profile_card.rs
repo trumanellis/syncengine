@@ -10,6 +10,15 @@ use super::card_gallery::GalleryItem;
 use crate::components::images::{AsyncImage, ImageOrientation, ImageUpload};
 use crate::components::profile::QRSignature;
 
+// Embed default profile image as base64 data URI
+const PROFILE_DEFAULT_BYTES: &[u8] = include_bytes!("../../../assets/profile-default.png");
+
+fn profile_default_uri() -> String {
+    use base64::Engine;
+    let base64 = base64::engine::general_purpose::STANDARD.encode(PROFILE_DEFAULT_BYTES);
+    format!("data:image/png;base64,{}", base64)
+}
+
 /// Profile card with editable fields and QR code overlay
 ///
 /// # Examples
@@ -79,23 +88,11 @@ pub fn ProfileCard(
                         class: Some("card-image__avatar".to_string()),
                     }
                 } else {
-                    div { class: "card-image__default card-image__avatar",
-                        // Default avatar placeholder
-                        svg {
-                            xmlns: "http://www.w3.org/2000/svg",
-                            view_box: "0 0 100 100",
-                            class: "default-avatar-icon",
-                            circle {
-                                cx: "50",
-                                cy: "35",
-                                r: "20",
-                                fill: "currentColor",
-                            }
-                            path {
-                                d: "M 20 80 Q 20 55, 50 55 Q 80 55, 80 80",
-                                fill: "currentColor",
-                            }
-                        }
+                    // Default profile image
+                    img {
+                        class: "card-image__default card-image__avatar",
+                        src: "{profile_default_uri()}",
+                        alt: "Profile",
                     }
                 }
 

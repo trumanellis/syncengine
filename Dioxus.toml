@@ -13,12 +13,12 @@ style = ["assets/style.css"]
 dir = "assets"
 serve_from_root = true
 
+[bundle]
+# Include assets in the bundle
+resources = ["assets/*"]
+
 [desktop]
 # icon = "assets/icon.png"  # Uncomment when icon is available
-
-[bundle.resources]
-# Include assets in the bundle
-assets = ["assets/*"]
 
 [desktop.window]
 title = "Synchronicity Engine"

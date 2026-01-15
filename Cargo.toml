@@ -35,7 +35,7 @@ base64.workspace = true
 
 [workspace.dependencies]
 # UI Framework
-dioxus = { version = "0.6", features = ["desktop", "router"] }
+dioxus = { version = "0.6", features = ["desktop", "router", "asset"] }
 
 # Core iroh (matching iroh-examples versions)
 iroh = { version = "0.95", features = ["default", "discovery-local-network"] }

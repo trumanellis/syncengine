@@ -9,6 +9,15 @@ use super::{CardGallery, CardHeader, CardOrientation, GoldenCard, MarkdownRender
 use super::card_gallery::GalleryItem;
 use crate::components::images::AsyncImage;
 
+// Embed default quest image as base64 data URI
+const QUEST_DEFAULT_BYTES: &[u8] = include_bytes!("../../../assets/quest-default.png");
+
+fn quest_default_uri() -> String {
+    use base64::Engine;
+    let base64 = base64::engine::general_purpose::STANDARD.encode(QUEST_DEFAULT_BYTES);
+    format!("data:image/png;base64,{}", base64)
+}
+
 /// Quest card with image, description, and peer gallery
 ///
 /// # Examples
@@ -58,7 +67,7 @@ pub fn QuestCard(
                     // Default quest image
                     img {
                         class: "card-image__default card-image__quest",
-                        src: asset!("/assets/quest-default.png"),
+                        src: "{quest_default_uri()}",
                         alt: "Quest",
                     }
                 }
