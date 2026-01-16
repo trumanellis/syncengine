@@ -2805,6 +2805,25 @@ impl SyncEngine {
         manager.decline_contact_request(invite_id).await
     }
 
+    /// Cancel an outgoing contact request
+    ///
+    /// Removes the pending request and revokes the invite so it can no longer be used.
+    ///
+    /// # Arguments
+    ///
+    /// * `invite_id` - The unique invite ID of the outgoing request
+    ///
+    /// # Errors
+    ///
+    /// Returns error if invite_id not found or not in OutgoingPending state.
+    pub async fn cancel_outgoing_request(&mut self, invite_id: &[u8; 16]) -> Result<(), SyncError> {
+        // Ensure contact manager is initialized
+        let manager = self.ensure_contact_manager().await?;
+
+        // Cancel outgoing request
+        manager.cancel_outgoing_request(invite_id)
+    }
+
     /// List all accepted contacts
     ///
     /// Returns all contacts that have been mutually accepted.

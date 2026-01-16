@@ -521,6 +521,48 @@ impl ContactManager {
         Ok(())
     }
 
+    /// Cancel an outgoing contact request
+    ///
+    /// Deletes the pending contact and optionally revokes the invite.
+    ///
+    /// # Arguments
+    ///
+    /// * `invite_id` - Invite ID of the outgoing request to cancel
+    pub fn cancel_outgoing_request(&self, invite_id: &[u8; 16]) -> SyncResult<()> {
+        // Load pending contact
+        let pending = self
+            .storage
+            .load_pending(invite_id)?
+            .ok_or_else(|| SyncError::ContactNotFound(hex::encode(invite_id)))?;
+
+        // Must be OutgoingPending to cancel
+        if pending.state != ContactState::OutgoingPending {
+            return Err(SyncError::InvalidOperation(format!(
+                "Cannot cancel request in state: {}",
+                pending.state
+            )));
+        }
+
+        // Delete pending contact
+        self.storage.delete_pending(invite_id)?;
+
+        // Revoke the invite so it can't be used anymore
+        self.storage.revoke_invite(invite_id)?;
+
+        info!(
+            invite_id = ?invite_id,
+            peer_did = %pending.peer_did,
+            "Cancelled outgoing contact request"
+        );
+
+        // Emit event
+        let _ = self.event_tx.send(ContactEvent::ContactDeclined {
+            invite_id: *invite_id,
+        });
+
+        Ok(())
+    }
+
     /// Finalize a mutually accepted contact
     ///
     /// Derives shared keys, subscribes to contact topic, saves to contacts table.

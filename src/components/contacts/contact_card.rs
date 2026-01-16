@@ -6,6 +6,15 @@ use dioxus::prelude::*;
 
 use crate::components::images::AsyncImage;
 
+// Embed default profile image as base64 data URI
+const PROFILE_DEFAULT_BYTES: &[u8] = include_bytes!("../../../assets/profile-default.png");
+
+fn profile_default_uri() -> String {
+    use base64::Engine;
+    let base64 = base64::engine::general_purpose::STANDARD.encode(PROFILE_DEFAULT_BYTES);
+    format!("data:image/png;base64,{}", base64)
+}
+
 /// Contact Card
 ///
 /// Displays a single contact with avatar, name, and online/offline status indicator.
@@ -63,9 +72,11 @@ pub fn ContactCard(
                         class: Some("avatar-image".to_string()),
                     }
                 } else {
-                    // Default avatar with first initial
-                    div { class: "avatar-placeholder",
-                        "{contact_name.chars().next().unwrap_or('?').to_uppercase()}"
+                    // Default profile image
+                    img {
+                        class: "avatar-image",
+                        src: "{profile_default_uri()}",
+                        alt: "{contact_name}",
                     }
                 }
 

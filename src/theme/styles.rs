@@ -1556,8 +1556,6 @@ body {
 
 .unified-main {
   flex: 1;
-  max-width: 1000px;
-  margin: 0 auto;
 }
 
 /* === Unified Field View === */
@@ -1950,17 +1948,14 @@ body {
 
 /* QR Signature */
 .qr-signature {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 1rem;
-  margin: 2rem 0;
+  display: block;
+  width: 100%;
 }
 
 .qr-signature svg {
-  border: 2px solid var(--gold);
-  border-radius: 4px;
-  animation: breathe 3s ease-in-out infinite;
+  width: 100%;
+  height: auto;
+  display: block;
 }
 
 .qr-label {
@@ -4074,12 +4069,10 @@ body {
 
 .contact-avatar {
   width: 100px;
-  height: 100px;
-  border-radius: 50%;
-  border: 2px solid rgba(212, 175, 55, 0.3);
+  aspect-ratio: 1000 / 1618;
   position: relative;
   overflow: hidden;
-  background: rgba(15, 15, 15, 0.8);
+  background: var(--void-black);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -4099,13 +4092,13 @@ body {
   text-transform: uppercase;
 }
 
-/* Status dot */
-.status-dot {
+/* Status dot - positioned at bottom right of portrait avatar */
+.contact-avatar .status-dot {
   position: absolute;
-  bottom: 4px;
-  right: 4px;
-  width: 16px;
-  height: 16px;
+  bottom: 6px;
+  right: 6px;
+  width: 14px;
+  height: 14px;
   border-radius: 50%;
   border: 2px solid var(--void-black);
   background: rgba(255, 255, 255, 0.3);
@@ -4179,7 +4172,7 @@ body {
 
   .contact-avatar {
     width: 80px;
-    height: 80px;
+    /* height auto via aspect-ratio */
   }
 
   .avatar-placeholder {
@@ -4316,33 +4309,29 @@ body {
 
 /* === Main Content === */
 .profile-content {
-  max-width: 900px;
-  margin: 0 auto;
   position: relative;
   z-index: 1;
 }
 
 /* === HERO: Identity Card === */
 .identity-hero {
-  margin-bottom: 3rem;
+  margin-bottom: 2rem;
 }
 
 .identity-card {
-  background: linear-gradient(135deg, rgba(212, 175, 55, 0.03) 0%, rgba(0, 0, 0, 0.3) 100%);
-  border: 2px solid var(--gold);
-  border-radius: 12px;
-  padding: 2.5rem;
-  box-shadow: 0 8px 32px rgba(212, 175, 55, 0.2);
   display: grid;
-  grid-template-areas:
-    "avatar identity qr"
-    "avatar identity qr"
-    "edit edit edit";
-  grid-template-columns: 160px 1fr 200px;
-  gap: 2rem;
+  grid-template-columns: 31.8% 1fr;
+  gap: 2.5rem;
   align-items: start;
   position: relative;
   animation: heroAppear 0.6s ease-out;
+}
+
+/* Left column: Avatar with QR overlay */
+.hero-left {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
 }
 
 @keyframes heroAppear {
@@ -4357,37 +4346,135 @@ body {
 }
 
 .hero-avatar {
-  grid-area: avatar;
-  width: 140px;
-  height: 140px;
-  border-radius: 50%;
-  background: linear-gradient(135deg, var(--gold) 0%, var(--moss) 100%);
+  position: relative;
+  width: 100%;
+  aspect-ratio: 1000 / 1618;
+  background: var(--void-black);
   display: flex;
   align-items: center;
   justify-content: center;
-  box-shadow: 0 0 32px rgba(212, 175, 55, 0.4);
-  flex-shrink: 0;
-}
-
-.hero-avatar-initial {
-  font-family: var(--font-serif);
-  font-size: 4rem;
-  font-weight: 600;
-  color: var(--void-black);
+  overflow: hidden;
 }
 
 .hero-avatar-image {
   width: 100%;
   height: 100%;
-  border-radius: 50%;
   object-fit: cover;
 }
 
+/* QR code overlay at bottom of avatar - 31.8% width (golden ratio minor) */
+.avatar-qr-overlay {
+  position: absolute;
+  bottom: 1rem;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 31.8%;
+  background: rgba(10, 10, 10, 0.7);
+  padding: 4px;
+  border: 1px solid var(--gold);
+  border-radius: 2px;
+  box-shadow:
+    0 0 8px var(--gold-glow),
+    0 0 16px var(--gold-glow),
+    inset 0 0 4px rgba(212, 175, 55, 0.1);
+  backdrop-filter: blur(4px);
+}
+
+.avatar-qr-overlay .qr-signature {
+  width: 100%;
+}
+
+.avatar-qr-overlay .qr-signature svg {
+  width: 100%;
+  height: auto;
+}
+
+/* Connection action buttons under avatar */
+.connection-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-top: 1rem;
+  width: 100%;
+}
+
+.connection-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 0.6rem 0.75rem;
+  background: transparent;
+  border: 1px solid var(--gold);
+  border-radius: 4px;
+  color: var(--gold);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  cursor: pointer;
+  transition: all var(--transition-normal);
+  position: relative;
+  overflow: hidden;
+  width: 100%;
+}
+
+.connection-btn:hover {
+  background: rgba(212, 175, 55, 0.1);
+  box-shadow: 0 0 12px var(--gold-glow);
+}
+
+.connection-btn .btn-icon {
+  font-size: 1rem;
+  transition: transform var(--transition-normal);
+  flex-shrink: 0;
+}
+
+.connection-btn .btn-text {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Invite button - paper airplane fly animation on click */
+.invite-btn.copied {
+  background: rgba(212, 175, 55, 0.15);
+  border-color: var(--gold);
+  box-shadow: 0 0 16px var(--gold-glow);
+}
+
+.invite-btn.copied .btn-icon {
+  animation: flyAway 0.5s ease-out forwards;
+}
+
+@keyframes flyAway {
+  0% {
+    transform: translate(0, 0) rotate(0deg);
+    opacity: 1;
+  }
+  50% {
+    transform: translate(10px, -10px) rotate(15deg);
+    opacity: 0.8;
+  }
+  100% {
+    transform: translate(20px, -20px) rotate(25deg);
+    opacity: 0;
+  }
+}
+
+/* Scan button */
+.scan-btn:hover .btn-icon {
+  animation: pulse 0.6s ease-in-out infinite;
+}
+
+@keyframes cameraFlash {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
 .hero-identity {
-  grid-area: identity;
   display: flex;
   flex-direction: column;
   gap: 0.75rem;
+  flex: 1;
 }
 
 .hero-name {
@@ -4412,7 +4499,6 @@ body {
   font-size: var(--text-sm);
   color: var(--text-secondary);
   line-height: 1.6;
-  max-width: 500px;
 }
 
 .hero-did {
@@ -4423,51 +4509,118 @@ body {
   word-break: break-all;
 }
 
-.hero-qr {
-  grid-area: qr;
+/* === Inline Editing Styles === */
+
+/* Editable fields */
+.editable {
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  border-radius: 4px;
+  padding: 0.25rem 0.5rem;
+  margin: -0.25rem -0.5rem;
+}
+
+.editable:hover {
+  background: rgba(212, 175, 55, 0.08);
+  box-shadow: inset 0 0 0 1px rgba(212, 175, 55, 0.3);
+}
+
+.editable.placeholder {
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.editable.placeholder:hover {
+  color: var(--text-secondary);
+}
+
+/* Inline edit inputs */
+.inline-edit-input,
+.inline-edit-textarea {
+  width: 100%;
+  background: rgba(0, 0, 0, 0.4);
+  border: 2px solid var(--gold);
+  border-radius: 4px;
+  color: var(--text-primary);
+  font-family: inherit;
+  transition: all var(--transition-fast);
+  outline: none;
+}
+
+.inline-edit-input:focus,
+.inline-edit-textarea:focus {
+  border-color: var(--cyan);
+  box-shadow: 0 0 16px rgba(0, 212, 170, 0.3);
+}
+
+.inline-edit-input.name-input {
+  font-family: var(--font-serif);
+  font-size: 2.5rem;
+  font-weight: 400;
+  color: var(--gold);
+  padding: 0.25rem 0.5rem;
+}
+
+.inline-edit-input.subtitle-input {
+  font-family: var(--font-sans);
+  font-size: var(--text-lg);
+  font-style: italic;
+  color: var(--cyan);
+  padding: 0.5rem;
+}
+
+.inline-edit-textarea.bio-input {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  line-height: 1.6;
+  padding: 0.75rem;
+  min-height: 120px;
+  resize: vertical;
+}
+
+/* Bio edit container with save/cancel buttons */
+.bio-edit-container {
   display: flex;
   flex-direction: column;
-  align-items: center;
-  gap: 0.5rem;
-  padding: 1rem;
-  background: var(--void-black);
-  border: 1px solid var(--void-border);
-  border-radius: 8px;
+  gap: 0.75rem;
 }
 
-.qr-label {
-  font-family: var(--font-serif);
+.bio-edit-actions {
+  display: flex;
+  gap: 0.75rem;
+}
+
+.bio-save-btn {
+  padding: 0.5rem 1.25rem;
+  background: rgba(0, 212, 170, 0.15);
+  border: 1px solid var(--cyan);
+  color: var(--cyan);
+  font-family: var(--font-mono);
   font-size: var(--text-sm);
-  font-style: italic;
-  color: var(--gold);
-  margin: 0;
-}
-
-.qr-hint {
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
-  color: var(--text-muted);
-  text-align: center;
-  margin: 0.5rem 0 0 0;
-}
-
-.hero-edit-btn {
-  grid-area: edit;
-  justify-self: center;
-  padding: 0.75rem 2rem;
-  background: transparent;
-  border: 2px solid var(--gold);
-  color: var(--gold);
-  font-family: var(--font-mono);
-  font-size: var(--text-base);
   cursor: pointer;
-  transition: all var(--transition-normal);
-  border-radius: 4px;
+  transition: all var(--transition-fast);
 }
 
-.hero-edit-btn:hover {
-  background: rgba(212, 175, 55, 0.1);
-  box-shadow: 0 0 16px rgba(212, 175, 55, 0.3);
+.bio-save-btn:hover {
+  background: rgba(0, 212, 170, 0.25);
+  box-shadow: 0 0 12px rgba(0, 212, 170, 0.3);
+}
+
+.bio-cancel-btn {
+  padding: 0.5rem 1.25rem;
+  background: transparent;
+  border: 1px solid var(--text-muted);
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.bio-cancel-btn:hover {
+  border-color: var(--text-secondary);
+  color: var(--text-secondary);
 }
 
 /* === Contact Exchange Section === */

@@ -96,8 +96,8 @@ pub fn PendingRequestsSection() -> Element {
             let mut guard = shared.write().await;
 
             if let Some(ref mut eng) = *guard {
-                // Cancel by declining (same as declining on sender side)
-                match eng.decline_contact(&invite_id).await {
+                // Cancel outgoing request (deletes pending + revokes invite)
+                match eng.cancel_outgoing_request(&invite_id).await {
                     Ok(_) => {
                         tracing::info!("Request cancelled");
                     }

@@ -139,14 +139,30 @@ echo "Press Ctrl+C to stop all instances"
 cleanup() {
     echo ""
     echo -e "${YELLOW}Stopping all instances...${NC}"
+
+    # First, try graceful termination (SIGTERM)
     for pid in "${PIDS[@]}"; do
         kill "$pid" 2>/dev/null || true
     done
 
+    # Give processes a moment to exit gracefully
+    sleep 0.3
+
+    # Force kill any that didn't respond (SIGKILL)
+    for pid in "${PIDS[@]}"; do
+        if kill -0 "$pid" 2>/dev/null; then
+            echo -e "${YELLOW}Force killing PID $pid...${NC}"
+            kill -9 "$pid" 2>/dev/null || true
+        fi
+    done
+
+    # Also kill any child processes by name (belt and suspenders)
+    pkill -9 -f "syncengine-desktop" 2>/dev/null || true
+
     # Close markdown sections if logging was enabled
     if [ "$ENABLE_LOGS" = true ]; then
         # Give processes time to flush final logs
-        sleep 0.5
+        sleep 0.2
 
         # Close the final code block and details
         echo "\`\`\`" >> LOGS.md
@@ -179,10 +195,11 @@ cleanup() {
         echo -e "${GREEN}Logs saved to LOGS.md${NC}"
     fi
 
+    echo -e "${GREEN}All instances stopped.${NC}"
     exit 0
 }
 
-trap cleanup SIGINT SIGTERM
+trap cleanup SIGINT SIGTERM EXIT
 
 # Wait for any instance to exit
 wait
