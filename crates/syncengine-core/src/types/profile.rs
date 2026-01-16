@@ -84,10 +84,7 @@ mod tests {
 
     #[test]
     fn test_new_profile() {
-        let profile = UserProfile::new(
-            "test-peer-id".to_string(),
-            "Alice".to_string(),
-        );
+        let profile = UserProfile::new("test-peer-id".to_string(), "Alice".to_string());
         assert_eq!(profile.peer_id, "test-peer-id");
         assert_eq!(profile.display_name, "Alice");
         assert!(profile.created_at > 0);
@@ -96,10 +93,7 @@ mod tests {
 
     #[test]
     fn test_touch_updates_timestamp() {
-        let mut profile = UserProfile::new(
-            "test".to_string(),
-            "Test".to_string(),
-        );
+        let mut profile = UserProfile::new("test".to_string(), "Test".to_string());
         let original_time = profile.updated_at;
 
         // Sleep for >1 second since Unix timestamps have 1-second granularity

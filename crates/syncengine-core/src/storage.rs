@@ -17,10 +17,12 @@ use std::sync::Arc;
 
 // Submodules
 mod blobs;
+mod contacts;
 mod profiles;
 
 // Re-export initialization helpers (used in Storage::new)
 use blobs::BLOBS_TABLE;
+use contacts::{CONTACTS_TABLE, PENDING_CONTACTS_TABLE, REVOKED_INVITES_TABLE};
 use profiles::PROFILES_TABLE;
 
 // Table definitions
@@ -28,7 +30,8 @@ const REALMS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("realms"
 const DOCUMENTS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("documents");
 const IDENTITY_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("identity");
 const REALM_KEYS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("realm_keys");
-const ENDPOINT_SECRET_KEY_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("endpoint_secret_key");
+const ENDPOINT_SECRET_KEY_TABLE: TableDefinition<&str, &[u8]> =
+    TableDefinition::new("endpoint_secret_key");
 
 /// Storage layer using redb for ACID-compliant persistence
 #[derive(Clone)]
@@ -74,6 +77,9 @@ impl Storage {
             let _ = write_txn.open_table(ENDPOINT_SECRET_KEY_TABLE)?;
             let _ = write_txn.open_table(PROFILES_TABLE)?;
             let _ = write_txn.open_table(BLOBS_TABLE)?;
+            let _ = write_txn.open_table(CONTACTS_TABLE)?;
+            let _ = write_txn.open_table(PENDING_CONTACTS_TABLE)?;
+            let _ = write_txn.open_table(REVOKED_INVITES_TABLE)?;
         }
         write_txn.commit()?;
 

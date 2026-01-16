@@ -28,6 +28,18 @@
 //!
 //! # Join a realm via invite
 //! syncengine invite join <ticket>
+//!
+//! # Generate a contact invitation
+//! syncengine contact generate-invite
+//!
+//! # Accept a contact invitation
+//! syncengine contact accept <invite_code>
+//!
+//! # List all contacts
+//! syncengine contact list
+//!
+//! # List pending contact requests
+//! syncengine contact pending
 //! ```
 
 use std::path::PathBuf;
@@ -91,6 +103,12 @@ enum Commands {
     Peers {
         #[command(subcommand)]
         action: PeersAction,
+    },
+
+    /// Contact exchange management
+    Contact {
+        #[command(subcommand)]
+        cmd: ContactCommands,
     },
 
     /// Start serving/syncing as a persistent P2P node
@@ -209,6 +227,28 @@ enum PeersAction {
         /// Nickname to set
         nickname: String,
     },
+}
+
+#[derive(Subcommand)]
+enum ContactCommands {
+    /// Generate a contact invitation code
+    GenerateInvite {
+        /// Hours until invite expires (default: 24)
+        #[arg(short, long, default_value = "24")]
+        expiry_hours: u8,
+    },
+
+    /// Accept a contact invitation
+    Accept {
+        /// The invitation code or invite ID to accept
+        invite_code: String,
+    },
+
+    /// List all contacts
+    List,
+
+    /// List pending contact requests
+    Pending,
 }
 
 fn setup_logging(verbosity: u8) {
@@ -581,6 +621,100 @@ async fn main() -> Result<()> {
                     nickname,
                     &endpoint_id[..16]
                 );
+            }
+        },
+
+        Commands::Contact { cmd } => match cmd {
+            ContactCommands::GenerateInvite { expiry_hours } => {
+                let invite = engine.generate_contact_invite(expiry_hours).await?;
+                println!("Contact invitation generated:");
+                println!();
+                println!("{}", invite);
+                println!();
+                println!("Share this link to invite others to your contact list.");
+                println!();
+                println!("Expires in: {} hours", expiry_hours);
+            }
+
+            ContactCommands::Accept { invite_code } => {
+                // Try to decode the invite code as hex (invite_id)
+                let invite_id = match hex::decode(&invite_code) {
+                    Ok(bytes) if bytes.len() == 16 => {
+                        let mut id = [0u8; 16];
+                        id.copy_from_slice(&bytes);
+                        id
+                    }
+                    _ => {
+                        anyhow::bail!("Invalid invite code format. Expected 32-character hex string (16 bytes).");
+                    }
+                };
+
+                engine.accept_contact(&invite_id).await?;
+                println!("Successfully accepted contact invitation!");
+                println!();
+                println!("You are now connected with this peer. Messages can now be exchanged.");
+            }
+
+            ContactCommands::List => {
+                let contacts = engine.list_contacts()?;
+
+                if contacts.is_empty() {
+                    println!("No contacts in your list.");
+                } else {
+                    println!("Contacts ({}):", contacts.len());
+                    println!();
+                    for contact in contacts {
+                        let status = contact.status;
+                        let favorite = if contact.is_favorite { " ★" } else { "" };
+                        println!("  {} {}{}", contact.profile.display_name, status, favorite);
+                        println!("    DID: {}", contact.peer_did);
+                        println!("    Connected: {}", contact.accepted_at);
+                        println!("    Last seen: {} (Unix timestamp)", contact.last_seen);
+                        if let Some(subtitle) = &contact.profile.subtitle {
+                            println!("    {} ", subtitle);
+                        }
+                        println!();
+                    }
+                }
+            }
+
+            ContactCommands::Pending => {
+                let (incoming, outgoing) = engine.list_pending_contacts()?;
+
+                if incoming.is_empty() && outgoing.is_empty() {
+                    println!("No pending contact requests.");
+                } else {
+                    if !incoming.is_empty() {
+                        println!("Incoming requests ({}):", incoming.len());
+                        println!();
+                        for pending in &incoming {
+                            println!("  {} ({})", pending.profile.display_name, pending.state);
+                            println!("    DID: {}", pending.peer_did);
+                            println!("    Requested: {} (Unix timestamp)", pending.created_at);
+                            if let Some(subtitle) = &pending.profile.subtitle {
+                                println!("    {} ", subtitle);
+                            }
+                            if !pending.profile.bio_excerpt.is_empty() {
+                                println!("    \"{}\"", pending.profile.bio_excerpt);
+                            }
+                            println!();
+                        }
+                    }
+
+                    if !outgoing.is_empty() {
+                        println!("Outgoing requests ({}):", outgoing.len());
+                        println!();
+                        for pending in &outgoing {
+                            println!("  {} ({})", pending.profile.display_name, pending.state);
+                            println!("    DID: {}", pending.peer_did);
+                            println!("    Sent: {} (Unix timestamp)", pending.created_at);
+                            if let Some(subtitle) = &pending.profile.subtitle {
+                                println!("    {} ", subtitle);
+                            }
+                            println!();
+                        }
+                    }
+                }
             }
         },
 

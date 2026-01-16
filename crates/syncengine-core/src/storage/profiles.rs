@@ -21,8 +21,8 @@ impl Storage {
         let write_txn = db_guard.begin_write()?;
         {
             let mut table = write_txn.open_table(PROFILES_TABLE)?;
-            let serialized =
-                postcard::to_allocvec(profile).map_err(|e| SyncError::Serialization(e.to_string()))?;
+            let serialized = postcard::to_allocvec(profile)
+                .map_err(|e| SyncError::Serialization(e.to_string()))?;
             table.insert(profile.peer_id.as_str(), serialized.as_slice())?;
         }
         write_txn.commit()?;

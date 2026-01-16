@@ -174,8 +174,14 @@ async fn test_reconnection_after_restart() {
             .expect("Failed to start networking on B");
 
         // Record endpoint IDs before restart
-        let node_info_a = engine_a.node_info().await.expect("Failed to get node info A");
-        let node_info_b = engine_b.node_info().await.expect("Failed to get node info B");
+        let node_info_a = engine_a
+            .node_info()
+            .await
+            .expect("Failed to get node info A");
+        let node_info_b = engine_b
+            .node_info()
+            .await
+            .expect("Failed to get node info B");
 
         endpoint_id_a_before = node_info_a.endpoint_id;
         endpoint_id_b_before = node_info_b.endpoint_id;
@@ -224,9 +230,14 @@ async fn test_reconnection_after_restart() {
             .expect("Failed to start sync on B");
 
         // Wait for task to sync from A to B
-        wait_for_task_sync(&mut engine_b, &realm_id, "Task from Phase 1", Duration::from_secs(10))
-            .await
-            .expect("Task did not sync from A to B");
+        wait_for_task_sync(
+            &mut engine_b,
+            &realm_id,
+            "Task from Phase 1",
+            Duration::from_secs(10),
+        )
+        .await
+        .expect("Task did not sync from A to B");
 
         println!("✓ Task synced successfully from A to B");
 
@@ -617,8 +628,14 @@ async fn test_peer_registry_tracks_connections() {
         .expect("Failed to start networking on B");
 
     // Get node IDs
-    let node_info_a = engine_a.node_info().await.expect("Failed to get node info A");
-    let node_info_b = engine_b.node_info().await.expect("Failed to get node info B");
+    let node_info_a = engine_a
+        .node_info()
+        .await
+        .expect("Failed to get node info A");
+    let node_info_b = engine_b
+        .node_info()
+        .await
+        .expect("Failed to get node info B");
 
     let endpoint_id_a = node_info_a.endpoint_id;
     let endpoint_id_b = node_info_b.endpoint_id;
@@ -802,16 +819,30 @@ fn test_fibonacci_backoff() {
     ];
 
     println!("Testing Fibonacci backoff delays:");
-    println!("Base unit: {}s (1 min), Max delay: {}s (60 min)\n", BASE_UNIT_SECS, MAX_DELAY_SECS);
+    println!(
+        "Base unit: {}s (1 min), Max delay: {}s (60 min)\n",
+        BASE_UNIT_SECS, MAX_DELAY_SECS
+    );
 
     for (failures, expected_minutes) in test_cases {
         let expected_secs = expected_minutes * 60;
         let actual = calculate_backoff(failures, BASE_UNIT_SECS, MAX_DELAY_SECS);
-        println!("Failures {}: {}s ({}min) - expected {}min", failures, actual, actual / 60, expected_minutes);
+        println!(
+            "Failures {}: {}s ({}min) - expected {}min",
+            failures,
+            actual,
+            actual / 60,
+            expected_minutes
+        );
         assert_eq!(
-            actual, expected_secs,
+            actual,
+            expected_secs,
             "Backoff for {} failures should be {}s ({}min), got {}s ({}min)",
-            failures, expected_secs, expected_minutes, actual, actual / 60
+            failures,
+            expected_secs,
+            expected_minutes,
+            actual,
+            actual / 60
         );
     }
 

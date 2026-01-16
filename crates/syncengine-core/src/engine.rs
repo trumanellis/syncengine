@@ -41,9 +41,10 @@ use crate::peers::{PeerInfo, PeerRegistry, PeerSource, PeerStatus};
 use crate::realm::RealmDoc;
 use crate::storage::Storage;
 use crate::sync::{
-    GossipSync, NetworkDebugInfo, SyncEnvelope, SyncEvent, SyncMessage, SyncStatus, TopicEvent,
-    TopicSender,
+    ContactEvent, ContactManager, GossipSync, NetworkDebugInfo, SyncEnvelope, SyncEvent,
+    SyncMessage, SyncStatus, TopicEvent, TopicSender,
 };
+use crate::types::contact::{ContactInfo, HybridContactInvite, PeerContactInvite, PendingContact, ProfileSnapshot};
 use crate::types::{RealmId, RealmInfo, Task, TaskId};
 
 /// Reserved name for the default Private realm
@@ -128,6 +129,8 @@ pub struct SyncEngine {
     peer_registry: Arc<PeerRegistry>,
     /// Gossip-based P2P networking (lazy-initialized)
     gossip: Option<Arc<GossipSync>>,
+    /// Contact manager for P2P contact exchange (lazy-initialized)
+    contact_manager: Option<Arc<ContactManager>>,
     /// Currently open realms with their in-memory state
     realms: HashMap<RealmId, RealmState>,
     /// Data directory path
@@ -138,6 +141,8 @@ pub struct SyncEngine {
     sync_status: Arc<Mutex<HashMap<RealmId, SyncStatus>>>,
     /// Event broadcast channel for notifying listeners of realm changes
     event_tx: broadcast::Sender<SyncEvent>,
+    /// Contact event broadcast channel for contact exchange events
+    contact_event_tx: broadcast::Sender<crate::sync::ContactEvent>,
     /// Receiver for sync messages from background listener tasks
     sync_rx: tokio::sync::mpsc::UnboundedReceiver<SyncChannelMessage>,
     /// Sender for sync messages (cloned to background tasks)
@@ -169,6 +174,7 @@ impl SyncEngine {
         let peer_registry = Arc::new(PeerRegistry::new(storage.db_handle())?);
 
         let (event_tx, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
+        let (contact_event_tx, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
 
         let (sync_tx, sync_rx) = tokio::sync::mpsc::unbounded_channel();
 
@@ -176,11 +182,13 @@ impl SyncEngine {
             storage,
             peer_registry,
             gossip: None,
+            contact_manager: None,
             realms: HashMap::new(),
             data_dir,
             identity: None,
             sync_status: Arc::new(Mutex::new(HashMap::new())),
             event_tx,
+            contact_event_tx,
             sync_rx,
             sync_tx,
         };
@@ -913,7 +921,10 @@ impl SyncEngine {
                 .get_mut(realm_id)
                 .ok_or_else(|| SyncError::RealmNotFound(realm_id.to_string()))?;
 
-            let task_id = state.doc.add_quest_full(title, subtitle, description, category, image_blob_id)?;
+            let task_id =
+                state
+                    .doc
+                    .add_quest_full(title, subtitle, description, category, image_blob_id)?;
 
             // Capture incremental changes BEFORE save (save resets the checkpoint)
             let sync_data = state.doc.generate_sync_message();
@@ -1093,7 +1104,10 @@ impl SyncEngine {
     ///
     /// This enables dynamic peer discovery - peers discovered in previous sessions
     /// automatically become bootstrap peers for reconnection.
-    fn get_effective_bootstrap_peers(&self, realm_id: &RealmId) -> Result<Vec<iroh::PublicKey>, SyncError> {
+    fn get_effective_bootstrap_peers(
+        &self,
+        realm_id: &RealmId,
+    ) -> Result<Vec<iroh::PublicKey>, SyncError> {
         let mut peer_ids = std::collections::HashSet::new();
 
         // 1. Add static peers from invite/storage
@@ -1162,9 +1176,53 @@ impl SyncEngine {
             }
         };
 
-        let gossip = Arc::new(GossipSync::with_secret_key(Some(secret_key)).await?);
+        // Pass storage and contact_event_tx so Router can register contact protocol handler
+        let contact_deps = Some((Arc::new(self.storage.clone()), self.contact_event_tx.clone()));
+
+        // Pass profile handler deps if identity is available
+        let profile_deps = self.identity.as_ref().map(|keypair| {
+            let did = Did::from_public_key(&keypair.public_key());
+            (Arc::new(self.storage.clone()), Arc::new(keypair.clone()), did)
+        });
+
+        let gossip = Arc::new(GossipSync::with_secret_key(Some(secret_key), contact_deps, profile_deps).await?);
         self.gossip = Some(gossip.clone());
         Ok(gossip)
+    }
+
+    /// Ensure contact manager is initialized
+    ///
+    /// Initializes the contact manager if not already initialized.
+    /// Requires both gossip and identity to be initialized first.
+    async fn ensure_contact_manager(&mut self) -> Result<Arc<ContactManager>, SyncError> {
+        if let Some(ref manager) = self.contact_manager {
+            return Ok(manager.clone());
+        }
+
+        info!("Initializing contact manager");
+
+        // Ensure gossip is initialized
+        let gossip = self.ensure_gossip().await?;
+
+        // Ensure identity is initialized
+        self.init_identity()?;
+        let keypair = self
+            .identity
+            .as_ref()
+            .ok_or_else(|| SyncError::Identity("Identity not initialized".to_string()))?;
+        let did = Did::from_public_key(&keypair.public_key());
+
+        // Create contact manager (shares event_tx with ContactProtocolHandler)
+        let manager = Arc::new(ContactManager::new(
+            gossip,
+            Arc::new(keypair.clone()),
+            did,
+            Arc::new(self.storage.clone()),
+            self.contact_event_tx.clone(),
+        ));
+
+        self.contact_manager = Some(manager.clone());
+        Ok(manager)
     }
 
     /// Start the peer reconnection background task
@@ -1235,7 +1293,11 @@ impl SyncEngine {
 
             attempted += 1;
             peer_info.record_attempt();
-            debug!(?peer_id, attempt_number = peer_info.connection_attempts, "Attempting to reconnect");
+            debug!(
+                ?peer_id,
+                attempt_number = peer_info.connection_attempts,
+                "Attempting to reconnect"
+            );
 
             // Try to connect using the endpoint
             match gossip
@@ -2564,7 +2626,10 @@ impl SyncEngine {
     }
 
     /// Load a profile by peer ID
-    pub fn load_profile(&self, peer_id: &str) -> Result<Option<crate::types::UserProfile>, SyncError> {
+    pub fn load_profile(
+        &self,
+        peer_id: &str,
+    ) -> Result<Option<crate::types::UserProfile>, SyncError> {
         self.storage.load_profile(peer_id)
     }
 
@@ -2581,7 +2646,8 @@ impl SyncEngine {
     /// Get or create profile for this node
     pub fn get_own_profile(&self) -> Result<crate::types::UserProfile, SyncError> {
         // Use DID as peer_id (stable identifier, available immediately)
-        let peer_id = self.did()
+        let peer_id = self
+            .did()
             .ok_or_else(|| SyncError::Identity("Identity not initialized".to_string()))?
             .to_string();
 
@@ -2590,14 +2656,196 @@ impl SyncEngine {
             Ok(profile)
         } else {
             // Create default profile with placeholder text to trigger edit mode
-            let mut profile = crate::types::UserProfile::new(
-                peer_id.clone(),
-                String::new(),
-            );
+            let mut profile = crate::types::UserProfile::new(peer_id.clone(), "Anonymous User".to_string());
             profile.bio = "**Add your bio here**\n\nDescribe yourself, your interests, or your role in the network.\n\n- Use *markdown* for formatting\n- Add links, lists, and more\n- Express your unique identity".to_string();
             self.storage.save_profile(&profile)?;
             Ok(profile)
         }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Contact Operations
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Generate a contact invite for sharing with peers
+    ///
+    /// Creates a signed invite containing profile information that can be shared
+    /// via QR code or text. The invite expires after the specified number of hours.
+    ///
+    /// # Arguments
+    ///
+    /// * `expiry_hours` - Hours until invite expires (max 168 = 7 days)
+    ///
+    /// # Returns
+    ///
+    /// A base58-encoded invite string prefixed with "sync-contact:"
+    ///
+    /// # Errors
+    ///
+    /// Returns error if contact manager initialization fails or profile cannot be loaded.
+    pub async fn generate_contact_invite(
+        &mut self,
+        expiry_hours: u8,
+    ) -> Result<String, SyncError> {
+        // Ensure contact manager is initialized
+        let manager = self.ensure_contact_manager().await?;
+
+        // Get own profile to include in invite
+        let profile = self.get_own_profile()?;
+
+        // Create profile snapshot
+        let snapshot = ProfileSnapshot {
+            display_name: profile.display_name.clone(),
+            subtitle: profile.subtitle.clone(),
+            avatar_blob_id: profile.avatar_blob_id.clone(),
+            bio: ProfileSnapshot::truncate_bio(&profile.bio),
+        };
+
+        // Generate invite
+        manager.generate_invite(snapshot, expiry_hours)
+    }
+
+    /// Decode a contact invite string
+    ///
+    /// Validates the invite signature, checks expiry, and verifies it hasn't been revoked.
+    ///
+    /// # Arguments
+    ///
+    /// * `invite_str` - The invite code (e.g., "sync-contact:...")
+    ///
+    /// # Returns
+    ///
+    /// The decoded and validated invite with profile information
+    ///
+    /// # Errors
+    ///
+    /// Returns error if invite is invalid, expired, or revoked.
+    pub async fn decode_contact_invite(
+        &mut self,
+        invite_str: &str,
+    ) -> Result<HybridContactInvite, SyncError> {
+        // Ensure contact manager is initialized
+        let manager = self.ensure_contact_manager().await?;
+
+        // Decode invite
+        manager.decode_invite(invite_str)
+    }
+
+    /// Send a contact request to a peer
+    ///
+    /// Initiates the contact request protocol by sending a request to the inviter.
+    /// The request will be saved as OutgoingPending until the peer responds.
+    ///
+    /// # Arguments
+    ///
+    /// * `invite` - The decoded contact invite
+    ///
+    /// # Errors
+    ///
+    /// Returns error if contact manager initialization fails or request cannot be sent.
+    pub async fn send_contact_request(
+        &mut self,
+        invite: HybridContactInvite,
+    ) -> Result<(), SyncError> {
+        // Ensure contact manager is initialized
+        let manager = self.ensure_contact_manager().await?;
+
+        // Get own profile to include in request
+        let profile = self.get_own_profile()?;
+
+        // Create profile snapshot
+        let snapshot = ProfileSnapshot {
+            display_name: profile.display_name.clone(),
+            subtitle: profile.subtitle.clone(),
+            avatar_blob_id: profile.avatar_blob_id.clone(),
+            bio: ProfileSnapshot::truncate_bio(&profile.bio),
+        };
+
+        // Send contact request
+        manager.send_contact_request(invite, snapshot).await
+    }
+
+    /// Accept an incoming contact request
+    ///
+    /// Accepts a pending contact request and finalizes the connection if both
+    /// parties have accepted. Once mutually accepted, the contact is saved and
+    /// both nodes subscribe to a shared 1:1 gossip topic.
+    ///
+    /// # Arguments
+    ///
+    /// * `invite_id` - The unique invite ID from the pending request
+    ///
+    /// # Errors
+    ///
+    /// Returns error if invite_id not found or contact finalization fails.
+    pub async fn accept_contact(&mut self, invite_id: &[u8; 16]) -> Result<(), SyncError> {
+        // Ensure contact manager is initialized
+        let manager = self.ensure_contact_manager().await?;
+
+        // Accept contact request
+        manager.accept_contact_request(invite_id).await
+    }
+
+    /// Decline an incoming contact request
+    ///
+    /// Rejects a pending contact request and removes it from storage.
+    ///
+    /// # Arguments
+    ///
+    /// * `invite_id` - The unique invite ID from the pending request
+    ///
+    /// # Errors
+    ///
+    /// Returns error if invite_id not found.
+    pub async fn decline_contact(&mut self, invite_id: &[u8; 16]) -> Result<(), SyncError> {
+        // Ensure contact manager is initialized
+        let manager = self.ensure_contact_manager().await?;
+
+        // Decline contact request
+        manager.decline_contact_request(invite_id).await
+    }
+
+    /// List all accepted contacts
+    ///
+    /// Returns all contacts that have been mutually accepted.
+    ///
+    /// # Returns
+    ///
+    /// Vector of all stored contacts with their online/offline status.
+    pub fn list_contacts(&self) -> Result<Vec<ContactInfo>, SyncError> {
+        self.storage.list_contacts()
+    }
+
+    /// List pending contact requests
+    ///
+    /// Returns both incoming (awaiting our response) and outgoing (awaiting their response)
+    /// pending contact requests.
+    ///
+    /// # Returns
+    ///
+    /// Tuple of (incoming_requests, outgoing_requests)
+    pub fn list_pending_contacts(&self) -> Result<(Vec<PendingContact>, Vec<PendingContact>), SyncError> {
+        let incoming = self.storage.list_incoming_pending()?;
+        let outgoing = self.storage.list_outgoing_pending()?;
+        Ok((incoming, outgoing))
+    }
+
+    /// Subscribe to contact events
+    ///
+    /// Returns a broadcast receiver for real-time contact event notifications.
+    /// Events include new requests, acceptances, online/offline status changes, etc.
+    ///
+    /// # Returns
+    ///
+    /// Broadcast receiver for ContactEvent messages
+    pub async fn subscribe_contact_events(
+        &mut self,
+    ) -> Result<broadcast::Receiver<ContactEvent>, SyncError> {
+        // Ensure contact manager is initialized
+        let manager = self.ensure_contact_manager().await?;
+
+        // Subscribe to events
+        Ok(manager.subscribe_events())
     }
 
     // ═══════════════════════════════════════════════════════════════════════

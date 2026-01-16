@@ -92,6 +92,14 @@ pub enum SyncError {
     /// Operation not allowed on Private realm
     #[error("Operation not allowed on Private realm: {0}")]
     PrivateRealmOperation(String),
+
+    /// Contact not found in storage
+    #[error("Contact not found: {0}")]
+    ContactNotFound(String),
+
+    /// Invalid operation for current state
+    #[error("Invalid operation: {0}")]
+    InvalidOperation(String),
 }
 
 /// Result type alias using SyncError

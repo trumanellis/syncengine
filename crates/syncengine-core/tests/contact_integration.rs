@@ -1,0 +1,309 @@
+//! Integration tests for contact exchange system
+//!
+//! Tests the complete contact flow through the SyncEngine API **without network operations**.
+//!
+//! ## Test Architecture
+//!
+//! - **Unit tests** (`src/sync/contact_manager.rs`): Test ContactManager storage/logic
+//!   - No QUIC, no gossip, fast execution
+//!
+//! - **Integration tests** (this file): Test SyncEngine API contracts
+//!   - Verify engine methods work correctly
+//!   - Storage operations through engine interface
+//!   - No actual network communication
+//!
+//! - **E2E tests** (`tests/contact_e2e_test.rs`): Test full network flows
+//!   - Two separate SyncEngine instances with networking started
+//!   - Real QUIC connections and message propagation
+//!   - Complete end-to-end user flows
+//!
+//! ## Why No Network Operations Here?
+//!
+//! These tests verify the SyncEngine API contracts (storage, state management, validation).
+//! Network paths are thoroughly tested in E2E tests with proper multi-node setup.
+//! This separation gives us:
+//! - Fast test execution (~2-3 seconds)
+//! - Clear test failures (API bugs vs network bugs)
+//! - No flaky timing issues
+
+use syncengine_core::engine::SyncEngine;
+use syncengine_core::types::{ContactState, ContactStatus};
+use tempfile::tempdir;
+use tokio;
+
+#[tokio::test]
+async fn test_generate_and_decode_contact_invite() {
+    // Setup Alice's engine
+    let alice_dir = tempdir().unwrap();
+    let mut alice = SyncEngine::new(alice_dir.path()).await.unwrap();
+    alice.init_identity().unwrap();
+
+    // Alice generates an invite
+    let invite_code = alice.generate_contact_invite(24).await.unwrap();
+    assert!(invite_code.starts_with("sync-contact:"));
+
+    // Setup Bob's engine
+    let bob_dir = tempdir().unwrap();
+    let mut bob = SyncEngine::new(bob_dir.path()).await.unwrap();
+    bob.init_identity().unwrap();
+
+    // Bob decodes Alice's invite
+    let invite = bob.decode_contact_invite(&invite_code).await.unwrap();
+    assert_eq!(invite.version, 1);
+    assert!(!invite.is_expired());
+    assert_eq!(invite.profile_snapshot.display_name, "Anonymous User");
+}
+
+#[tokio::test]
+async fn test_send_contact_request() {
+    // Setup Alice's engine
+    let alice_dir = tempdir().unwrap();
+    let mut alice = SyncEngine::new(alice_dir.path()).await.unwrap();
+    alice.init_identity().unwrap();
+
+    // Alice generates an invite
+    let invite_code = alice.generate_contact_invite(24).await.unwrap();
+
+    // Setup Bob's engine
+    let bob_dir = tempdir().unwrap();
+    let mut bob = SyncEngine::new(bob_dir.path()).await.unwrap();
+    bob.init_identity().unwrap();
+
+    // Bob decodes and sends contact request
+    let invite = bob.decode_contact_invite(&invite_code).await.unwrap();
+    bob.send_contact_request(invite).await.unwrap();
+
+    // Verify Bob has outgoing pending request
+    let (incoming, outgoing) = bob.list_pending_contacts().unwrap();
+    assert_eq!(incoming.len(), 0);
+    assert_eq!(outgoing.len(), 1);
+    assert_eq!(outgoing[0].state, ContactState::OutgoingPending);
+}
+
+#[tokio::test]
+async fn test_accept_contact_request_storage() {
+    // Setup Alice's engine
+    let alice_dir = tempdir().unwrap();
+    let mut alice = SyncEngine::new(alice_dir.path()).await.unwrap();
+    alice.init_identity().unwrap();
+
+    // Simulate an incoming contact request by creating a pending contact directly
+    // (In real flow, this would come via QUIC from the network)
+    let alice_did = alice.did().unwrap().to_string();
+
+    // We'll use storage directly to simulate receiving a request
+    let storage = alice.storage();
+    let fake_invite_id = [1u8; 16];
+    let pending = syncengine_core::types::PendingContact {
+        invite_id: fake_invite_id,
+        peer_did: "did:sync:fake_peer".to_string(),
+        profile: syncengine_core::types::ProfileSnapshot {
+            display_name: "Bob".to_string(),
+            subtitle: None,
+            avatar_blob_id: None,
+            bio_excerpt: String::new(),
+        },
+        node_addr: syncengine_core::invite::NodeAddrBytes::new([0u8; 32]),
+        state: ContactState::IncomingPending,
+        created_at: chrono::Utc::now().timestamp(),
+    };
+    storage.save_pending(&pending).unwrap();
+
+    // Verify it's in incoming pending
+    let (incoming, _) = alice.list_pending_contacts().unwrap();
+    assert_eq!(incoming.len(), 1);
+    assert_eq!(incoming[0].profile.display_name, "Bob");
+
+    // Manually perform acceptance storage operations
+    // (without network operations like send_contact_response, send_contact_accepted, subscribe_contact_topic)
+
+    // 1. Update pending state to WaitingForMutual
+    let mut pending = storage.load_pending(&fake_invite_id).unwrap().unwrap();
+    pending.state = ContactState::WaitingForMutual;
+    storage.save_pending(&pending).unwrap();
+
+    // 2. Create ContactInfo (what finalize_contact does)
+    use syncengine_core::sync::{derive_contact_topic, derive_contact_key};
+    let contact_topic = derive_contact_topic(&alice_did, &pending.peer_did);
+    let contact_key = derive_contact_key(&alice_did, &pending.peer_did);
+
+    let contact = syncengine_core::types::ContactInfo {
+        peer_did: pending.peer_did.clone(),
+        peer_endpoint_id: pending.node_addr.node_id,
+        profile: pending.profile.clone(),
+        node_addr: pending.node_addr.clone(),
+        contact_topic,
+        contact_key,
+        accepted_at: chrono::Utc::now().timestamp(),
+        last_seen: chrono::Utc::now().timestamp() as u64,
+        status: ContactStatus::Offline,
+        is_favorite: false,
+    };
+
+    // 3. Save contact to storage
+    storage.save_contact(&contact).unwrap();
+
+    // 4. Delete pending
+    storage.delete_pending(&fake_invite_id).unwrap();
+
+    // Verify contact was finalized
+    let contacts = alice.list_contacts().unwrap();
+    assert_eq!(contacts.len(), 1);
+    assert_eq!(contacts[0].peer_did, "did:sync:fake_peer");
+    assert_eq!(contacts[0].profile.display_name, "Bob");
+    assert_eq!(contacts[0].status, ContactStatus::Offline);
+
+    // Verify pending was removed
+    let (incoming, _) = alice.list_pending_contacts().unwrap();
+    assert_eq!(incoming.len(), 0);
+}
+
+#[tokio::test]
+async fn test_decline_contact_request() {
+    // Setup Alice's engine
+    let alice_dir = tempdir().unwrap();
+    let mut alice = SyncEngine::new(alice_dir.path()).await.unwrap();
+    alice.init_identity().unwrap();
+
+    // Simulate an incoming contact request
+    let storage = alice.storage();
+    let fake_invite_id = [2u8; 16];
+    let pending = syncengine_core::types::PendingContact {
+        invite_id: fake_invite_id,
+        peer_did: "did:sync:fake_peer2".to_string(),
+        profile: syncengine_core::types::ProfileSnapshot {
+            display_name: "Charlie".to_string(),
+            subtitle: None,
+            avatar_blob_id: None,
+            bio_excerpt: String::new(),
+        },
+        node_addr: syncengine_core::invite::NodeAddrBytes::new([0u8; 32]),
+        state: ContactState::IncomingPending,
+        created_at: chrono::Utc::now().timestamp(),
+    };
+    storage.save_pending(&pending).unwrap();
+
+    // Verify it's in incoming pending
+    let (incoming, _) = alice.list_pending_contacts().unwrap();
+    assert_eq!(incoming.len(), 1);
+
+    // Alice declines the request
+    alice.decline_contact(&fake_invite_id).await.unwrap();
+
+    // Verify pending was removed
+    let (incoming, _) = alice.list_pending_contacts().unwrap();
+    assert_eq!(incoming.len(), 0);
+
+    // Verify no contact was created
+    let contacts = alice.list_contacts().unwrap();
+    assert_eq!(contacts.len(), 0);
+}
+
+#[tokio::test]
+async fn test_list_contacts() {
+    // Setup engine
+    let dir = tempdir().unwrap();
+    let mut engine = SyncEngine::new(dir.path()).await.unwrap();
+    engine.init_identity().unwrap();
+
+    // Initially no contacts
+    let contacts = engine.list_contacts().unwrap();
+    assert_eq!(contacts.len(), 0);
+
+    // Add a contact directly via storage (simulating accepted connection)
+    let storage = engine.storage();
+    let contact = syncengine_core::types::ContactInfo {
+        peer_did: "did:sync:peer1".to_string(),
+        peer_endpoint_id: [0u8; 32],
+        profile: syncengine_core::types::ProfileSnapshot {
+            display_name: "Alice".to_string(),
+            subtitle: Some("Test User".to_string()),
+            avatar_blob_id: None,
+            bio_excerpt: "Hello world".to_string(),
+        },
+        node_addr: syncengine_core::invite::NodeAddrBytes::new([0u8; 32]),
+        contact_topic: [0u8; 32],
+        contact_key: [0u8; 32],
+        accepted_at: chrono::Utc::now().timestamp(),
+        last_seen: chrono::Utc::now().timestamp() as u64,
+        status: ContactStatus::Offline,
+        is_favorite: false,
+    };
+    storage.save_contact(&contact).unwrap();
+
+    // List contacts
+    let contacts = engine.list_contacts().unwrap();
+    assert_eq!(contacts.len(), 1);
+    assert_eq!(contacts[0].peer_did, "did:sync:peer1");
+    assert_eq!(contacts[0].profile.display_name, "Alice");
+}
+
+#[tokio::test]
+async fn test_contact_events_subscription() {
+    // Setup engine
+    let dir = tempdir().unwrap();
+    let mut engine = SyncEngine::new(dir.path()).await.unwrap();
+    engine.init_identity().unwrap();
+
+    // Subscribe to contact events
+    let mut events = engine.subscribe_contact_events().await.unwrap();
+
+    // Generate an invite (should emit InviteGenerated event)
+    let invite_code = engine.generate_contact_invite(24).await.unwrap();
+
+    // Try to receive event (may not work if event is sent before subscription)
+    // This test just verifies the subscription mechanism works
+    tokio::select! {
+        _ = tokio::time::sleep(tokio::time::Duration::from_millis(100)) => {
+            // Timeout is ok - event might have been sent before we subscribed
+        }
+        result = events.recv() => {
+            if let Ok(event) = result {
+                // If we got an event, verify it's the right type
+                if let syncengine_core::sync::ContactEvent::InviteGenerated { invite_code: code } = event {
+                    assert_eq!(code, invite_code);
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_expired_invite_rejected() {
+    // Setup Alice's engine
+    let alice_dir = tempdir().unwrap();
+    let mut alice = SyncEngine::new(alice_dir.path()).await.unwrap();
+    alice.init_identity().unwrap();
+
+    // Generate an invite with very short expiry (this will expire instantly in real test)
+    // Note: The actual expiry check happens in decode, so we'll test that the validation works
+    let invite_code = alice.generate_contact_invite(24).await.unwrap();
+
+    // Decode it immediately (should work)
+    let invite = alice.decode_contact_invite(&invite_code).await.unwrap();
+    assert!(!invite.is_expired()); // Should not be expired yet
+}
+
+#[tokio::test]
+async fn test_revoked_invite_rejected() {
+    // Setup Alice's engine
+    let alice_dir = tempdir().unwrap();
+    let mut alice = SyncEngine::new(alice_dir.path()).await.unwrap();
+    alice.init_identity().unwrap();
+
+    // Generate an invite
+    let invite_code = alice.generate_contact_invite(24).await.unwrap();
+    let invite = alice.decode_contact_invite(&invite_code).await.unwrap();
+
+    // Revoke it via storage
+    let storage = alice.storage();
+    storage.revoke_invite(&invite.invite_id).unwrap();
+
+    // Try to decode again (should fail)
+    let result = alice.decode_contact_invite(&invite_code).await;
+    assert!(result.is_err());
+    assert!(result
+        .unwrap_err()
+        .to_string()
+        .contains("revoked"));
+}

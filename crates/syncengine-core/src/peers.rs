@@ -177,7 +177,8 @@ impl PeerInfo {
         // Since we don't track consecutive failures explicitly,
         // we'll use a simple heuristic: total attempts - successful connections
         // This is an approximation that works well enough for backoff purposes
-        self.connection_attempts.saturating_sub(self.successful_connections)
+        self.connection_attempts
+            .saturating_sub(self.successful_connections)
     }
 
     /// Calculate Fibonacci backoff delay in seconds

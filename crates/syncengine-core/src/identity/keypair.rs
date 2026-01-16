@@ -5,7 +5,7 @@
 
 use crate::identity::signature::HybridSignature;
 use crate::SyncError;
-use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature as Ed25519Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use pqcrypto_dilithium::dilithium5;
 use pqcrypto_traits::sign::{PublicKey as PqPublicKey, SecretKey as PqSecretKey};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -89,6 +89,15 @@ impl HybridKeypair {
         let ml_dsa_sig = dilithium5::sign(message, &self.ml_dsa);
 
         HybridSignature::new(ed25519_sig, ml_dsa_sig)
+    }
+
+    /// Sign with Ed25519 only (for ephemeral invites)
+    ///
+    /// This produces a lightweight 64-byte signature suitable for QR codes.
+    /// Use only for short-lived data (like invite codes that expire in hours).
+    /// For long-term security, use `sign()` which includes post-quantum protection.
+    pub fn sign_ed25519_only(&self, message: &[u8]) -> Ed25519Signature {
+        self.ed25519.sign(message)
     }
 
     /// Serialize the private key to bytes

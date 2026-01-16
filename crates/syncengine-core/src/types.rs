@@ -7,12 +7,18 @@ use ulid::Ulid;
 use crate::invite::NodeAddrBytes;
 
 // Submodules for rich card types
+pub mod contact;
 pub mod image;
 pub mod profile;
 
 // Re-export card types for convenience
 pub use image::CardImage;
 pub use profile::UserProfile;
+
+// Re-export contact types for convenience
+pub use contact::{
+    ContactInfo, ContactState, ContactStatus, PeerContactInvite, PendingContact, ProfileSnapshot,
+};
 
 /// Unique identifier for a realm (gossip topic)
 ///

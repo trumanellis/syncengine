@@ -13,7 +13,11 @@ use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
 use crate::error::{SyncError, SyncResult};
+use crate::identity::{Did, HybridKeypair};
 use crate::invite::{InviteTicket, NodeAddrBytes};
+use crate::sync::contact_handler::ContactProtocolHandler;
+use crate::sync::contact_protocol::CONTACT_ALPN;
+use crate::sync::profile_protocol::{ProfileProtocolHandler, PROFILE_ALPN};
 use crate::types::RealmId;
 
 /// Message received from a gossip topic
@@ -307,22 +311,33 @@ impl GossipSync {
     /// Spawns an iroh endpoint with gossip protocol support.
     /// The endpoint will be reachable by other peers.
     pub async fn new() -> SyncResult<Self> {
-        Self::with_secret_key(None).await
+        Self::with_secret_key(None, None, None).await
     }
 
     /// Create a new gossip sync instance with a specific secret key
     ///
     /// Useful for persistent identity across restarts.
-    pub async fn with_secret_key(secret_key: Option<SecretKey>) -> SyncResult<Self> {
+    /// If storage and event_tx are provided, contact protocol handler will be registered.
+    /// If profile handler deps are provided, profile protocol handler will be registered.
+    pub async fn with_secret_key(
+        secret_key: Option<SecretKey>,
+        contact_handler_deps: Option<(Arc<crate::storage::Storage>, tokio::sync::broadcast::Sender<crate::sync::ContactEvent>)>,
+        profile_handler_deps: Option<(Arc<crate::storage::Storage>, Arc<HybridKeypair>, Did)>,
+    ) -> SyncResult<Self> {
         let secret_key = secret_key.unwrap_or_else(|| SecretKey::generate(&mut rand::rng()));
 
         // Create static provider for out-of-band peer addresses
         let static_provider = StaticProvider::new();
 
         // Build the endpoint with static discovery
+        // Support gossip (realm sync), contact exchange, and profile serving protocols
         let endpoint = Endpoint::builder()
             .secret_key(secret_key.clone())
-            .alpns(vec![GOSSIP_ALPN.to_vec()])
+            .alpns(vec![
+                GOSSIP_ALPN.to_vec(),
+                CONTACT_ALPN.to_vec(),
+                PROFILE_ALPN.to_vec(),
+            ])
             .discovery(static_provider.clone())
             .bind()
             .await
@@ -340,10 +355,22 @@ impl GossipSync {
             .spawn(endpoint.clone());
         info!(max_message_size = MAX_MESSAGE_SIZE, "Gossip spawned");
 
-        // Build router to accept incoming gossip connections
-        let router = Router::builder(endpoint.clone())
-            .accept(GOSSIP_ALPN, gossip.clone())
-            .spawn();
+        // Build router - register contact and profile protocols if dependencies provided
+        let mut router_builder = Router::builder(endpoint.clone()).accept(GOSSIP_ALPN, gossip.clone());
+
+        if let Some((storage, event_tx)) = contact_handler_deps {
+            let contact_handler = ContactProtocolHandler::new(storage, event_tx, gossip.clone());
+            router_builder = router_builder.accept(CONTACT_ALPN, contact_handler);
+            info!("Contact protocol handler registered");
+        }
+
+        if let Some((storage, keypair, did)) = profile_handler_deps {
+            let profile_handler = ProfileProtocolHandler::new(storage, keypair, did);
+            router_builder = router_builder.accept(PROFILE_ALPN, profile_handler);
+            info!("Profile protocol handler registered");
+        }
+
+        let router = router_builder.spawn();
         info!("Router spawned");
 
         Ok(Self {
@@ -705,7 +732,7 @@ mod tests {
         let secret_key = SecretKey::generate(&mut rand::rng());
         let expected_public = secret_key.public();
 
-        let gossip = GossipSync::with_secret_key(Some(secret_key))
+        let gossip = GossipSync::with_secret_key(Some(secret_key), None, None)
             .await
             .expect("Failed to create GossipSync with secret key");
 

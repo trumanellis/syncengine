@@ -3,6 +3,7 @@
 //! Cyber-mystical terminal aesthetic components.
 
 pub mod cards;
+pub mod contacts;
 mod field_status;
 pub mod images;
 mod intention_creator;
