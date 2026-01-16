@@ -22,6 +22,11 @@ pub(crate) const PENDING_CONTACTS_TABLE: TableDefinition<&str, &[u8]> =
 pub(crate) const REVOKED_INVITES_TABLE: TableDefinition<&str, &[u8]> =
     TableDefinition::new("revoked_invites");
 
+/// Table for invites we generated (key: hex invite_id, value: timestamp bytes)
+/// Used to auto-accept incoming requests that use our invites
+pub(crate) const GENERATED_INVITES_TABLE: TableDefinition<&str, &[u8]> =
+    TableDefinition::new("generated_invites");
+
 impl Storage {
     // ═══════════════════════════════════════════════════════════════════════
     // Contact Operations
@@ -237,6 +242,54 @@ impl Storage {
         let key = hex::encode(invite_id);
 
         Ok(table.get(key.as_str())?.is_some())
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Generated Invite Tracking (for auto-accept)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Record that we generated an invite
+    ///
+    /// Used to auto-accept incoming requests that use our invites.
+    pub fn save_generated_invite(&self, invite_id: &[u8; 16]) -> Result<(), SyncError> {
+        let db = self.db_handle();
+        let db_guard = db.read();
+        let write_txn = db_guard.begin_write()?;
+        {
+            let mut table = write_txn.open_table(GENERATED_INVITES_TABLE)?;
+            let key = hex::encode(invite_id);
+            let timestamp = chrono::Utc::now().timestamp().to_le_bytes();
+            table.insert(key.as_str(), timestamp.as_slice())?;
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
+
+    /// Check if we generated this invite
+    ///
+    /// Returns `true` if this invite_id was created by us.
+    pub fn is_our_generated_invite(&self, invite_id: &[u8; 16]) -> Result<bool, SyncError> {
+        let db = self.db_handle();
+        let db_guard = db.read();
+        let read_txn = db_guard.begin_read()?;
+        let table = read_txn.open_table(GENERATED_INVITES_TABLE)?;
+        let key = hex::encode(invite_id);
+
+        Ok(table.get(key.as_str())?.is_some())
+    }
+
+    /// Remove a generated invite record (after it's been used or cancelled)
+    pub fn delete_generated_invite(&self, invite_id: &[u8; 16]) -> Result<(), SyncError> {
+        let db = self.db_handle();
+        let db_guard = db.read();
+        let write_txn = db_guard.begin_write()?;
+        {
+            let mut table = write_txn.open_table(GENERATED_INVITES_TABLE)?;
+            let key = hex::encode(invite_id);
+            table.remove(key.as_str())?;
+        }
+        write_txn.commit()?;
+        Ok(())
     }
 }
 

@@ -1221,6 +1221,9 @@ impl SyncEngine {
             self.contact_event_tx.clone(),
         ));
 
+        // Start the auto-accept task for our own invites
+        manager.clone().start_auto_accept_task();
+
         self.contact_manager = Some(manager.clone());
         Ok(manager)
     }

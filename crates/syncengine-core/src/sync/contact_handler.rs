@@ -152,6 +152,19 @@ impl ContactProtocolHandler {
                         SyncError::Serialization(format!("Invalid node address: {}", e))
                     })?;
 
+                // Check if this is an invite we generated (should auto-accept)
+                let is_our_invite = storage.is_our_generated_invite(&invite_id).unwrap_or(false);
+
+                if is_our_invite {
+                    // Clean up the generated invite record since it's being used
+                    let _ = storage.delete_generated_invite(&invite_id);
+                    info!(
+                        invite_id = ?invite_id,
+                        requester_did = %requester_did,
+                        "Received request for our own invite - will auto-accept"
+                    );
+                }
+
                 // Save as IncomingPending
                 let pending = PendingContact {
                     invite_id,
@@ -167,13 +180,15 @@ impl ContactProtocolHandler {
                 info!(
                     invite_id = ?invite_id,
                     requester_did = %requester_did,
+                    auto_accept = is_our_invite,
                     "Received contact request, saved as IncomingPending"
                 );
 
-                // Emit event
+                // Emit event (with auto_accept flag if it's our invite)
                 let _ = event_tx.send(ContactEvent::ContactRequestReceived {
                     invite_id,
                     from: requester_profile,
+                    auto_accept: is_our_invite,
                 });
             }
 

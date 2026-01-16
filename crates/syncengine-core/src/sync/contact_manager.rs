@@ -28,7 +28,7 @@ use std::sync::Arc;
 use base64::Engine as _;
 use iroh_gossip::proto::TopicId;
 use tokio::sync::{broadcast, RwLock};
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::error::SyncError;
 use crate::identity::{Did, HybridKeypair, HybridPublicKey};
@@ -52,6 +52,8 @@ pub enum ContactEvent {
     ContactRequestReceived {
         invite_id: [u8; 16],
         from: ProfileSnapshot,
+        /// True if this was our own invite (should auto-accept)
+        auto_accept: bool,
     },
     /// A contact request was successfully sent
     ContactRequestSent { invite_id: [u8; 16], to: String },
@@ -114,6 +116,62 @@ impl ContactManager {
             event_tx,
             active_topics: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    /// Start a background task that auto-accepts contact requests for our own invites
+    ///
+    /// When we generate an invite and someone uses it, we should automatically accept
+    /// instead of requiring manual confirmation. This task listens for ContactRequestReceived
+    /// events with `auto_accept: true` and triggers acceptance.
+    pub fn start_auto_accept_task(self: Arc<Self>) {
+        let mut event_rx = self.event_tx.subscribe();
+
+        tokio::spawn(async move {
+            loop {
+                match event_rx.recv().await {
+                    Ok(ContactEvent::ContactRequestReceived {
+                        invite_id,
+                        from,
+                        auto_accept: true,
+                    }) => {
+                        info!(
+                            invite_id = ?invite_id,
+                            from_name = %from.display_name,
+                            "Auto-accepting contact request for our own invite"
+                        );
+
+                        // Small delay to ensure pending contact is saved
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+                        // Auto-accept the contact
+                        if let Err(e) = self.accept_contact_request(&invite_id).await {
+                            error!(
+                                invite_id = ?invite_id,
+                                error = ?e,
+                                "Failed to auto-accept contact request"
+                            );
+                        } else {
+                            info!(
+                                invite_id = ?invite_id,
+                                "Successfully auto-accepted contact request"
+                            );
+                        }
+                    }
+                    Ok(_) => {
+                        // Ignore other events
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        warn!("Auto-accept task lagged, missed {} events", n);
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        debug!("Auto-accept task event channel closed, stopping");
+                        break;
+                    }
+                }
+            }
+        });
+
+        info!("Contact auto-accept task started");
     }
 
     /// Retry an async operation with exponential backoff
@@ -240,6 +298,9 @@ impl ContactManager {
             final_length = invite_code.len(),
             "Generated hybrid contact invite (v2)"
         );
+
+        // Track this invite so we auto-accept when someone uses it
+        self.storage.save_generated_invite(&invite_id)?;
 
         // Emit event
         let _ = self.event_tx.send(ContactEvent::InviteGenerated {
