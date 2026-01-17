@@ -1,5 +1,18 @@
-//! Blob Storage - Content-addressed image storage
+//! Blob Storage - Content-addressed image storage (DEPRECATED)
 //!
+//! **DEPRECATED**: This module is deprecated in favor of `crate::blobs::BlobManager`.
+//! The BlobManager provides the same content-addressed storage with P2P transfer capability.
+//!
+//! Migration path:
+//! - `storage.save_image_blob(data)` → `blob_manager.import_image(data).await`
+//! - `storage.load_image_blob(hash)` → `blob_manager.get_bytes(&hash).await`
+//! - `storage.blob_exists(hash)` → `blob_manager.has_blob(&hash).await`
+//! - `storage.blob_size(hash)` → `blob_manager.blob_size(&hash).await`
+//! - `storage.delete_image_blob(hash)` → `blob_manager.delete_blob(&hash).await`
+//!
+//! The redb table remains for backward compatibility and data migration.
+//!
+//! Original description:
 //! Stores image blobs in redb with content hashes as keys.
 //! Uses BLAKE3 for content addressing (same as Iroh).
 
@@ -16,6 +29,9 @@ impl Storage {
     ///
     /// Uses BLAKE3 for content addressing. If the blob already exists,
     /// returns the existing hash without re-storing.
+    ///
+    /// **DEPRECATED**: Use `BlobManager::import_image()` instead for P2P capability.
+    #[deprecated(since = "0.2.0", note = "Use BlobManager::import_image() instead")]
     pub fn save_image_blob(&self, data: Vec<u8>) -> Result<String, SyncError> {
         // Compute content hash (BLAKE3)
         let hash = blake3::hash(&data);
@@ -48,6 +64,9 @@ impl Storage {
     /// Load image blob by content hash
     ///
     /// Returns `None` if the blob doesn't exist.
+    ///
+    /// **DEPRECATED**: Use `BlobManager::get_bytes()` instead for P2P capability.
+    #[deprecated(since = "0.2.0", note = "Use BlobManager::get_bytes() instead")]
     pub fn load_image_blob(&self, hash_hex: &str) -> Result<Option<Vec<u8>>, SyncError> {
         let db = self.db_handle();
         let db_guard = db.read();
@@ -66,6 +85,9 @@ impl Storage {
     /// Returns `Ok(())` even if the blob doesn't exist.
     /// Note: Since blobs are content-addressed, deleting may affect
     /// multiple references if they share the same content.
+    ///
+    /// **DEPRECATED**: Use `BlobManager::delete_blob()` instead.
+    #[deprecated(since = "0.2.0", note = "Use BlobManager::delete_blob() instead")]
     pub fn delete_image_blob(&self, hash_hex: &str) -> Result<(), SyncError> {
         let db = self.db_handle();
         let db_guard = db.read();
@@ -79,6 +101,9 @@ impl Storage {
     }
 
     /// Check if a blob exists by hash
+    ///
+    /// **DEPRECATED**: Use `BlobManager::has_blob()` instead.
+    #[deprecated(since = "0.2.0", note = "Use BlobManager::has_blob() instead")]
     pub fn blob_exists(&self, hash_hex: &str) -> Result<bool, SyncError> {
         let db = self.db_handle();
         let db_guard = db.read();
@@ -89,6 +114,9 @@ impl Storage {
     }
 
     /// Get the size of a blob in bytes
+    ///
+    /// **DEPRECATED**: Use `BlobManager::blob_size()` instead.
+    #[deprecated(since = "0.2.0", note = "Use BlobManager::blob_size() instead")]
     pub fn blob_size(&self, hash_hex: &str) -> Result<Option<usize>, SyncError> {
         let db = self.db_handle();
         let db_guard = db.read();

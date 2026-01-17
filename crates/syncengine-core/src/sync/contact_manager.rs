@@ -40,6 +40,7 @@ use crate::types::contact::{
     ContactInfo, ContactState, ContactStatus, HybridContactInvite, PeerContactInvite,
     PendingContact, ProfileSnapshot,
 };
+use crate::types::peer::{ContactDetails, Peer, PeerSource, PeerStatus};
 
 type SyncResult<T> = Result<T, SyncError>;
 
@@ -483,15 +484,15 @@ impl ContactManager {
 
     /// Accept an incoming contact request
     ///
-    /// Moves the pending contact to WaitingForMutual or MutuallyAccepted state,
-    /// sends acceptance message, and subscribes to contact gossip topic if mutual.
+    /// Sends a single ContactAccept message, derives keys locally, and finalizes.
+    /// The simplified protocol eliminates the separate ContactResponse step.
     ///
     /// # Arguments
     ///
     /// * `invite_id` - Invite ID of the pending contact to accept
     pub async fn accept_contact_request(&self, invite_id: &[u8; 16]) -> SyncResult<()> {
         // Load pending contact
-        let mut pending = self
+        let pending = self
             .storage
             .load_pending(invite_id)?
             .ok_or_else(|| SyncError::ContactNotFound(hex::encode(invite_id)))?;
@@ -504,29 +505,17 @@ impl ContactManager {
             )));
         }
 
-        // Update state to WaitingForMutual
-        pending.state = ContactState::WaitingForMutual;
-        self.storage.save_pending(&pending)?;
-
         info!(
             invite_id = ?invite_id,
             peer_did = %pending.peer_did,
-            "Accepted contact request, waiting for mutual acceptance"
+            "Accepting contact request with simplified 2-message protocol"
         );
 
-        // Send ContactResponse (accepted: true) via QUIC
-        self.send_contact_response(&pending.node_addr, *invite_id, true)
+        // Send single ContactAccept message (no keys - derived locally by both parties)
+        self.send_contact_accept(&pending.node_addr, *invite_id)
             .await?;
 
-        // Derive shared keys
-        let contact_topic = Self::derive_contact_topic(self.did.as_ref(), &pending.peer_did);
-        let contact_key = Self::derive_contact_key(self.did.as_ref(), &pending.peer_did);
-
-        // Send ContactAccepted with shared keys
-        self.send_contact_accepted(&pending.node_addr, *invite_id, contact_topic, contact_key)
-            .await?;
-
-        // Finalize the contact (subscribe to topic, save to database)
+        // Finalize the contact (derive keys locally, subscribe to topic, save to database)
         self.finalize_contact(&pending).await?;
 
         Ok(())
@@ -534,7 +523,7 @@ impl ContactManager {
 
     /// Decline an incoming contact request
     ///
-    /// Sends a decline message and deletes the pending contact.
+    /// Sends a ContactDecline message and deletes the pending contact.
     ///
     /// # Arguments
     ///
@@ -563,14 +552,14 @@ impl ContactManager {
             "Declined contact request"
         );
 
-        // Send ContactResponse (accepted: false) via QUIC
+        // Send ContactDecline via QUIC
         if let Err(e) = self
-            .send_contact_response(&pending.node_addr, *invite_id, false)
+            .send_contact_decline(&pending.node_addr, *invite_id)
             .await
         {
             warn!(
                 error = ?e,
-                "Failed to send decline response, but pending was already deleted"
+                "Failed to send decline message, but pending was already deleted"
             );
         }
 
@@ -646,8 +635,31 @@ impl ContactManager {
             is_favorite: false,
         };
 
-        // Save to contacts table
+        // Save to contacts table (legacy)
         self.storage.save_contact(&contact)?;
+
+        // Also save as unified Peer (new system)
+        let unified_peer = Peer {
+            endpoint_id: contact.peer_endpoint_id,
+            did: Some(contact.peer_did.clone()),
+            profile: Some(contact.profile.clone()),
+            nickname: None,
+            contact_info: Some(ContactDetails {
+                contact_topic,
+                contact_key,
+                accepted_at: contact.accepted_at,
+                is_favorite: false,
+            }),
+            source: PeerSource::FromContact,
+            shared_realms: Vec::new(),
+            node_addr: Some(contact.node_addr.clone()),
+            status: PeerStatus::Online,
+            last_seen: contact.last_seen,
+            connection_attempts: 0,
+            successful_connections: 1, // Just succeeded
+            last_attempt: contact.last_seen,
+        };
+        self.storage.save_peer(&unified_peer)?;
 
         // Delete pending
         self.storage.delete_pending(&pending.invite_id)?;
@@ -655,7 +667,7 @@ impl ContactManager {
         info!(
             peer_did = %contact.peer_did,
             contact_topic = ?contact_topic,
-            "Finalized contact and saved to database"
+            "Finalized contact and saved to database (unified peer system)"
         );
 
         // Subscribe to contact topic
@@ -1015,46 +1027,69 @@ impl ContactManager {
         .await
     }
 
-    /// Send a ContactResponse message via QUIC
-    async fn send_contact_response(
+    /// Send a ContactAccept message via QUIC (simplified protocol)
+    ///
+    /// This replaces the old ContactResponse + ContactAccepted flow with a single message.
+    /// Keys are derived locally by both parties, not transmitted.
+    async fn send_contact_accept(
         &self,
         node_addr: &NodeAddrBytes,
         invite_id: [u8; 16],
-        accepted: bool,
     ) -> SyncResult<()> {
         // Convert NodeAddrBytes to EndpointAddr
         let endpoint_addr = node_addr.to_endpoint_addr()?;
 
         // Prepare message (done once, outside retry loop)
-        let inviter_profile = if accepted {
-            // TODO: Load our full profile from storage
-            Some(ProfileSnapshot {
-                display_name: "Anonymous User".to_string(),
-                subtitle: None,
-                avatar_blob_id: None,
-                bio: String::new(),
-            })
-        } else {
-            None
+        let accepter_did = self.did.to_string();
+        let accepter_pubkey = self.keypair.public_key().to_bytes();
+
+        // TODO: Load our full profile from storage
+        let accepter_profile = ProfileSnapshot {
+            display_name: "Anonymous User".to_string(),
+            subtitle: None,
+            avatar_blob_id: None,
+            bio: String::new(),
         };
 
-        let message = ContactMessage::ContactResponse {
+        // Serialize our node address
+        let our_node_addr = NodeAddrBytes::from_endpoint_addr(&self.gossip_sync.endpoint_addr());
+        let accepter_node_addr = postcard::to_allocvec(&our_node_addr)
+            .map_err(|e| SyncError::Serialization(format!("Failed to serialize node address: {}", e)))?;
+
+        // Build data to sign: invite_id + did + pubkey + profile + node_addr
+        let mut data_to_sign = Vec::new();
+        data_to_sign.extend_from_slice(&invite_id);
+        data_to_sign.extend_from_slice(accepter_did.as_bytes());
+        data_to_sign.extend_from_slice(&accepter_pubkey);
+
+        let profile_bytes = postcard::to_allocvec(&accepter_profile)
+            .map_err(|e| SyncError::Serialization(format!("Failed to serialize profile: {}", e)))?;
+        data_to_sign.extend_from_slice(&profile_bytes);
+        data_to_sign.extend_from_slice(&accepter_node_addr);
+
+        // Sign with our hybrid keypair
+        let sig = self.keypair.sign(&data_to_sign);
+        let signature = sig.to_bytes();
+
+        let message = ContactMessage::ContactAccept {
             invite_id,
-            accepted,
-            inviter_profile,
+            accepter_did,
+            accepter_pubkey,
+            accepter_profile,
+            accepter_node_addr,
+            signature,
         };
 
         let bytes = message
             .encode()
-            .map_err(|e| SyncError::Serialization(format!("Failed to encode ContactResponse: {}", e)))?;
+            .map_err(|e| SyncError::Serialization(format!("Failed to encode ContactAccept: {}", e)))?;
 
         // Retry network operations (connect + send)
-        self.retry_with_backoff("send_contact_response", || async {
+        self.retry_with_backoff("send_contact_accept", || async {
             debug!(
                 peer = %endpoint_addr.id,
                 invite_id = ?invite_id,
-                accepted,
-                "Connecting to requester to send ContactResponse"
+                "Connecting to requester to send ContactAccept"
             );
 
             // Connect to the peer
@@ -1074,7 +1109,7 @@ impl ContactManager {
             // Send message
             send.write_all(&bytes)
                 .await
-                .map_err(|e| SyncError::Network(format!("Failed to send ContactResponse: {}", e)))?;
+                .map_err(|e| SyncError::Network(format!("Failed to send ContactAccept: {}", e)))?;
 
             send.finish()
                 .map_err(|e| SyncError::Network(format!("Failed to finish send stream: {}", e)))?;
@@ -1082,8 +1117,7 @@ impl ContactManager {
             info!(
                 peer = %endpoint_addr.id,
                 invite_id = ?invite_id,
-                accepted,
-                "Sent ContactResponse"
+                "Sent ContactAccept (simplified protocol)"
             );
 
             // Keep connection alive to allow peer to process the message
@@ -1094,52 +1128,27 @@ impl ContactManager {
         .await
     }
 
-    /// Send a ContactAccepted message via QUIC
-    async fn send_contact_accepted(
+    /// Send a ContactDecline message via QUIC
+    async fn send_contact_decline(
         &self,
         node_addr: &NodeAddrBytes,
         invite_id: [u8; 16],
-        contact_topic: [u8; 32],
-        contact_key: [u8; 32],
     ) -> SyncResult<()> {
         // Convert NodeAddrBytes to EndpointAddr
         let endpoint_addr = node_addr.to_endpoint_addr()?;
 
-        // Prepare message (done once, outside retry loop)
-        let sender_did = self.did.to_string();
-        let sender_pubkey = self.keypair.public_key().to_bytes();
-
-        // Build data to sign: invite_id + sender_did + sender_pubkey + contact_topic + contact_key
-        let mut data_to_sign = Vec::new();
-        data_to_sign.extend_from_slice(&invite_id);
-        data_to_sign.extend_from_slice(sender_did.as_bytes());
-        data_to_sign.extend_from_slice(&sender_pubkey);
-        data_to_sign.extend_from_slice(&contact_topic);
-        data_to_sign.extend_from_slice(&contact_key);
-
-        // Sign with our hybrid keypair
-        let sig = self.keypair.sign(&data_to_sign);
-        let signature = sig.to_bytes();
-
-        let message = ContactMessage::ContactAccepted {
-            invite_id,
-            sender_did,
-            sender_pubkey,
-            contact_topic,
-            contact_key,
-            signature,
-        };
+        let message = ContactMessage::ContactDecline { invite_id };
 
         let bytes = message
             .encode()
-            .map_err(|e| SyncError::Serialization(format!("Failed to encode ContactAccepted: {}", e)))?;
+            .map_err(|e| SyncError::Serialization(format!("Failed to encode ContactDecline: {}", e)))?;
 
         // Retry network operations (connect + send)
-        self.retry_with_backoff("send_contact_accepted", || async {
+        self.retry_with_backoff("send_contact_decline", || async {
             debug!(
                 peer = %endpoint_addr.id,
                 invite_id = ?invite_id,
-                "Connecting to peer to send ContactAccepted"
+                "Connecting to requester to send ContactDecline"
             );
 
             // Connect to the peer
@@ -1148,7 +1157,7 @@ impl ContactManager {
                 .endpoint()
                 .connect(endpoint_addr.clone(), CONTACT_ALPN)
                 .await
-                .map_err(|e| SyncError::Network(format!("Failed to connect to peer: {}", e)))?;
+                .map_err(|e| SyncError::Network(format!("Failed to connect to requester: {}", e)))?;
 
             // Open a bi-directional stream
             let (mut send, _recv) = connection
@@ -1159,7 +1168,7 @@ impl ContactManager {
             // Send message
             send.write_all(&bytes)
                 .await
-                .map_err(|e| SyncError::Network(format!("Failed to send ContactAccepted: {}", e)))?;
+                .map_err(|e| SyncError::Network(format!("Failed to send ContactDecline: {}", e)))?;
 
             send.finish()
                 .map_err(|e| SyncError::Network(format!("Failed to finish send stream: {}", e)))?;
@@ -1167,7 +1176,7 @@ impl ContactManager {
             info!(
                 peer = %endpoint_addr.id,
                 invite_id = ?invite_id,
-                "Sent ContactAccepted"
+                "Sent ContactDecline"
             );
 
             // Keep connection alive to allow peer to process the message

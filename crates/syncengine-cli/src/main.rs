@@ -111,6 +111,12 @@ enum Commands {
         cmd: ContactCommands,
     },
 
+    /// Profile management
+    Profile {
+        #[command(subcommand)]
+        action: ProfileAction,
+    },
+
     /// Start serving/syncing as a persistent P2P node
     Serve {
         /// Realm to sync (optional, can join/create realms via other commands)
@@ -249,6 +255,64 @@ enum ContactCommands {
 
     /// List pending contact requests
     Pending,
+}
+
+#[derive(Subcommand)]
+enum ProfileAction {
+    /// Show your profile
+    Show,
+
+    /// Set profile fields
+    Set {
+        /// Display name
+        #[arg(short, long)]
+        name: Option<String>,
+
+        /// Subtitle/tagline
+        #[arg(short, long)]
+        tagline: Option<String>,
+
+        /// Bio (markdown)
+        #[arg(short, long)]
+        bio: Option<String>,
+
+        /// Avatar image file path
+        #[arg(short, long)]
+        avatar: Option<PathBuf>,
+    },
+
+    /// Get a peer's profile by DID
+    Get {
+        /// DID of the peer
+        did: String,
+    },
+
+    /// Profile pinning commands
+    Pins {
+        #[command(subcommand)]
+        action: ProfilePinAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum ProfilePinAction {
+    /// List all pinned profiles
+    List,
+
+    /// Manually pin a profile by DID
+    Pin {
+        /// DID of the profile to pin
+        did: String,
+    },
+
+    /// Unpin a profile
+    Unpin {
+        /// DID of the profile to unpin
+        did: String,
+    },
+
+    /// Sign and broadcast our own profile
+    Announce,
 }
 
 fn setup_logging(verbosity: u8) {
@@ -694,8 +758,8 @@ async fn main() -> Result<()> {
                             if let Some(subtitle) = &pending.profile.subtitle {
                                 println!("    {} ", subtitle);
                             }
-                            if !pending.profile.bio_excerpt.is_empty() {
-                                println!("    \"{}\"", pending.profile.bio_excerpt);
+                            if !pending.profile.bio.is_empty() {
+                                println!("    \"{}\"", pending.profile.bio);
                             }
                             println!();
                         }
@@ -716,6 +780,168 @@ async fn main() -> Result<()> {
                     }
                 }
             }
+        },
+
+        Commands::Profile { action } => match action {
+            ProfileAction::Show => {
+                engine.init_identity()?;
+                let profile = engine.get_own_profile()?;
+
+                println!("Your Profile:");
+                println!("  Peer ID: {}", profile.peer_id);
+                println!("  Display Name: {}", profile.display_name);
+                if let Some(subtitle) = &profile.subtitle {
+                    println!("  Tagline: {}", subtitle);
+                }
+                if let Some(avatar) = &profile.avatar_blob_id {
+                    println!("  Avatar: {}", avatar);
+                }
+                println!("  Bio: {}", if profile.bio.is_empty() { "(empty)" } else { &profile.bio });
+                println!("  Updated: {}", profile.updated_at);
+
+                // Show if we have a signed/pinned version
+                if let Some(pin) = engine.get_own_pinned_profile()? {
+                    println!();
+                    println!("  ✓ Profile is signed and pinned");
+                    println!("  DID: {}", pin.did);
+                }
+            }
+
+            ProfileAction::Set {
+                name,
+                tagline,
+                bio,
+                avatar,
+            } => {
+                engine.init_identity()?;
+                let mut profile = engine.get_own_profile()?;
+
+                let mut changed = false;
+
+                if let Some(n) = name {
+                    profile.display_name = n;
+                    changed = true;
+                }
+                if let Some(t) = tagline {
+                    profile.subtitle = Some(t);
+                    changed = true;
+                }
+                if let Some(b) = bio {
+                    profile.bio = b;
+                    changed = true;
+                }
+                if let Some(avatar_path) = avatar {
+                    // Read and upload avatar
+                    let avatar_data = std::fs::read(&avatar_path)
+                        .map_err(|e| anyhow::anyhow!("Failed to read avatar file: {}", e))?;
+
+                    let blob_id = engine.upload_avatar(avatar_data).await
+                        .map_err(|e| anyhow::anyhow!("Failed to upload avatar: {}", e))?;
+
+                    profile.avatar_blob_id = Some(blob_id.clone());
+                    changed = true;
+                    println!("Avatar uploaded: {}", blob_id);
+                }
+
+                if changed {
+                    profile.updated_at = chrono::Utc::now().timestamp();
+                    engine.save_profile(&profile)?;
+                    println!("Profile updated!");
+
+                    // Also sign and pin the updated profile
+                    engine.sign_and_pin_own_profile()?;
+                    println!("Profile signed and pinned.");
+                } else {
+                    println!("No changes made.");
+                }
+            }
+
+            ProfileAction::Get { did } => {
+                match engine.get_pinned_profile(&did)? {
+                    Some(pin) => {
+                        let p = &pin.signed_profile.profile;
+                        println!("Profile for {}:", did);
+                        println!("  Display Name: {}", p.display_name);
+                        if let Some(subtitle) = &p.subtitle {
+                            println!("  Tagline: {}", subtitle);
+                        }
+                        if let Some(avatar) = &p.avatar_blob_id {
+                            println!("  Avatar: {}", avatar);
+                        }
+                        println!("  Bio: {}", if p.bio.is_empty() { "(empty)" } else { &p.bio });
+                        println!();
+                        println!("  Relationship: {:?}", pin.relationship);
+                        println!("  Pinned At: {}", pin.pinned_at);
+                        println!("  ✓ Signature Valid: {}", pin.signed_profile.verify());
+                    }
+                    None => {
+                        println!("No pinned profile found for DID: {}", did);
+                        println!("(Profiles are pinned automatically from contacts)");
+                    }
+                }
+            }
+
+            ProfileAction::Pins { action } => match action {
+                ProfilePinAction::List => {
+                    let pins = engine.list_pinned_profiles()?;
+
+                    if pins.is_empty() {
+                        println!("No pinned profiles.");
+                    } else {
+                        println!("Pinned Profiles ({}):", pins.len());
+                        println!();
+                        for pin in pins {
+                            let is_own = if pin.is_own() { " (own)" } else { "" };
+                            println!(
+                                "  {} - {}{}",
+                                &pin.did[..20.min(pin.did.len())],
+                                pin.signed_profile.profile.display_name,
+                                is_own
+                            );
+                            println!("    Relationship: {:?}", pin.relationship);
+                            println!("    Pinned: {} (Unix timestamp)", pin.pinned_at);
+                            if let Some(hash) = &pin.avatar_hash {
+                                println!("    Avatar Hash: {}", hex::encode(&hash[..8]));
+                            }
+                            println!();
+                        }
+                    }
+                }
+
+                ProfilePinAction::Pin { did } => {
+                    // Manual pinning requires we already have a signed profile
+                    // This would typically come from receiving an announcement
+                    // For manual pinning, we'd need to request the profile from the network
+                    println!("Manual pinning by DID not yet implemented.");
+                    println!("Profiles are automatically pinned when:");
+                    println!("  - A contact is accepted");
+                    println!("  - A contact announces their profile");
+                    println!();
+                    println!("DID provided: {}", did);
+                }
+
+                ProfilePinAction::Unpin { did } => {
+                    match engine.unpin_profile(&did) {
+                        Ok(()) => {
+                            println!("Unpinned profile: {}", did);
+                        }
+                        Err(e) => {
+                            println!("Failed to unpin: {}", e);
+                        }
+                    }
+                }
+
+                ProfilePinAction::Announce => {
+                    engine.init_identity()?;
+                    let signed = engine.sign_and_pin_own_profile()?;
+                    println!("Profile signed and ready to announce:");
+                    println!("  DID: {}", signed.did());
+                    println!("  Name: {}", signed.profile.display_name);
+                    println!();
+                    println!("Note: Profile will be broadcast when connected to the network.");
+                    println!("Use 'syncengine serve' to start the P2P network.");
+                }
+            },
         },
 
         Commands::Serve { realm } => {

@@ -43,7 +43,7 @@ pub fn AsyncImage(
             let guard = shared.read().await;
 
             if let Some(ref eng) = *guard {
-                match eng.load_image(&blob_id) {
+                match eng.load_image(&blob_id).await {
                     Ok(Some(data)) => {
                         // Convert to base64 data URI
                         use base64::Engine;

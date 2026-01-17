@@ -333,6 +333,16 @@ pub fn Field() -> Element {
                         "Join Realm"
                     }
 
+                    // Network navigation button
+                    Link {
+                        to: Route::Network {},
+                        button {
+                            class: "profile-nav-button",
+                            title: "Network - View connected souls",
+                            "🌐"
+                        }
+                    }
+
                     // Profile navigation button
                     Link {
                         to: Route::Profile {},

@@ -18,12 +18,24 @@ use std::sync::Arc;
 // Submodules
 mod blobs;
 mod contacts;
+mod peers;
+mod pinned_profiles;
+mod profile_pinners;
 mod profiles;
 
 // Re-export initialization helpers (used in Storage::new)
 use blobs::BLOBS_TABLE;
 use contacts::{CONTACTS_TABLE, PENDING_CONTACTS_TABLE, REVOKED_INVITES_TABLE};
+use peers::{MIGRATION_FLAGS_TABLE, PEER_DID_INDEX, UNIFIED_PEERS_TABLE};
+use pinned_profiles::PINNED_PROFILES_TABLE;
+use profile_pinners::PROFILE_PINNERS_TABLE;
 use profiles::PROFILES_TABLE;
+
+// Re-export pinning configuration
+pub use pinned_profiles::PinningConfig;
+
+// Re-export pinner info for network page
+pub use profile_pinners::PinnerInfo;
 
 // Table definitions
 const REALMS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("realms");
@@ -80,6 +92,12 @@ impl Storage {
             let _ = write_txn.open_table(CONTACTS_TABLE)?;
             let _ = write_txn.open_table(PENDING_CONTACTS_TABLE)?;
             let _ = write_txn.open_table(REVOKED_INVITES_TABLE)?;
+            let _ = write_txn.open_table(PINNED_PROFILES_TABLE)?;
+            let _ = write_txn.open_table(PROFILE_PINNERS_TABLE)?;
+            // Unified peers tables
+            let _ = write_txn.open_table(UNIFIED_PEERS_TABLE)?;
+            let _ = write_txn.open_table(PEER_DID_INDEX)?;
+            let _ = write_txn.open_table(MIGRATION_FLAGS_TABLE)?;
         }
         write_txn.commit()?;
 

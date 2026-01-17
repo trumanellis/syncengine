@@ -9,16 +9,20 @@ use crate::invite::NodeAddrBytes;
 // Submodules for rich card types
 pub mod contact;
 pub mod image;
+pub mod peer;
 pub mod profile;
 
 // Re-export card types for convenience
 pub use image::CardImage;
-pub use profile::UserProfile;
+pub use profile::{PinRelationship, ProfilePin, SignedProfile, UserProfile};
 
 // Re-export contact types for convenience
 pub use contact::{
     ContactInfo, ContactState, ContactStatus, PeerContactInvite, PendingContact, ProfileSnapshot,
 };
+
+// Re-export unified peer types
+pub use peer::{ContactDetails, Peer, PeerSource, PeerStatus};
 
 /// Unique identifier for a realm (gossip topic)
 ///

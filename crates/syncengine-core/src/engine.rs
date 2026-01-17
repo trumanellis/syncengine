@@ -34,6 +34,7 @@ use rand::RngCore;
 use tokio::sync::broadcast;
 use tracing::{debug, info, warn};
 
+use crate::blobs::BlobManager;
 use crate::error::SyncError;
 use crate::identity::{Did, HybridKeypair, HybridPublicKey};
 use crate::invite::{InviteTicket, NodeAddrBytes};
@@ -131,6 +132,8 @@ pub struct SyncEngine {
     gossip: Option<Arc<GossipSync>>,
     /// Contact manager for P2P contact exchange (lazy-initialized)
     contact_manager: Option<Arc<ContactManager>>,
+    /// Blob manager for content-addressed image storage (P2P capable)
+    blob_manager: BlobManager,
     /// Currently open realms with their in-memory state
     realms: HashMap<RealmId, RealmState>,
     /// Data directory path
@@ -173,6 +176,11 @@ impl SyncEngine {
         // Initialize peer registry using the same database connection
         let peer_registry = Arc::new(PeerRegistry::new(storage.db_handle())?);
 
+        // Initialize blob manager with persistent FsStore
+        let blob_path = data_dir.join("blobs");
+        let blob_manager = BlobManager::new_persistent(&blob_path).await?;
+        info!(?blob_path, "Blob manager initialized with persistent storage");
+
         let (event_tx, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
         let (contact_event_tx, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
 
@@ -183,6 +191,7 @@ impl SyncEngine {
             peer_registry,
             gossip: None,
             contact_manager: None,
+            blob_manager,
             realms: HashMap::new(),
             data_dir,
             identity: None,
@@ -1176,8 +1185,12 @@ impl SyncEngine {
             }
         };
 
-        // Pass storage and contact_event_tx so Router can register contact protocol handler
-        let contact_deps = Some((Arc::new(self.storage.clone()), self.contact_event_tx.clone()));
+        // Pass storage, event_tx, and local_did so Router can register contact protocol handler
+        // The local_did is required for the simplified protocol's local key derivation
+        let contact_deps = self.identity.as_ref().map(|keypair| {
+            let did = Did::from_public_key(&keypair.public_key());
+            (Arc::new(self.storage.clone()), self.contact_event_tx.clone(), did.to_string())
+        });
 
         // Pass profile handler deps if identity is available
         let profile_deps = self.identity.as_ref().map(|keypair| {
@@ -1185,9 +1198,26 @@ impl SyncEngine {
             (Arc::new(self.storage.clone()), Arc::new(keypair.clone()), did)
         });
 
-        let gossip = Arc::new(GossipSync::with_secret_key(Some(secret_key), contact_deps, profile_deps).await?);
+        // Pass blob manager for P2P image transfer capability
+        let gossip = Arc::new(GossipSync::with_secret_key(
+            Some(secret_key),
+            contact_deps,
+            profile_deps,
+            Some(&self.blob_manager),
+        ).await?);
         self.gossip = Some(gossip.clone());
         Ok(gossip)
+    }
+
+    /// Get a reference to the gossip instance if initialized
+    ///
+    /// Returns an error if gossip has not been initialized yet.
+    /// Use `ensure_gossip()` if you want to initialize it automatically.
+    fn ensure_gossip_ref(&self) -> Result<&GossipSync, SyncError> {
+        self.gossip
+            .as_ref()
+            .map(|g| g.as_ref())
+            .ok_or_else(|| SyncError::NotReady("Gossip networking not initialized".to_string()))
     }
 
     /// Ensure contact manager is initialized
@@ -2667,6 +2697,560 @@ impl SyncEngine {
     }
 
     // ═══════════════════════════════════════════════════════════════════════
+    // Profile Pinning Operations
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Create and store a signed version of our own profile.
+    ///
+    /// This should be called whenever the profile is updated. The signed profile
+    /// is stored as a pin with relationship `Own` and can be announced to peers.
+    ///
+    /// # Returns
+    ///
+    /// The signed profile that was created and stored.
+    pub fn sign_and_pin_own_profile(&mut self) -> Result<crate::types::SignedProfile, SyncError> {
+        let profile = self.get_own_profile()?;
+
+        // Ensure identity is initialized
+        self.init_identity()?;
+        let keypair = self.identity.as_ref().ok_or_else(|| {
+            SyncError::Identity("Identity not initialized".to_string())
+        })?;
+
+        // Create signed profile
+        let signed = crate::types::SignedProfile::sign(&profile, keypair);
+        let did = signed.did().to_string();
+
+        // Create pin with Own relationship
+        let pin = crate::types::ProfilePin::new(
+            did.clone(),
+            signed.clone(),
+            crate::types::PinRelationship::Own,
+        );
+
+        // Save to storage (Own pins are never evicted)
+        self.storage.save_pinned_profile(&pin)?;
+
+        debug!(did = %did, "Signed and pinned own profile");
+        Ok(signed)
+    }
+
+    /// Get our own pinned profile (if exists).
+    pub fn get_own_pinned_profile(&self) -> Result<Option<crate::types::ProfilePin>, SyncError> {
+        self.storage.get_own_pinned_profile()
+    }
+
+    /// Pin a signed profile from another peer.
+    ///
+    /// This stores the profile for redundancy, allowing us to serve it
+    /// to other peers who request it.
+    ///
+    /// # Arguments
+    ///
+    /// * `signed_profile` - The cryptographically signed profile to pin
+    /// * `relationship` - Why we're pinning this profile
+    ///
+    /// # Returns
+    ///
+    /// A list of DIDs that were evicted (if storage limits were reached).
+    pub fn pin_profile(
+        &self,
+        signed_profile: crate::types::SignedProfile,
+        relationship: crate::types::PinRelationship,
+    ) -> Result<Vec<String>, SyncError> {
+        // Verify signature first
+        if !signed_profile.verify() {
+            return Err(SyncError::SignatureInvalid(
+                "Profile signature verification failed".to_string(),
+            ));
+        }
+
+        let did = signed_profile.did().to_string();
+        let pin = crate::types::ProfilePin::new(did.clone(), signed_profile, relationship);
+
+        // Use default pinning config
+        let config = crate::storage::PinningConfig::default();
+        let evicted = self.storage.save_pinned_profile_with_limits(&pin, &config)?;
+
+        debug!(did = %did, evicted = evicted.len(), "Pinned profile");
+        Ok(evicted)
+    }
+
+    /// Get a pinned profile by DID.
+    pub fn get_pinned_profile(&self, did: &str) -> Result<Option<crate::types::ProfilePin>, SyncError> {
+        self.storage.load_pinned_profile(did)
+    }
+
+    /// Unpin a profile by DID.
+    ///
+    /// Note: Own profile cannot be unpinned.
+    pub fn unpin_profile(&self, did: &str) -> Result<(), SyncError> {
+        // Check if this is our own profile
+        if let Some(pin) = self.storage.load_pinned_profile(did)? {
+            if pin.is_own() {
+                return Err(SyncError::InvalidOperation(
+                    "Cannot unpin own profile".to_string(),
+                ));
+            }
+        }
+
+        self.storage.delete_pinned_profile(did)
+    }
+
+    /// List all pinned profiles.
+    pub fn list_pinned_profiles(&self) -> Result<Vec<crate::types::ProfilePin>, SyncError> {
+        self.storage.list_pinned_profiles()
+    }
+
+    /// List pinned profiles by relationship type.
+    pub fn list_pinned_profiles_by_relationship(
+        &self,
+        relationship: &crate::types::PinRelationship,
+    ) -> Result<Vec<crate::types::ProfilePin>, SyncError> {
+        self.storage.list_pinned_profiles_by_relationship(relationship)
+    }
+
+    /// Update an existing pin with a new signed profile.
+    ///
+    /// This is used when receiving profile announcements for peers we already have pinned.
+    pub fn update_pinned_profile(
+        &self,
+        did: &str,
+        signed_profile: crate::types::SignedProfile,
+    ) -> Result<bool, SyncError> {
+        // Verify signature first
+        if !signed_profile.verify() {
+            return Err(SyncError::SignatureInvalid(
+                "Profile signature verification failed".to_string(),
+            ));
+        }
+
+        // Check if we have an existing pin
+        if let Some(mut pin) = self.storage.load_pinned_profile(did)? {
+            // Update the profile
+            if pin.update_profile(signed_profile) {
+                self.storage.save_pinned_profile(&pin)?;
+                debug!(did = %did, "Updated pinned profile");
+                Ok(true)
+            } else {
+                // update_profile returns false if signature is invalid
+                // (but we already verified above, so this shouldn't happen)
+                Ok(false)
+            }
+        } else {
+            // No existing pin for this DID
+            Ok(false)
+        }
+    }
+
+    /// Get the count of pinned profiles (excluding own).
+    pub fn pinned_profile_count(&self) -> Result<usize, SyncError> {
+        self.storage.count_pinned_profiles()
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Network Page: Pinners (Who Pins Our Profile)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// List all peers who are pinning our profile ("Souls Carrying Your Light").
+    ///
+    /// Returns pinners sorted by pinned_at (newest first).
+    pub fn list_profile_pinners(&self) -> Result<Vec<crate::storage::PinnerInfo>, SyncError> {
+        self.storage.list_pinners()
+    }
+
+    /// Count the number of peers pinning our profile.
+    pub fn count_profile_pinners(&self) -> Result<usize, SyncError> {
+        self.storage.count_pinners()
+    }
+
+    /// Record that a peer has pinned our profile (from PinAcknowledgment).
+    ///
+    /// This is called when we receive a `PinAcknowledgment` gossip message.
+    pub fn record_pinner(
+        &self,
+        pinner_did: &str,
+        pinned_at: i64,
+        relationship: &str,
+    ) -> Result<(), SyncError> {
+        self.storage.upsert_pinner(pinner_did, pinned_at, relationship)
+    }
+
+    /// Remove a pinner record (from PinRemoval message).
+    ///
+    /// Called when we receive a `PinRemoval` gossip message.
+    pub fn remove_pinner(&self, pinner_did: &str) -> Result<(), SyncError> {
+        self.storage.delete_pinner(pinner_did)
+    }
+
+    /// Get network statistics for the Network page.
+    ///
+    /// Returns counts for peers, pinners, and pinned profiles.
+    pub fn network_stats(&self) -> NetworkStats {
+        let total_peers = self.peer_registry.count().unwrap_or(0);
+        let online_peers = self.peer_registry.count_by_status(PeerStatus::Online).unwrap_or(0);
+        let pinners_count = self.storage.count_pinners().unwrap_or(0);
+        let pinning_count = self.storage.count_pinned_profiles().unwrap_or(0);
+
+        NetworkStats {
+            total_peers,
+            online_peers,
+            pinners_count,
+            pinning_count,
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Auto-Pinning Operations
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Check if a DID should be automatically pinned.
+    ///
+    /// Returns `true` if the DID belongs to a contact or realm member.
+    pub fn should_auto_pin(&self, did: &str) -> bool {
+        // Check if this DID is an accepted contact
+        if let Ok(contacts) = self.storage.list_contacts() {
+            for contact in contacts {
+                if contact.peer_did == did {
+                    return true;
+                }
+            }
+        }
+
+        // Check if this DID is a member of any realm we're in
+        // For now, we auto-pin any contact; realm member pinning can be
+        // added when realm membership tracking is implemented
+        false
+    }
+
+    /// Determine the relationship for auto-pinning a DID.
+    ///
+    /// Returns the appropriate `PinRelationship` based on our relationship with the DID.
+    pub fn determine_pin_relationship(&self, did: &str) -> Option<crate::types::PinRelationship> {
+        // Check if this DID is a contact
+        if let Ok(contacts) = self.storage.list_contacts() {
+            for contact in contacts {
+                if contact.peer_did == did {
+                    return Some(crate::types::PinRelationship::Contact);
+                }
+            }
+        }
+
+        // TODO: Check if this DID is a realm member
+        // For now, return None if not a contact
+        None
+    }
+
+    /// Process a profile gossip announcement for potential auto-pinning.
+    ///
+    /// If the announcement is from a contact or realm member, their profile
+    /// will be automatically pinned or updated.
+    ///
+    /// # Arguments
+    ///
+    /// * `message` - The profile gossip message to process
+    ///
+    /// # Returns
+    ///
+    /// The action taken (UpdatePin, Ignore, etc.) for logging/testing purposes.
+    pub fn process_profile_announcement(
+        &self,
+        message: &crate::sync::ProfileGossipMessage,
+    ) -> Result<crate::sync::ProfileAction, SyncError> {
+        use crate::sync::{ProfileAction, ProfileGossipMessage};
+
+        match message {
+            ProfileGossipMessage::Announce {
+                signed_profile,
+                avatar_ticket,
+            } => {
+                // Verify signature first
+                if !signed_profile.verify() {
+                    warn!("Received profile announcement with invalid signature");
+                    return Ok(ProfileAction::Ignore);
+                }
+
+                let signer_did = signed_profile.did().to_string();
+
+                // Check if we should auto-pin this DID
+                if let Some(relationship) = self.determine_pin_relationship(&signer_did) {
+                    // Check if we already have this profile pinned
+                    if let Some(existing) = self.storage.load_pinned_profile(&signer_did)? {
+                        // Update existing pin
+                        let mut updated = existing.clone();
+                        if updated.update_profile(signed_profile.clone()) {
+                            if let Some(ticket) = avatar_ticket {
+                                // Parse the ticket and extract the hash for avatar tracking
+                                if let Ok(blob_ticket) =
+                                    ticket.parse::<iroh_blobs::ticket::BlobTicket>()
+                                {
+                                    updated.avatar_hash = Some(*blob_ticket.hash().as_bytes());
+                                }
+                            }
+                            self.storage.save_pinned_profile(&updated)?;
+                            debug!(did = %signer_did, "Updated pinned profile from announcement");
+                        }
+                    } else {
+                        // Create new pin
+                        let mut pin = crate::types::ProfilePin::new(
+                            signer_did.clone(),
+                            signed_profile.clone(),
+                            relationship,
+                        );
+                        if let Some(ticket) = avatar_ticket {
+                            if let Ok(blob_ticket) =
+                                ticket.parse::<iroh_blobs::ticket::BlobTicket>()
+                            {
+                                pin.avatar_hash = Some(*blob_ticket.hash().as_bytes());
+                            }
+                        }
+                        let config = crate::storage::PinningConfig::default();
+                        self.storage.save_pinned_profile_with_limits(&pin, &config)?;
+                        debug!(did = %signer_did, "Auto-pinned profile from announcement");
+                    }
+
+                    Ok(ProfileAction::UpdatePin {
+                        signed_profile: signed_profile.clone(),
+                        avatar_ticket: avatar_ticket.clone(),
+                    })
+                } else {
+                    // Not a contact or realm member, ignore
+                    Ok(ProfileAction::Ignore)
+                }
+            }
+            _ => {
+                // Request and Response messages are not auto-pin triggers
+                Ok(ProfileAction::Ignore)
+            }
+        }
+    }
+
+    /// Auto-pin a contact's profile when they are accepted.
+    ///
+    /// This creates a placeholder pin for the contact that will be updated
+    /// when we receive their profile announcement.
+    ///
+    /// # Arguments
+    ///
+    /// * `contact` - The contact info from the acceptance event
+    ///
+    /// # Returns
+    ///
+    /// True if a new pin was created, false if already pinned.
+    pub fn auto_pin_contact(&self, contact: &crate::types::contact::ContactInfo) -> Result<bool, SyncError> {
+        let did = &contact.peer_did;
+
+        // Check if already pinned
+        if self.storage.load_pinned_profile(did)?.is_some() {
+            debug!(did = %did, "Contact already pinned");
+            return Ok(false);
+        }
+
+        // Note: We can't create a proper SignedProfile without the contact's keypair.
+        // The actual pinning will happen when we receive their profile announcement
+        // via process_profile_announcement(). For now, just log that we're interested.
+        debug!(
+            did = %did,
+            name = %contact.profile.display_name,
+            "Contact accepted, will auto-pin on profile announcement"
+        );
+
+        // Return true to indicate we registered interest
+        Ok(true)
+    }
+
+    /// Get all contact DIDs that we should auto-pin profiles for.
+    ///
+    /// This returns a list of DIDs from our accepted contacts.
+    pub fn get_auto_pin_interests(&self) -> Result<Vec<String>, SyncError> {
+        let contacts = self.storage.list_contacts()?;
+        Ok(contacts.into_iter().map(|c| c.peer_did).collect())
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Profile Sync Operations
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Announce our profile to the global profile topic.
+    ///
+    /// This broadcasts a signed profile announcement to all peers subscribed
+    /// to the global profile topic. Peers who are interested in our profile
+    /// (contacts, realm members) will auto-pin it.
+    ///
+    /// # Arguments
+    ///
+    /// * `avatar_ticket` - Optional blob ticket for avatar download
+    ///
+    /// # Returns
+    ///
+    /// Ok(()) if announcement was broadcast successfully.
+    ///
+    /// # Errors
+    ///
+    /// Returns error if gossip is not initialized or broadcast fails.
+    pub async fn announce_profile(&mut self, avatar_ticket: Option<String>) -> Result<(), SyncError> {
+        // Ensure we have a signed profile
+        let signed = self.sign_and_pin_own_profile()?;
+
+        // Ensure gossip is initialized
+        let gossip = self.ensure_gossip().await?;
+
+        // Get or create the profile topic subscription
+        let topic_id = crate::sync::global_profile_topic();
+        let (sender, _receiver) = gossip.subscribe_split(topic_id, vec![]).await?;
+
+        // Create and send announcement
+        let announcement = crate::sync::ProfileGossipMessage::announce(signed, avatar_ticket);
+        let bytes = announcement.to_bytes()?;
+
+        sender.broadcast(bytes).await.map_err(|e| {
+            SyncError::Network(format!("Failed to broadcast profile announcement: {}", e))
+        })?;
+
+        info!("Profile announcement broadcast to global topic");
+        Ok(())
+    }
+
+    /// Start listening for profile announcements on the global profile topic.
+    ///
+    /// This subscribes to the global profile topic and spawns a background task
+    /// to process incoming profile announcements. When a profile announcement
+    /// is received from a contact or realm member, their profile is auto-pinned.
+    ///
+    /// # Arguments
+    ///
+    /// * `bootstrap_peers` - Initial peers to connect to (can be empty)
+    ///
+    /// # Returns
+    ///
+    /// Ok(()) if subscription started successfully.
+    pub async fn start_profile_sync(
+        &mut self,
+        bootstrap_peers: Vec<iroh::PublicKey>,
+    ) -> Result<(), SyncError> {
+        // Ensure gossip is initialized
+        let gossip = self.ensure_gossip().await?;
+
+        let topic_id = crate::sync::global_profile_topic();
+        let (sender, mut receiver) = gossip.subscribe_split(topic_id, bootstrap_peers).await?;
+
+        // Clone dependencies for the background task
+        let storage = self.storage.clone();
+        let blob_manager = self.blob_manager.clone();
+        let endpoint = gossip.endpoint().clone();
+
+        // Spawn background task to process incoming profile messages
+        tokio::spawn(async move {
+            use crate::sync::TopicEvent;
+
+            info!("Profile sync listener started with P2P blob download support");
+
+            while let Some(event) = receiver.recv_event().await {
+                match event {
+                    TopicEvent::Message(msg) => {
+                        // Try to parse as profile gossip message
+                        match crate::sync::ProfileGossipMessage::from_bytes(&msg.content) {
+                            Ok(profile_msg) => {
+                                // Process the message for auto-pinning
+                                if let crate::sync::ProfileGossipMessage::Announce {
+                                    signed_profile,
+                                    avatar_ticket,
+                                } = &profile_msg
+                                {
+                                    // Verify signature
+                                    if !signed_profile.verify() {
+                                        warn!("Received profile announcement with invalid signature");
+                                        continue;
+                                    }
+
+                                    let signer_did = signed_profile.did().to_string();
+
+                                    // Check if we should auto-pin (is a contact)
+                                    if let Ok(contacts) = storage.list_contacts() {
+                                        let is_contact = contacts.iter().any(|c| c.peer_did == signer_did);
+
+                                        if is_contact {
+                                            // Parse avatar ticket and check if we need to download
+                                            let avatar_hash = if let Some(ticket_str) = avatar_ticket {
+                                                if let Ok(blob_ticket) = ticket_str.parse::<iroh_blobs::ticket::BlobTicket>() {
+                                                    let hash = blob_ticket.hash();
+
+                                                    // Check if we already have this avatar
+                                                    let has_blob = blob_manager.has_blob(&hash).await.unwrap_or(false);
+
+                                                    if !has_blob {
+                                                        // Download avatar via P2P
+                                                        match blob_manager.download_blob(&blob_ticket, &endpoint).await {
+                                                            Ok(downloaded_hash) => {
+                                                                info!(did = %signer_did, ?downloaded_hash, "Downloaded avatar via P2P");
+                                                            }
+                                                            Err(e) => {
+                                                                warn!(did = %signer_did, error = %e, "Failed to download avatar via P2P");
+                                                            }
+                                                        }
+                                                    }
+
+                                                    Some(*hash.as_bytes())
+                                                } else {
+                                                    None
+                                                }
+                                            } else {
+                                                None
+                                            };
+
+                                            // Check if already pinned
+                                            if let Ok(Some(mut existing)) = storage.load_pinned_profile(&signer_did) {
+                                                // Update existing pin
+                                                if existing.update_profile(signed_profile.clone()) {
+                                                    if let Some(hash) = avatar_hash {
+                                                        existing.avatar_hash = Some(hash);
+                                                    }
+                                                    let _ = storage.save_pinned_profile(&existing);
+                                                    debug!(did = %signer_did, "Updated pinned profile from gossip");
+                                                }
+                                            } else {
+                                                // Create new pin
+                                                let mut pin = crate::types::ProfilePin::new(
+                                                    signer_did.clone(),
+                                                    signed_profile.clone(),
+                                                    crate::types::PinRelationship::Contact,
+                                                );
+                                                if let Some(hash) = avatar_hash {
+                                                    pin.avatar_hash = Some(hash);
+                                                }
+                                                let config = crate::storage::PinningConfig::default();
+                                                let _ = storage.save_pinned_profile_with_limits(&pin, &config);
+                                                debug!(did = %signer_did, "Auto-pinned contact profile from gossip");
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                debug!("Failed to parse profile message: {}", e);
+                            }
+                        }
+                    }
+                    TopicEvent::NeighborUp(peer) => {
+                        debug!(?peer, "Profile topic neighbor joined");
+                    }
+                    TopicEvent::NeighborDown(peer) => {
+                        debug!(?peer, "Profile topic neighbor left");
+                    }
+                }
+            }
+
+            info!("Profile sync listener stopped");
+        });
+
+        // Also announce our own profile to bootstrap the network
+        let _ = sender; // sender is dropped here, but the task has its own receiver
+
+        info!("Profile sync started on global topic");
+        Ok(())
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
     // Contact Operations
     // ═══════════════════════════════════════════════════════════════════════
 
@@ -2852,6 +3436,63 @@ impl SyncEngine {
         Ok((incoming, outgoing))
     }
 
+    // ═══════════════════════════════════════════════════════════════════════
+    // Unified Peer Operations
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// List all unified peers
+    ///
+    /// Returns all known network participants, including both contacts
+    /// (mutually accepted peers with full identity) and discovered peers
+    /// (seen via realm gossip but not yet contacts).
+    pub fn list_peers(&self) -> Result<Vec<crate::types::peer::Peer>, SyncError> {
+        self.storage.list_peers()
+    }
+
+    /// Get a peer by endpoint ID
+    pub fn get_peer(&self, endpoint_id: &iroh::PublicKey) -> Result<Option<crate::types::peer::Peer>, SyncError> {
+        self.storage.load_peer(endpoint_id)
+    }
+
+    /// Get a peer by DID
+    ///
+    /// Uses the DID index for fast lookup.
+    pub fn get_peer_by_did(&self, did: &str) -> Result<Option<crate::types::peer::Peer>, SyncError> {
+        self.storage.load_peer_by_did(did)
+    }
+
+    /// List only contacts (peers with mutual acceptance)
+    ///
+    /// These are peers where `contact_info` is Some, meaning both parties
+    /// have accepted the contact exchange.
+    pub fn list_peer_contacts(&self) -> Result<Vec<crate::types::peer::Peer>, SyncError> {
+        self.storage.list_peer_contacts()
+    }
+
+    /// List only discovered peers (non-contacts)
+    ///
+    /// These are peers seen via realm gossip but not yet mutually accepted
+    /// as contacts.
+    pub fn list_discovered_peers(&self) -> Result<Vec<crate::types::peer::Peer>, SyncError> {
+        self.storage.list_discovered_peers()
+    }
+
+    /// Save a unified peer
+    ///
+    /// Updates or creates a peer record. Also updates the DID index
+    /// if the peer has a DID.
+    pub fn save_peer(&self, peer: &crate::types::peer::Peer) -> Result<(), SyncError> {
+        self.storage.save_peer(peer)
+    }
+
+    /// Run migration from old contact/peer tables to unified peers
+    ///
+    /// This is idempotent - safe to call multiple times.
+    /// Returns the number of peers migrated.
+    pub fn migrate_to_unified_peers(&self) -> Result<usize, SyncError> {
+        self.storage.migrate_to_unified_peers()
+    }
+
     /// Subscribe to contact events
     ///
     /// Returns a broadcast receiver for real-time contact event notifications.
@@ -2878,30 +3519,72 @@ impl SyncEngine {
     ///
     /// The image data is stored content-addressed using BLAKE3.
     /// Returns the hash hex string that can be used as image_blob_id.
-    pub fn upload_image(&self, data: Vec<u8>) -> Result<String, SyncError> {
-        self.storage.save_image_blob(data)
+    pub async fn upload_image(&self, data: Vec<u8>) -> Result<String, SyncError> {
+        let hash = self.blob_manager.import_image(data).await?;
+        Ok(BlobManager::hash_to_blob_id(&hash))
+    }
+
+    /// Upload an avatar image with size validation (256 KB limit)
+    ///
+    /// Returns the content hash as a hex string blob ID.
+    pub async fn upload_avatar(&self, data: Vec<u8>) -> Result<String, SyncError> {
+        let hash = self.blob_manager.import_avatar(data).await?;
+        Ok(BlobManager::hash_to_blob_id(&hash))
     }
 
     /// Load an image by its content hash
-    pub fn load_image(&self, hash_hex: &str) -> Result<Option<Vec<u8>>, SyncError> {
-        self.storage.load_image_blob(hash_hex)
+    pub async fn load_image(&self, hash_hex: &str) -> Result<Option<Vec<u8>>, SyncError> {
+        let hash = BlobManager::blob_id_to_hash(hash_hex)?;
+        let bytes = self.blob_manager.get_bytes(&hash).await?;
+        Ok(bytes.map(|b| b.to_vec()))
     }
 
     /// Check if an image blob exists
-    pub fn image_exists(&self, hash_hex: &str) -> Result<bool, SyncError> {
-        self.storage.blob_exists(hash_hex)
+    pub async fn image_exists(&self, hash_hex: &str) -> Result<bool, SyncError> {
+        let hash = BlobManager::blob_id_to_hash(hash_hex)?;
+        self.blob_manager.has_blob(&hash).await
     }
 
     /// Get the size of an image blob in bytes
-    pub fn image_size(&self, hash_hex: &str) -> Result<Option<usize>, SyncError> {
-        self.storage.blob_size(hash_hex)
+    pub async fn image_size(&self, hash_hex: &str) -> Result<Option<u64>, SyncError> {
+        let hash = BlobManager::blob_id_to_hash(hash_hex)?;
+        self.blob_manager.blob_size(&hash).await
     }
 
     /// Delete an image blob
     ///
-    /// Warning: This may affect multiple references if they share the same content.
-    pub fn delete_image(&self, hash_hex: &str) -> Result<(), SyncError> {
-        self.storage.delete_image_blob(hash_hex)
+    /// Note: iroh-blobs uses garbage collection based on tags.
+    /// Blobs without tags are eventually cleaned up.
+    pub async fn delete_image(&self, hash_hex: &str) -> Result<(), SyncError> {
+        let hash = BlobManager::blob_id_to_hash(hash_hex)?;
+        self.blob_manager.delete_blob(&hash).await
+    }
+
+    /// Get a reference to the blob manager
+    ///
+    /// This can be used for advanced blob operations like P2P downloads.
+    pub fn blob_manager(&self) -> &BlobManager {
+        &self.blob_manager
+    }
+
+    /// Create a blob ticket for sharing an image via P2P
+    ///
+    /// Returns the base58-encoded ticket string.
+    /// Requires gossip networking to be initialized.
+    pub async fn create_image_ticket(&self, hash_hex: &str) -> Result<String, SyncError> {
+        let hash = BlobManager::blob_id_to_hash(hash_hex)?;
+        let gossip = self.ensure_gossip_ref()?;
+        let ticket = self.blob_manager.create_ticket(hash, gossip.endpoint());
+        Ok(ticket.to_string())
+    }
+
+    /// Download an image from a peer using a ticket
+    ///
+    /// Returns the content hash as a hex string blob ID.
+    pub async fn download_image_from_ticket(&mut self, ticket_str: &str) -> Result<String, SyncError> {
+        let gossip = self.ensure_gossip().await?;
+        let hash = self.blob_manager.download_from_ticket_str(ticket_str, gossip.endpoint()).await?;
+        Ok(BlobManager::hash_to_blob_id(&hash))
     }
 
     /// Get this node's endpoint address
@@ -3010,6 +3693,21 @@ pub struct NodeInfo {
     pub relay_url: Option<String>,
     /// Decentralized identifier (when identity is initialized)
     pub did: Option<String>,
+}
+
+/// Network statistics for the Network page.
+///
+/// Provides summary counts for peers, pinners, and pins.
+#[derive(Debug, Clone, Default)]
+pub struct NetworkStats {
+    /// Total number of known peers
+    pub total_peers: usize,
+    /// Number of currently online peers
+    pub online_peers: usize,
+    /// Number of peers pinning our profile ("Souls Carrying Your Light")
+    pub pinners_count: usize,
+    /// Number of profiles we are pinning ("Souls You Carry")
+    pub pinning_count: usize,
 }
 
 #[cfg(test)]
@@ -5136,5 +5834,442 @@ mod tests {
         let realms = engine.list_realms().await.unwrap();
         assert_eq!(realms.len(), 1);
         assert_eq!(realms[0].name, "Private");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Profile Pinning Tests
+    // ═══════════════════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    async fn test_sign_and_pin_own_profile() {
+        let (mut engine, _temp) = create_test_engine().await;
+
+        // Initialize identity first (required for get_own_profile and signing)
+        engine.init_identity().unwrap();
+        let did = engine.did().unwrap().to_string();
+
+        // Set up a profile - use the DID as peer_id
+        let mut profile = crate::types::UserProfile::new(
+            did.clone(),
+            "Test User".to_string(),
+        );
+        profile.subtitle = Some("Test tagline".to_string());
+        engine.save_profile(&profile).unwrap();
+
+        // Sign and pin the profile
+        let signed = engine.sign_and_pin_own_profile().unwrap();
+
+        // Verify the signed profile
+        assert!(signed.verify());
+        assert_eq!(signed.profile.display_name, "Test User");
+
+        // Should be able to retrieve our own pinned profile
+        let retrieved = engine.get_own_pinned_profile().unwrap();
+        assert!(retrieved.is_some());
+        let pin = retrieved.unwrap();
+        assert!(pin.is_own());
+        assert_eq!(pin.signed_profile.profile.display_name, "Test User");
+    }
+
+    #[tokio::test]
+    async fn test_pin_peer_profile() {
+        let (engine, _temp) = create_test_engine().await;
+
+        // Create a signed profile from a "remote peer"
+        let keypair = crate::identity::HybridKeypair::generate();
+        let profile = crate::types::UserProfile::new(
+            "peer_remote".to_string(),
+            "Remote User".to_string(),
+        );
+        let signed = crate::types::SignedProfile::sign(&profile, &keypair);
+        let did = signed.did().to_string();
+
+        // Pin as a contact
+        let evicted = engine
+            .pin_profile(signed.clone(), crate::types::PinRelationship::Contact)
+            .unwrap();
+        assert!(evicted.is_empty());
+
+        // Should be retrievable
+        let retrieved = engine.get_pinned_profile(&did).unwrap();
+        assert!(retrieved.is_some());
+        let pin = retrieved.unwrap();
+        assert_eq!(pin.relationship, crate::types::PinRelationship::Contact);
+        assert_eq!(pin.signed_profile.profile.display_name, "Remote User");
+    }
+
+    #[tokio::test]
+    async fn test_pin_profile_rejects_invalid_signature() {
+        let (engine, _temp) = create_test_engine().await;
+
+        // Create a signed profile and tamper with it
+        let keypair = crate::identity::HybridKeypair::generate();
+        let profile = crate::types::UserProfile::new(
+            "peer_tampered".to_string(),
+            "Tampered User".to_string(),
+        );
+        let mut signed = crate::types::SignedProfile::sign(&profile, &keypair);
+
+        // Tamper with the profile
+        signed.profile.display_name = "HACKED".to_string();
+
+        // Should reject the invalid signature
+        let result = engine.pin_profile(signed, crate::types::PinRelationship::Manual);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), SyncError::SignatureInvalid(_)));
+    }
+
+    #[tokio::test]
+    async fn test_unpin_profile() {
+        let (engine, _temp) = create_test_engine().await;
+
+        // Pin a profile
+        let keypair = crate::identity::HybridKeypair::generate();
+        let profile = crate::types::UserProfile::new(
+            "peer_unpin".to_string(),
+            "Unpin User".to_string(),
+        );
+        let signed = crate::types::SignedProfile::sign(&profile, &keypair);
+        let did = signed.did().to_string();
+
+        engine
+            .pin_profile(signed, crate::types::PinRelationship::Manual)
+            .unwrap();
+
+        // Verify it's pinned
+        assert!(engine.get_pinned_profile(&did).unwrap().is_some());
+
+        // Unpin
+        engine.unpin_profile(&did).unwrap();
+
+        // Should no longer be pinned
+        assert!(engine.get_pinned_profile(&did).unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_cannot_unpin_own_profile() {
+        let (mut engine, _temp) = create_test_engine().await;
+
+        // Initialize identity
+        engine.init_identity().unwrap();
+        let did = engine.did().unwrap().to_string();
+
+        // Set up and pin our own profile
+        let profile = crate::types::UserProfile::new(
+            did.clone(),
+            "Own User".to_string(),
+        );
+        engine.save_profile(&profile).unwrap();
+        let signed = engine.sign_and_pin_own_profile().unwrap();
+        let signed_did = signed.did().to_string();
+
+        // Trying to unpin our own profile should fail
+        let result = engine.unpin_profile(&signed_did);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), SyncError::InvalidOperation(_)));
+
+        // Should still be pinned
+        assert!(engine.get_own_pinned_profile().unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn test_list_pinned_profiles_by_relationship() {
+        let (engine, _temp) = create_test_engine().await;
+
+        // Pin some profiles with different relationships
+        for (suffix, relationship) in [
+            ("contact1", crate::types::PinRelationship::Contact),
+            ("contact2", crate::types::PinRelationship::Contact),
+            ("manual1", crate::types::PinRelationship::Manual),
+        ] {
+            let keypair = crate::identity::HybridKeypair::generate();
+            let profile = crate::types::UserProfile::new(
+                format!("peer_{}", suffix),
+                format!("User {}", suffix),
+            );
+            let signed = crate::types::SignedProfile::sign(&profile, &keypair);
+            engine.pin_profile(signed, relationship).unwrap();
+        }
+
+        // List by contact relationship
+        let contacts = engine
+            .list_pinned_profiles_by_relationship(&crate::types::PinRelationship::Contact)
+            .unwrap();
+        assert_eq!(contacts.len(), 2);
+
+        // List by manual relationship
+        let manual = engine
+            .list_pinned_profiles_by_relationship(&crate::types::PinRelationship::Manual)
+            .unwrap();
+        assert_eq!(manual.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_update_pinned_profile() {
+        let (engine, _temp) = create_test_engine().await;
+
+        // Pin a profile
+        let keypair = crate::identity::HybridKeypair::generate();
+        let profile = crate::types::UserProfile::new(
+            "peer_update".to_string(),
+            "Original Name".to_string(),
+        );
+        let signed = crate::types::SignedProfile::sign(&profile, &keypair);
+        let did = signed.did().to_string();
+
+        engine
+            .pin_profile(signed, crate::types::PinRelationship::Contact)
+            .unwrap();
+
+        // Create an updated profile (same keypair, different data)
+        let updated_profile = crate::types::UserProfile::new(
+            "peer_update".to_string(),
+            "Updated Name".to_string(),
+        );
+        let updated_signed = crate::types::SignedProfile::sign(&updated_profile, &keypair);
+
+        // Update the pin
+        let updated = engine.update_pinned_profile(&did, updated_signed).unwrap();
+        assert!(updated);
+
+        // Verify the update
+        let retrieved = engine.get_pinned_profile(&did).unwrap().unwrap();
+        assert_eq!(retrieved.signed_profile.profile.display_name, "Updated Name");
+        // Relationship should be preserved
+        assert_eq!(retrieved.relationship, crate::types::PinRelationship::Contact);
+    }
+
+    #[tokio::test]
+    async fn test_pinned_profile_count() {
+        let (mut engine, _temp) = create_test_engine().await;
+
+        // Initially should be 0 (own profile doesn't count)
+        assert_eq!(engine.pinned_profile_count().unwrap(), 0);
+
+        // Initialize identity and add our own profile (shouldn't count)
+        engine.init_identity().unwrap();
+        let did = engine.did().unwrap().to_string();
+        let profile = crate::types::UserProfile::new(did.clone(), "Self".to_string());
+        engine.save_profile(&profile).unwrap();
+        engine.sign_and_pin_own_profile().unwrap();
+
+        // Still 0 (own profile excluded)
+        assert_eq!(engine.pinned_profile_count().unwrap(), 0);
+
+        // Add peer profiles
+        for i in 0..3 {
+            let keypair = crate::identity::HybridKeypair::generate();
+            let profile = crate::types::UserProfile::new(
+                format!("peer_{}", i),
+                format!("User {}", i),
+            );
+            let signed = crate::types::SignedProfile::sign(&profile, &keypair);
+            engine
+                .pin_profile(signed, crate::types::PinRelationship::Manual)
+                .unwrap();
+        }
+
+        // Should now be 3
+        assert_eq!(engine.pinned_profile_count().unwrap(), 3);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Auto-Pinning Tests
+    // ═══════════════════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    async fn test_process_profile_announcement_for_contact() {
+        let (engine, _temp) = create_test_engine().await;
+
+        // Create a "contact's" keypair and signed profile
+        let contact_keypair = crate::identity::HybridKeypair::generate();
+        let contact_profile = crate::types::UserProfile::new(
+            "peer_contact".to_string(),
+            "Contact User".to_string(),
+        );
+        let signed = crate::types::SignedProfile::sign(&contact_profile, &contact_keypair);
+        let contact_did = signed.did().to_string();
+
+        // Create a fake ContactInfo and save it to storage to simulate an accepted contact
+        let contact_info = crate::types::contact::ContactInfo {
+            peer_did: contact_did.clone(),
+            peer_endpoint_id: [0u8; 32],
+            profile: crate::types::contact::ProfileSnapshot {
+                display_name: "Contact User".to_string(),
+                subtitle: None,
+                avatar_blob_id: None,
+                bio: String::new(),
+            },
+            node_addr: crate::invite::NodeAddrBytes {
+                node_id: [0u8; 32],
+                relay_url: None,
+                direct_addresses: vec![],
+            },
+            contact_topic: [0u8; 32],
+            contact_key: [0u8; 32],
+            accepted_at: chrono::Utc::now().timestamp(),
+            last_seen: 0,
+            status: crate::types::contact::ContactStatus::Offline,
+            is_favorite: false,
+        };
+        engine.storage.save_contact(&contact_info).unwrap();
+
+        // Verify we should auto-pin this contact
+        assert!(engine.should_auto_pin(&contact_did));
+        assert_eq!(
+            engine.determine_pin_relationship(&contact_did),
+            Some(crate::types::PinRelationship::Contact)
+        );
+
+        // Process a profile announcement
+        let announcement = crate::sync::ProfileGossipMessage::announce(signed.clone(), None);
+        let action = engine.process_profile_announcement(&announcement).unwrap();
+
+        // Should have auto-pinned
+        match action {
+            crate::sync::ProfileAction::UpdatePin { signed_profile, .. } => {
+                assert_eq!(signed_profile.profile.display_name, "Contact User");
+            }
+            _ => panic!("Expected UpdatePin action"),
+        }
+
+        // Verify the pin was created
+        let pin = engine.get_pinned_profile(&contact_did).unwrap();
+        assert!(pin.is_some());
+        let pin = pin.unwrap();
+        assert_eq!(pin.relationship, crate::types::PinRelationship::Contact);
+    }
+
+    #[tokio::test]
+    async fn test_process_profile_announcement_ignores_unknown_peer() {
+        let (engine, _temp) = create_test_engine().await;
+
+        // Create an unknown peer's profile
+        let unknown_keypair = crate::identity::HybridKeypair::generate();
+        let unknown_profile = crate::types::UserProfile::new(
+            "peer_unknown".to_string(),
+            "Unknown User".to_string(),
+        );
+        let signed = crate::types::SignedProfile::sign(&unknown_profile, &unknown_keypair);
+        let unknown_did = signed.did().to_string();
+
+        // Verify we should NOT auto-pin this peer
+        assert!(!engine.should_auto_pin(&unknown_did));
+        assert_eq!(engine.determine_pin_relationship(&unknown_did), None);
+
+        // Process a profile announcement
+        let announcement = crate::sync::ProfileGossipMessage::announce(signed, None);
+        let action = engine.process_profile_announcement(&announcement).unwrap();
+
+        // Should have been ignored
+        assert!(matches!(action, crate::sync::ProfileAction::Ignore));
+
+        // Verify no pin was created
+        assert!(engine.get_pinned_profile(&unknown_did).unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_process_profile_announcement_updates_existing_pin() {
+        let (engine, _temp) = create_test_engine().await;
+
+        // Create a contact's keypair
+        let contact_keypair = crate::identity::HybridKeypair::generate();
+        let contact_did = crate::identity::Did::from_public_key(
+            &contact_keypair.public_key()
+        ).to_string();
+
+        // Save as a contact
+        let contact_info = crate::types::contact::ContactInfo {
+            peer_did: contact_did.clone(),
+            peer_endpoint_id: [0u8; 32],
+            profile: crate::types::contact::ProfileSnapshot {
+                display_name: "Original Name".to_string(),
+                subtitle: None,
+                avatar_blob_id: None,
+                bio: String::new(),
+            },
+            node_addr: crate::invite::NodeAddrBytes {
+                node_id: [0u8; 32],
+                relay_url: None,
+                direct_addresses: vec![],
+            },
+            contact_topic: [0u8; 32],
+            contact_key: [0u8; 32],
+            accepted_at: chrono::Utc::now().timestamp(),
+            last_seen: 0,
+            status: crate::types::contact::ContactStatus::Offline,
+            is_favorite: false,
+        };
+        engine.storage.save_contact(&contact_info).unwrap();
+
+        // Create and process initial announcement
+        let initial_profile = crate::types::UserProfile::new(
+            contact_did.clone(),
+            "Original Name".to_string(),
+        );
+        let initial_signed = crate::types::SignedProfile::sign(&initial_profile, &contact_keypair);
+        let announcement = crate::sync::ProfileGossipMessage::announce(initial_signed, None);
+        engine.process_profile_announcement(&announcement).unwrap();
+
+        // Verify initial pin
+        let pin = engine.get_pinned_profile(&contact_did).unwrap().unwrap();
+        assert_eq!(pin.signed_profile.profile.display_name, "Original Name");
+
+        // Create and process updated announcement
+        let updated_profile = crate::types::UserProfile::new(
+            contact_did.clone(),
+            "Updated Name".to_string(),
+        );
+        let updated_signed = crate::types::SignedProfile::sign(&updated_profile, &contact_keypair);
+        let announcement = crate::sync::ProfileGossipMessage::announce(updated_signed, None);
+        engine.process_profile_announcement(&announcement).unwrap();
+
+        // Verify pin was updated
+        let pin = engine.get_pinned_profile(&contact_did).unwrap().unwrap();
+        assert_eq!(pin.signed_profile.profile.display_name, "Updated Name");
+        // Relationship should be preserved
+        assert_eq!(pin.relationship, crate::types::PinRelationship::Contact);
+    }
+
+    #[tokio::test]
+    async fn test_get_auto_pin_interests() {
+        let (engine, _temp) = create_test_engine().await;
+
+        // Initially no interests
+        let interests = engine.get_auto_pin_interests().unwrap();
+        assert!(interests.is_empty());
+
+        // Add some contacts
+        for i in 0..3 {
+            let contact_info = crate::types::contact::ContactInfo {
+                peer_did: format!("did:sync:contact{}", i),
+                peer_endpoint_id: [i as u8; 32],
+                profile: crate::types::contact::ProfileSnapshot {
+                    display_name: format!("Contact {}", i),
+                    subtitle: None,
+                    avatar_blob_id: None,
+                    bio: String::new(),
+                },
+                node_addr: crate::invite::NodeAddrBytes {
+                    node_id: [i as u8; 32],
+                    relay_url: None,
+                    direct_addresses: vec![],
+                },
+                contact_topic: [i as u8; 32],
+                contact_key: [i as u8; 32],
+                accepted_at: chrono::Utc::now().timestamp(),
+                last_seen: 0,
+                status: crate::types::contact::ContactStatus::Offline,
+                is_favorite: false,
+            };
+            engine.storage.save_contact(&contact_info).unwrap();
+        }
+
+        // Should now have 3 interests
+        let interests = engine.get_auto_pin_interests().unwrap();
+        assert_eq!(interests.len(), 3);
+        assert!(interests.contains(&"did:sync:contact0".to_string()));
+        assert!(interests.contains(&"did:sync:contact1".to_string()));
+        assert!(interests.contains(&"did:sync:contact2".to_string()));
     }
 }

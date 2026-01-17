@@ -28,39 +28,11 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+// Re-export from types::peer for backwards compatibility
+pub use crate::types::peer::{PeerSource, PeerStatus};
+
 // Table definition for peer registry
 const PEERS_TABLE: TableDefinition<&[u8], &[u8]> = TableDefinition::new("peers");
-
-/// How a peer was discovered
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum PeerSource {
-    /// Discovered through a specific realm's gossip topic
-    FromRealm(RealmId),
-    /// Added through an invite (not yet seen on gossip)
-    FromInvite,
-}
-
-/// Connection status of a peer
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub enum PeerStatus {
-    /// Currently connected (seen recently)
-    Online,
-    /// Not currently connected
-    Offline,
-    /// Status unknown (never attempted connection)
-    #[default]
-    Unknown,
-}
-
-impl std::fmt::Display for PeerStatus {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            PeerStatus::Online => write!(f, "online"),
-            PeerStatus::Offline => write!(f, "offline"),
-            PeerStatus::Unknown => write!(f, "unknown"),
-        }
-    }
-}
 
 /// Information about a discovered peer
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

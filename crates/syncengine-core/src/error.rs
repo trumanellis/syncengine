@@ -100,6 +100,14 @@ pub enum SyncError {
     /// Invalid operation for current state
     #[error("Invalid operation: {0}")]
     InvalidOperation(String),
+
+    /// Blob storage/transfer error
+    #[error("Blob error: {0}")]
+    Blob(String),
+
+    /// Operation requires a component that hasn't been initialized yet
+    #[error("Not ready: {0}")]
+    NotReady(String),
 }
 
 /// Result type alias using SyncError

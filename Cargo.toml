@@ -40,6 +40,7 @@ dioxus = { version = "0.6", features = ["desktop", "router", "asset"] }
 # Core iroh (matching iroh-examples versions)
 iroh = { version = "0.95", features = ["default", "discovery-local-network"] }
 iroh-gossip = { version = "0.95", default-features = false, features = ["net"] }
+iroh-blobs = { version = "0.97", default-features = false, features = ["fs-store"] }
 n0-future = "0.3"
 
 # Automerge + Repository

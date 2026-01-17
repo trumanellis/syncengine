@@ -5,9 +5,14 @@ edition = "2021"
 description = "Synchronicity Engine - P2P task sharing with gossip-based sync"
 license = "MIT"
 
+[features]
+default = []
+debug-server = []  # Enables MCP server hooks for network debugging
+
 [dependencies]
 iroh.workspace = true
 iroh-gossip.workspace = true
+iroh-blobs.workspace = true
 n0-future.workspace = true
 automerge.workspace = true
 redb.workspace = true

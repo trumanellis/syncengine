@@ -94,7 +94,7 @@ async fn wait_for_task_sync(
             );
         }
 
-        let tasks = engine.list_tasks(realm_id).await?;
+        let tasks = engine.list_tasks(realm_id)?;
         if tasks.iter().any(|t| t.title == expected_task_title) {
             return Ok(());
         }
@@ -146,8 +146,8 @@ async fn test_reconnection_after_restart() {
     let ctx_a = TestContext::new().expect("Failed to create context A");
     let ctx_b = TestContext::new().expect("Failed to create context B");
 
-    let endpoint_id_a_before: iroh::PublicKey;
-    let endpoint_id_b_before: iroh::PublicKey;
+    let endpoint_id_a_before: Option<String>;
+    let endpoint_id_b_before: Option<String>;
     let realm_id: RealmId;
 
     {
@@ -183,11 +183,11 @@ async fn test_reconnection_after_restart() {
             .await
             .expect("Failed to get node info B");
 
-        endpoint_id_a_before = node_info_a.endpoint_id;
-        endpoint_id_b_before = node_info_b.endpoint_id;
+        endpoint_id_a_before = node_info_a.node_id;
+        endpoint_id_b_before = node_info_b.node_id;
 
-        println!("Node A ID (before): {}", endpoint_id_a_before);
-        println!("Node B ID (before): {}", endpoint_id_b_before);
+        println!("Node A ID (before): {:?}", endpoint_id_a_before);
+        println!("Node B ID (before): {:?}", endpoint_id_b_before);
 
         // Node A: Create realm and task
         realm_id = engine_a
@@ -256,20 +256,26 @@ async fn test_reconnection_after_restart() {
         println!("Node B peer count: {}", peers_b.len());
 
         // Verify Node A knows about Node B
-        assert!(
-            peers_a
-                .iter()
-                .any(|p| p.endpoint_id == *endpoint_id_b_before.as_bytes()),
-            "Node A should know about Node B"
-        );
+        if let Some(ref hex_b) = endpoint_id_b_before {
+            let bytes_b = hex::decode(hex_b).expect("Invalid hex for B");
+            assert!(
+                peers_a
+                    .iter()
+                    .any(|p| p.endpoint_id.as_slice() == bytes_b.as_slice()),
+                "Node A should know about Node B"
+            );
+        }
 
         // Verify Node B knows about Node A
-        assert!(
-            peers_b
-                .iter()
-                .any(|p| p.endpoint_id == *endpoint_id_a_before.as_bytes()),
-            "Node B should know about Node A"
-        );
+        if let Some(ref hex_a) = endpoint_id_a_before {
+            let bytes_a = hex::decode(hex_a).expect("Invalid hex for A");
+            assert!(
+                peers_b
+                    .iter()
+                    .any(|p| p.endpoint_id.as_slice() == bytes_a.as_slice()),
+                "Node B should know about Node A"
+            );
+        }
 
         println!("✓ Peer registries populated");
 
@@ -308,11 +314,11 @@ async fn test_reconnection_after_restart() {
         .await
         .expect("Failed to get node info B after restart");
 
-    let endpoint_id_a_after = node_info_a.endpoint_id;
-    let endpoint_id_b_after = node_info_b.endpoint_id;
+    let endpoint_id_a_after = node_info_a.node_id;
+    let endpoint_id_b_after = node_info_b.node_id;
 
-    println!("Node A ID (after): {}", endpoint_id_a_after);
-    println!("Node B ID (after): {}", endpoint_id_b_after);
+    println!("Node A ID (after): {:?}", endpoint_id_a_after);
+    println!("Node B ID (after): {:?}", endpoint_id_b_after);
 
     assert_eq!(
         endpoint_id_a_before, endpoint_id_a_after,
@@ -393,11 +399,9 @@ async fn test_reconnection_after_restart() {
     // Verify both tasks exist on both nodes
     let tasks_a = engine_a
         .list_tasks(&realm_id)
-        .await
         .expect("Failed to list tasks on A");
     let tasks_b = engine_b
         .list_tasks(&realm_id)
-        .await
         .expect("Failed to list tasks on B");
 
     assert_eq!(tasks_a.len(), 2, "Node A should have 2 tasks");
@@ -542,11 +546,9 @@ async fn test_two_nodes_sync_tasks() {
     // Verify both nodes have both tasks
     let tasks_a = engine_a
         .list_tasks(&realm_id)
-        .await
         .expect("Failed to list tasks on A");
     let tasks_b = engine_b
         .list_tasks(&realm_id)
-        .await
         .expect("Failed to list tasks on B");
 
     assert_eq!(tasks_a.len(), 2, "Node A should have 2 tasks");
@@ -637,11 +639,11 @@ async fn test_peer_registry_tracks_connections() {
         .await
         .expect("Failed to get node info B");
 
-    let endpoint_id_a = node_info_a.endpoint_id;
-    let endpoint_id_b = node_info_b.endpoint_id;
+    let endpoint_id_a = node_info_a.node_id;
+    let endpoint_id_b = node_info_b.node_id;
 
-    println!("Node A ID: {}", endpoint_id_a);
-    println!("Node B ID: {}", endpoint_id_b);
+    println!("Node A ID: {:?}", endpoint_id_a);
+    println!("Node B ID: {:?}", endpoint_id_b);
 
     // Node A: Create realm
     let realm_id = engine_a
@@ -676,8 +678,18 @@ async fn test_peer_registry_tracks_connections() {
 
     // Check peer registry on Node A
     let peer_registry_a = engine_a.peer_registry();
+
+    // Convert hex string to PublicKey for registry lookup
+    let endpoint_id_b_hex = endpoint_id_b.as_ref().expect("Node B should have endpoint ID");
+    let endpoint_id_b_bytes: [u8; 32] = hex::decode(endpoint_id_b_hex)
+        .expect("Invalid hex")
+        .try_into()
+        .expect("Wrong length");
+    let endpoint_id_b_pk = iroh::PublicKey::from_bytes(&endpoint_id_b_bytes)
+        .expect("Invalid public key bytes");
+
     let peer_info_b = peer_registry_a
-        .get(&endpoint_id_b)
+        .get(&endpoint_id_b_pk)
         .expect("Failed to get peer B from registry A")
         .expect("Node A should know about Node B");
 
@@ -688,11 +700,15 @@ async fn test_peer_registry_tracks_connections() {
     println!("  Shared realms: {}", peer_info_b.shared_realms.len());
 
     // Verify peer information
-    assert_eq!(
-        peer_info_b.endpoint_id,
-        *endpoint_id_b.as_bytes(),
-        "Endpoint ID should match"
-    );
+    // endpoint_id_b is Option<String> (hex), peer_info_b.endpoint_id is [u8; 32]
+    if let Some(ref hex_id) = endpoint_id_b {
+        let expected_bytes = hex::decode(hex_id).expect("Invalid hex");
+        assert_eq!(
+            peer_info_b.endpoint_id.as_slice(),
+            expected_bytes.as_slice(),
+            "Endpoint ID should match"
+        );
+    }
 
     // Verify source is FromRealm
     match &peer_info_b.source {
@@ -712,8 +728,18 @@ async fn test_peer_registry_tracks_connections() {
 
     // Check peer registry on Node B
     let peer_registry_b = engine_b.peer_registry();
+
+    // Convert hex string to PublicKey for registry lookup
+    let endpoint_id_a_hex = endpoint_id_a.as_ref().expect("Node A should have endpoint ID");
+    let endpoint_id_a_bytes: [u8; 32] = hex::decode(endpoint_id_a_hex)
+        .expect("Invalid hex")
+        .try_into()
+        .expect("Wrong length");
+    let endpoint_id_a_pk = iroh::PublicKey::from_bytes(&endpoint_id_a_bytes)
+        .expect("Invalid public key bytes");
+
     let peer_info_a = peer_registry_b
-        .get(&endpoint_id_a)
+        .get(&endpoint_id_a_pk)
         .expect("Failed to get peer A from registry B")
         .expect("Node B should know about Node A");
 
@@ -723,11 +749,15 @@ async fn test_peer_registry_tracks_connections() {
     println!("  Source: {:?}", peer_info_a.source);
     println!("  Shared realms: {}", peer_info_a.shared_realms.len());
 
-    assert_eq!(
-        peer_info_a.endpoint_id,
-        *endpoint_id_a.as_bytes(),
-        "Endpoint ID should match"
-    );
+    // endpoint_id_a is Option<String> (hex), peer_info_a.endpoint_id is [u8; 32]
+    if let Some(ref hex_id) = endpoint_id_a {
+        let expected_bytes = hex::decode(hex_id).expect("Invalid hex");
+        assert_eq!(
+            peer_info_a.endpoint_id.as_slice(),
+            expected_bytes.as_slice(),
+            "Endpoint ID should match"
+        );
+    }
 
     println!("✓ Peer registry correctly tracked Node A");
 

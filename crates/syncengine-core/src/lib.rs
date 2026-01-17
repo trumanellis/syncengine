@@ -40,6 +40,7 @@
 //! }
 //! ```
 
+pub mod blobs;
 pub mod crypto;
 pub mod engine;
 pub mod error;
@@ -52,14 +53,18 @@ pub mod sync;
 pub mod types;
 
 // Re-exports
+pub use blobs::{BlobManager, BlobProtocolHandler};
 pub use crypto::RealmCrypto;
-pub use engine::{NodeInfo, SyncEngine};
+pub use engine::{NetworkStats, NodeInfo, SyncEngine};
 pub use error::SyncError;
 pub use identity::{Did, HybridKeypair, HybridPublicKey, HybridSignature};
 pub use invite::{InviteTicket, NodeAddrBytes};
-pub use peers::{PeerInfo, PeerRegistry, PeerSource, PeerStatus};
+// Legacy peer types (deprecated in favor of unified Peer type)
+pub use peers::{PeerInfo, PeerRegistry};
+// Re-export from types module (the unified version)
+pub use types::peer::{ContactDetails, Peer, PeerSource, PeerStatus};
 pub use realm::RealmDoc;
-pub use storage::Storage;
+pub use storage::{PinnerInfo, PinningConfig, Storage};
 pub use sync::{
     GossipMessage, GossipSync, NetworkDebugInfo, SyncEnvelope, SyncEvent, SyncManager, SyncMessage,
     SyncStatus, TopicHandle, WireMessage, ENVELOPE_VERSION,

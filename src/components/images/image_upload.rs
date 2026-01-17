@@ -81,7 +81,7 @@ pub fn ImageUpload(
                                     let shared = engine();
                                     let guard = shared.read().await;
                                     if let Some(ref eng) = *guard {
-                                        match eng.upload_image(buffer) {
+                                        match eng.upload_image(buffer).await {
                                             Ok(blob_id) => {
                                                 uploading.set(false);
                                                 on_upload.call(blob_id);

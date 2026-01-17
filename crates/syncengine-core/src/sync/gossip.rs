@@ -12,6 +12,7 @@ use iroh_gossip::proto::TopicId;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
+use crate::blobs::{BlobManager, BlobProtocolHandler};
 use crate::error::{SyncError, SyncResult};
 use crate::identity::{Did, HybridKeypair};
 use crate::invite::{InviteTicket, NodeAddrBytes};
@@ -311,33 +312,42 @@ impl GossipSync {
     /// Spawns an iroh endpoint with gossip protocol support.
     /// The endpoint will be reachable by other peers.
     pub async fn new() -> SyncResult<Self> {
-        Self::with_secret_key(None, None, None).await
+        Self::with_secret_key(None, None, None, None).await
     }
 
     /// Create a new gossip sync instance with a specific secret key
     ///
     /// Useful for persistent identity across restarts.
     /// If storage and event_tx are provided, contact protocol handler will be registered.
+    /// The local_did is required for the simplified contact protocol's local key derivation.
     /// If profile handler deps are provided, profile protocol handler will be registered.
+    /// If blob manager is provided, blob protocol handler will be registered for P2P image transfer.
     pub async fn with_secret_key(
         secret_key: Option<SecretKey>,
-        contact_handler_deps: Option<(Arc<crate::storage::Storage>, tokio::sync::broadcast::Sender<crate::sync::ContactEvent>)>,
+        contact_handler_deps: Option<(Arc<crate::storage::Storage>, tokio::sync::broadcast::Sender<crate::sync::ContactEvent>, String)>,
         profile_handler_deps: Option<(Arc<crate::storage::Storage>, Arc<HybridKeypair>, Did)>,
+        blob_manager: Option<&BlobManager>,
     ) -> SyncResult<Self> {
         let secret_key = secret_key.unwrap_or_else(|| SecretKey::generate(&mut rand::rng()));
 
         // Create static provider for out-of-band peer addresses
         let static_provider = StaticProvider::new();
 
+        // Build the list of ALPNs to support
+        let mut alpns = vec![
+            GOSSIP_ALPN.to_vec(),
+            CONTACT_ALPN.to_vec(),
+            PROFILE_ALPN.to_vec(),
+        ];
+        if blob_manager.is_some() {
+            alpns.push(iroh_blobs::ALPN.to_vec());
+        }
+
         // Build the endpoint with static discovery
-        // Support gossip (realm sync), contact exchange, and profile serving protocols
+        // Support gossip (realm sync), contact exchange, profile serving, and blob protocols
         let endpoint = Endpoint::builder()
             .secret_key(secret_key.clone())
-            .alpns(vec![
-                GOSSIP_ALPN.to_vec(),
-                CONTACT_ALPN.to_vec(),
-                PROFILE_ALPN.to_vec(),
-            ])
+            .alpns(alpns)
             .discovery(static_provider.clone())
             .bind()
             .await
@@ -355,11 +365,11 @@ impl GossipSync {
             .spawn(endpoint.clone());
         info!(max_message_size = MAX_MESSAGE_SIZE, "Gossip spawned");
 
-        // Build router - register contact and profile protocols if dependencies provided
+        // Build router - register contact, profile, and blob protocols if dependencies provided
         let mut router_builder = Router::builder(endpoint.clone()).accept(GOSSIP_ALPN, gossip.clone());
 
-        if let Some((storage, event_tx)) = contact_handler_deps {
-            let contact_handler = ContactProtocolHandler::new(storage, event_tx, gossip.clone());
+        if let Some((storage, event_tx, local_did)) = contact_handler_deps {
+            let contact_handler = ContactProtocolHandler::new(storage, event_tx, gossip.clone(), local_did);
             router_builder = router_builder.accept(CONTACT_ALPN, contact_handler);
             info!("Contact protocol handler registered");
         }
@@ -368,6 +378,12 @@ impl GossipSync {
             let profile_handler = ProfileProtocolHandler::new(storage, keypair, did);
             router_builder = router_builder.accept(PROFILE_ALPN, profile_handler);
             info!("Profile protocol handler registered");
+        }
+
+        if let Some(manager) = blob_manager {
+            let blob_handler = BlobProtocolHandler::from_manager(manager);
+            router_builder = router_builder.accept(BlobProtocolHandler::alpn(), blob_handler.protocol());
+            info!("Blob protocol handler registered for P2P image transfer");
         }
 
         let router = router_builder.spawn();
@@ -732,7 +748,7 @@ mod tests {
         let secret_key = SecretKey::generate(&mut rand::rng());
         let expected_public = secret_key.public();
 
-        let gossip = GossipSync::with_secret_key(Some(secret_key), None, None)
+        let gossip = GossipSync::with_secret_key(Some(secret_key), None, None, None)
             .await
             .expect("Failed to create GossipSync with secret key");
 

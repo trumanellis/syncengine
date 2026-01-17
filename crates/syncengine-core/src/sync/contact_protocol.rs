@@ -1,38 +1,37 @@
 //! Contact exchange protocol for peer-to-peer connections
 //!
-//! This module implements a 4-step mutual acceptance handshake for establishing
-//! permanent peer-to-peer contacts. Each contact pair derives a unique gossip
-//! topic and encryption key from their DIDs.
+//! This module implements a simplified 2-step mutual acceptance handshake for
+//! establishing permanent peer-to-peer contacts. Each contact pair derives a
+//! unique gossip topic and encryption key locally from their DIDs.
 //!
 //! ## Protocol Overview
 //!
 //! The contact exchange protocol enables users to establish mutual connections:
 //!
-//! 1. **ContactRequest**: Recipient sends request to inviter via QUIC stream
-//! 2. **ContactResponse**: Inviter acknowledges and accepts/declines
-//! 3. **ContactAccepted**: Either party sends shared keys after mutual acceptance
-//! 4. **ContactAcknowledged**: Final acknowledgment completes handshake
+//! 1. **ContactRequest**: Requester sends request to inviter via QUIC stream
+//! 2. **ContactAccept**: Inviter accepts and sends their profile back
+//!    (or **ContactDecline** if rejecting)
+//!
+//! Both parties then derive the shared keys locally - no key transmission needed!
 //!
 //! ## Message Flow
 //!
 //! ```text
-//! Inviter (Alice)                Recipient (Bob)
+//! Inviter (Alice)                Requester (Bob)
 //!   |                               |
 //!   |--- Generate Invite ---------->|
 //!   |                               |
 //!   |<-- ContactRequest ------------|
+//!   |    (profile, node_addr, sig)  |
 //!   |                               |
-//!   |--- ContactResponse ---------->|
-//!   |    (accepted: true)           |
+//!   |--- ContactAccept ------------>|
+//!   |    (profile, node_addr, sig)  |
 //!   |                               |
-//!   |<-- ContactAccepted -----------|
-//!   |    (shared keys)              |
-//!   |                               |
-//!   |--- ContactAcknowledged ------>|
+//!   |    Both derive keys locally:  |
+//!   |    BLAKE3(sorted_dids)        |
 //!   |                               |
 //!   |    Both subscribe to          |
-//!   |    contact_topic with         |
-//!   |    contact_key                |
+//!   |    contact_topic              |
 //! ```
 //!
 //! ## Deterministic Key Derivation
@@ -45,6 +44,7 @@
 //! ```
 //!
 //! DIDs are sorted lexicographically to ensure both peers derive the same values.
+//! This eliminates the need to transmit keys over the network.
 
 use serde::{Deserialize, Serialize};
 
@@ -57,11 +57,16 @@ use crate::types::contact::ProfileSnapshot;
 pub const CONTACT_ALPN: &[u8] = b"/sync/contact/1";
 
 /// Contact protocol messages for mutual peer acceptance
+///
+/// The simplified protocol uses just 3 message types:
+/// - `ContactRequest`: Requester → Inviter
+/// - `ContactAccept`: Inviter → Requester (acceptance)
+/// - `ContactDecline`: Inviter → Requester (rejection)
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum ContactMessage {
-    /// Step 1: Recipient to inviter (via direct QUIC stream)
+    /// Step 1: Requester to inviter (via direct QUIC stream)
     ///
-    /// The recipient initiates contact by sending this message to the inviter's
+    /// The requester initiates contact by sending this message to the inviter's
     /// network address (obtained from the invite).
     ContactRequest {
         /// Unique invite ID from the original invite
@@ -78,43 +83,31 @@ pub enum ContactMessage {
         requester_signature: Vec<u8>,
     },
 
-    /// Step 2: Inviter to recipient (acknowledgment)
+    /// Step 2a: Inviter to requester (acceptance)
     ///
-    /// The inviter responds to indicate whether they accept the contact request.
-    /// If accepted, includes their full profile for the recipient.
-    ContactResponse {
+    /// The inviter accepts the contact request and sends their profile back.
+    /// Both parties then derive shared keys locally from their DIDs.
+    ContactAccept {
         /// Invite ID from the request
         invite_id: [u8; 16],
-        /// Whether inviter accepts this contact
-        accepted: bool,
-        /// Inviter's full profile (if accepted)
-        inviter_profile: Option<ProfileSnapshot>,
-    },
-
-    /// Step 3: Either party sends after both accept (contains shared secret)
-    ///
-    /// Once both parties have accepted, either can send the shared keys.
-    /// These keys are derived deterministically from both DIDs.
-    ContactAccepted {
-        /// Invite ID from the exchange
-        invite_id: [u8; 16],
-        /// DID of the sender (for verification)
-        sender_did: String,
-        /// Public key of the sender (for signature verification)
-        sender_pubkey: Vec<u8>,
-        /// Derived 1:1 gossip topic for this contact pair
-        contact_topic: [u8; 32],
-        /// Shared encryption key for this contact pair
-        contact_key: [u8; 32],
-        /// Signature over all above fields
+        /// DID of the accepter (inviter)
+        accepter_did: String,
+        /// Accepter's public key (for signature verification)
+        accepter_pubkey: Vec<u8>, // HybridPublicKey serialized
+        /// Accepter's profile snapshot
+        accepter_profile: ProfileSnapshot,
+        /// Accepter's network address for future connections
+        accepter_node_addr: Vec<u8>, // NodeAddrBytes serialized
+        /// Signature over all above fields (HybridSignature)
         signature: Vec<u8>,
+        // NOTE: contact_topic and contact_key are derived locally, not transmitted
     },
 
-    /// Step 4: Final acknowledgment
+    /// Step 2b: Inviter to requester (rejection)
     ///
-    /// Confirms receipt of shared keys and completes the handshake.
-    ContactAcknowledged {
-        /// Invite ID from the exchange
+    /// The inviter declines the contact request.
+    ContactDecline {
+        /// Invite ID from the request
         invite_id: [u8; 16],
     },
 }
@@ -316,48 +309,20 @@ mod tests {
     }
 
     #[test]
-    fn test_contact_response_accepted_serialization() {
+    fn test_contact_accept_serialization() {
         let profile = ProfileSnapshot {
-            display_name: "Bob".to_string(),
-            subtitle: None,
+            display_name: "Alice".to_string(),
+            subtitle: Some("Engineer".to_string()),
             avatar_blob_id: None,
             bio: "Hello!".to_string(),
         };
 
-        let msg = ContactMessage::ContactResponse {
+        let msg = ContactMessage::ContactAccept {
             invite_id: [99u8; 16],
-            accepted: true,
-            inviter_profile: Some(profile.clone()),
-        };
-
-        let encoded = msg.encode().expect("Failed to encode");
-        let decoded = ContactMessage::decode(&encoded).expect("Failed to decode");
-
-        assert_eq!(msg, decoded);
-    }
-
-    #[test]
-    fn test_contact_response_declined_serialization() {
-        let msg = ContactMessage::ContactResponse {
-            invite_id: [99u8; 16],
-            accepted: false,
-            inviter_profile: None,
-        };
-
-        let encoded = msg.encode().expect("Failed to encode");
-        let decoded = ContactMessage::decode(&encoded).expect("Failed to decode");
-
-        assert_eq!(msg, decoded);
-    }
-
-    #[test]
-    fn test_contact_accepted_serialization() {
-        let msg = ContactMessage::ContactAccepted {
-            invite_id: [77u8; 16],
-            sender_did: "did:sync:zTest".to_string(),
-            sender_pubkey: vec![3, 4, 5, 6],
-            contact_topic: [1u8; 32],
-            contact_key: [2u8; 32],
+            accepter_did: "did:sync:zAlice123".to_string(),
+            accepter_pubkey: vec![1, 2, 3, 4],
+            accepter_profile: profile.clone(),
+            accepter_node_addr: vec![5, 6, 7, 8],
             signature: vec![9, 10, 11, 12],
         };
 
@@ -368,8 +333,8 @@ mod tests {
     }
 
     #[test]
-    fn test_contact_acknowledged_serialization() {
-        let msg = ContactMessage::ContactAcknowledged {
+    fn test_contact_decline_serialization() {
+        let msg = ContactMessage::ContactDecline {
             invite_id: [88u8; 16],
         };
 
@@ -470,36 +435,26 @@ mod tests {
             requester_signature: vec![],
         };
 
-        let response = ContactMessage::ContactResponse {
+        let accept = ContactMessage::ContactAccept {
             invite_id: [1u8; 16],
-            accepted: true,
-            inviter_profile: Some(profile),
-        };
-
-        let accepted = ContactMessage::ContactAccepted {
-            invite_id: [1u8; 16],
-            sender_did: "did:test".to_string(),
-            sender_pubkey: vec![],
-            contact_topic: [0u8; 32],
-            contact_key: [0u8; 32],
+            accepter_did: "did:test".to_string(),
+            accepter_pubkey: vec![],
+            accepter_profile: profile,
+            accepter_node_addr: vec![],
             signature: vec![],
         };
 
-        let ack = ContactMessage::ContactAcknowledged {
+        let decline = ContactMessage::ContactDecline {
             invite_id: [1u8; 16],
         };
 
         // Ensure all variants encode to different bytes
         let request_bytes = request.encode().unwrap();
-        let response_bytes = response.encode().unwrap();
-        let accepted_bytes = accepted.encode().unwrap();
-        let ack_bytes = ack.encode().unwrap();
+        let accept_bytes = accept.encode().unwrap();
+        let decline_bytes = decline.encode().unwrap();
 
-        assert_ne!(request_bytes, response_bytes);
-        assert_ne!(request_bytes, accepted_bytes);
-        assert_ne!(request_bytes, ack_bytes);
-        assert_ne!(response_bytes, accepted_bytes);
-        assert_ne!(response_bytes, ack_bytes);
-        assert_ne!(accepted_bytes, ack_bytes);
+        assert_ne!(request_bytes, accept_bytes);
+        assert_ne!(request_bytes, decline_bytes);
+        assert_ne!(accept_bytes, decline_bytes);
     }
 }

@@ -5023,4 +5023,256 @@ body {
   color: var(--text-muted);
   font-style: italic;
 }
+
+/* ═══════════════════════════════════════════════════════════════════════
+   NETWORK PAGE - FIELD TOPOLOGY
+   ═══════════════════════════════════════════════════════════════════════ */
+
+.network-page {
+  min-height: 100vh;
+  background: var(--void-black);
+  padding: 2rem;
+}
+
+.network-header {
+  display: flex;
+  align-items: center;
+  gap: 2rem;
+  margin-bottom: 2rem;
+}
+
+.network-title {
+  font-family: var(--font-serif);
+  font-size: var(--text-3xl);
+  font-weight: 400;
+  color: var(--gold);
+  text-shadow: 0 0 30px var(--gold-glow);
+  letter-spacing: 0.1em;
+}
+
+.network-content {
+  max-width: 1000px;
+  margin: 0 auto;
+}
+
+/* === Stats Cards === */
+.network-stats {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1.5rem;
+  margin-bottom: 3rem;
+}
+
+.stat-card {
+  background: rgba(15, 15, 15, 0.6);
+  border: 1px solid rgba(212, 175, 55, 0.2);
+  border-radius: 8px;
+  padding: 1.5rem;
+  text-align: center;
+  backdrop-filter: blur(12px);
+  transition: all var(--transition-normal);
+}
+
+.stat-card:hover {
+  border-color: rgba(212, 175, 55, 0.4);
+  box-shadow: 0 0 20px var(--gold-glow);
+}
+
+.stat-card .stat-value {
+  font-size: var(--text-3xl);
+  font-weight: 600;
+  color: var(--gold);
+  margin-bottom: 0.25rem;
+  font-family: var(--font-mono);
+}
+
+.stat-card .stat-label {
+  font-size: var(--text-lg);
+  color: var(--text-primary);
+  font-family: var(--font-serif);
+  margin-bottom: 0.25rem;
+}
+
+.stat-card .stat-sublabel {
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+}
+
+/* === Network Sections === */
+.network-section {
+  margin-bottom: 3rem;
+}
+
+.network-section .section-title {
+  font-family: var(--font-serif);
+  font-size: var(--text-xl);
+  font-weight: 400;
+  color: var(--gold);
+  margin-bottom: 0.25rem;
+}
+
+.network-section .section-subtitle {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+  margin-bottom: 1.5rem;
+}
+
+/* === Network Cards === */
+.peer-list,
+.pinner-list,
+.pin-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.network-card {
+  background: rgba(15, 15, 15, 0.4);
+  border: 1px solid var(--void-border);
+  border-radius: 8px;
+  padding: 1rem 1.25rem;
+  transition: all var(--transition-fast);
+}
+
+.network-card:hover {
+  border-color: rgba(0, 212, 170, 0.3);
+  background: rgba(15, 15, 15, 0.6);
+}
+
+.network-card .card-header {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 0.5rem;
+}
+
+.network-card .status-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.network-card .status-dot.status-online {
+  background: var(--moss-glow);
+  box-shadow: 0 0 10px var(--moss-glow);
+  animation: pulse 2s ease-in-out infinite;
+}
+
+.network-card .status-dot.status-offline {
+  background: var(--text-muted);
+}
+
+.network-card .card-name {
+  font-family: var(--font-mono);
+  font-size: var(--text-base);
+  color: var(--text-primary);
+  flex-grow: 1;
+}
+
+.network-card .card-status {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--moss);
+}
+
+.network-card .card-relationship {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--cyan);
+  margin-left: auto;
+}
+
+.network-card .card-details {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  align-items: center;
+  padding-left: 1.5rem;
+}
+
+.network-card .detail-item {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+}
+
+.network-card .detail-label {
+  color: var(--text-muted);
+}
+
+.network-card .detail-value {
+  color: var(--text-secondary);
+}
+
+/* Unpin button in YourPinCard */
+.network-card .unpin-btn {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  padding: 0.25rem 0.75rem;
+  background: transparent;
+  border: 1px solid rgba(255, 51, 102, 0.3);
+  border-radius: 4px;
+  color: var(--danger);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.network-card .unpin-btn:hover {
+  background: rgba(255, 51, 102, 0.1);
+  border-color: var(--danger);
+}
+
+/* Contact card specific styles */
+.network-card .favorite-badge {
+  color: var(--gold);
+  font-size: var(--text-sm);
+  margin-left: 0.25rem;
+}
+
+.network-card .did-value {
+  color: var(--cyan);
+  font-family: var(--font-mono);
+}
+
+/* Empty states */
+.network-section .empty-state {
+  background: rgba(15, 15, 15, 0.3);
+  border: 1px dashed var(--void-border);
+  border-radius: 8px;
+  padding: 2rem;
+  text-align: center;
+}
+
+.network-section .empty-state p {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--text-muted);
+  margin: 0;
+}
+
+/* === Responsive === */
+@media (max-width: 700px) {
+  .network-page {
+    padding: 1rem;
+  }
+
+  .network-stats {
+    grid-template-columns: 1fr;
+    gap: 1rem;
+  }
+
+  .network-card .card-details {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.5rem;
+  }
+
+  .network-card .unpin-btn {
+    margin-left: 0;
+    margin-top: 0.5rem;
+  }
+}
 "#;

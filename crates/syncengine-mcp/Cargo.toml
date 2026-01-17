@@ -1,0 +1,42 @@
+[package]
+name = "syncengine-mcp"
+version = "0.1.0"
+edition = "2021"
+description = "MCP server for SyncEngine network debugging and immune system testing"
+license = "MIT"
+
+[[bin]]
+name = "syncengine-mcp"
+path = "src/main.rs"
+
+[dependencies]
+# Core dependency with debug features
+syncengine-core = { path = "../syncengine-core", features = ["debug-server"] }
+
+# MCP protocol
+rmcp = { version = "0.1", features = ["server", "transport-io"] }
+schemars = "0.8"
+
+# Async runtime
+tokio.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# Utilities
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+parking_lot.workspace = true
+chrono.workspace = true
+ulid.workspace = true
+hex.workspace = true
+
+# For test harness
+tempfile.workspace = true
+getrandom.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros"] }

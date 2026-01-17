@@ -49,9 +49,9 @@ async fn test_generate_and_decode_contact_invite() {
 
     // Bob decodes Alice's invite
     let invite = bob.decode_contact_invite(&invite_code).await.unwrap();
-    assert_eq!(invite.version, 1);
+    assert_eq!(invite.version, 2); // Version 2 for hybrid invites
     assert!(!invite.is_expired());
-    assert_eq!(invite.profile_snapshot.display_name, "Anonymous User");
+    assert_eq!(invite.display_name, "Anonymous User");
 }
 
 #[tokio::test]
@@ -61,7 +61,7 @@ async fn test_send_contact_request() {
     let mut alice = SyncEngine::new(alice_dir.path()).await.unwrap();
     alice.init_identity().unwrap();
 
-    // Alice generates an invite
+    // Alice generates an invite (this starts networking for Alice)
     let invite_code = alice.generate_contact_invite(24).await.unwrap();
 
     // Setup Bob's engine
@@ -70,14 +70,28 @@ async fn test_send_contact_request() {
     bob.init_identity().unwrap();
 
     // Bob decodes and sends contact request
+    // NOTE: With auto-accept enabled, Alice will automatically accept since
+    // it's her own invite. This means the contact exchange may complete
+    // before we can check for pending contacts.
     let invite = bob.decode_contact_invite(&invite_code).await.unwrap();
     bob.send_contact_request(invite).await.unwrap();
 
-    // Verify Bob has outgoing pending request
-    let (incoming, outgoing) = bob.list_pending_contacts().unwrap();
-    assert_eq!(incoming.len(), 0);
-    assert_eq!(outgoing.len(), 1);
-    assert_eq!(outgoing[0].state, ContactState::OutgoingPending);
+    // Give time for the auto-accept and full exchange to complete
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+    // With auto-accept, the contact should be finalized
+    // Check both possibilities: either pending (if exchange not complete) or finalized
+    let bob_contacts = bob.list_contacts().unwrap();
+    let (_, bob_outgoing) = bob.list_pending_contacts().unwrap();
+
+    // Either we have a finalized contact OR a pending outgoing request
+    assert!(
+        bob_contacts.len() == 1 || bob_outgoing.len() == 1,
+        "Bob should have either a finalized contact or pending outgoing request. \
+         contacts={}, pending_outgoing={}",
+        bob_contacts.len(),
+        bob_outgoing.len()
+    );
 }
 
 #[tokio::test]
@@ -101,7 +115,7 @@ async fn test_accept_contact_request_storage() {
             display_name: "Bob".to_string(),
             subtitle: None,
             avatar_blob_id: None,
-            bio_excerpt: String::new(),
+            bio: String::new(),
         },
         node_addr: syncengine_core::invite::NodeAddrBytes::new([0u8; 32]),
         state: ContactState::IncomingPending,
@@ -175,7 +189,7 @@ async fn test_decline_contact_request() {
             display_name: "Charlie".to_string(),
             subtitle: None,
             avatar_blob_id: None,
-            bio_excerpt: String::new(),
+            bio: String::new(),
         },
         node_addr: syncengine_core::invite::NodeAddrBytes::new([0u8; 32]),
         state: ContactState::IncomingPending,
@@ -219,7 +233,7 @@ async fn test_list_contacts() {
             display_name: "Alice".to_string(),
             subtitle: Some("Test User".to_string()),
             avatar_blob_id: None,
-            bio_excerpt: "Hello world".to_string(),
+            bio: "Hello world".to_string(),
         },
         node_addr: syncengine_core::invite::NodeAddrBytes::new([0u8; 32]),
         contact_topic: [0u8; 32],

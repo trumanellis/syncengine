@@ -69,6 +69,7 @@ pub mod envelope;
 pub mod events;
 pub mod gossip;
 pub mod manager;
+pub mod profile_pinning;
 pub mod profile_protocol;
 pub mod protocol;
 
@@ -81,5 +82,8 @@ pub use envelope::{SyncEnvelope, ENVELOPE_VERSION};
 pub use events::{NetworkDebugInfo, SyncEvent, SyncStatus};
 pub use gossip::{GossipMessage, GossipSync, TopicEvent, TopicHandle, TopicReceiver, TopicSender};
 pub use manager::SyncManager;
+pub use profile_pinning::{
+    global_profile_topic, ProfileAction, ProfileGossipMessage, ProfileMessageHandler,
+};
 pub use profile_protocol::{ProfileMessage, ProfileProtocolHandler, PublicProfile, PROFILE_ALPN};
 pub use protocol::{SyncMessage, WireMessage};

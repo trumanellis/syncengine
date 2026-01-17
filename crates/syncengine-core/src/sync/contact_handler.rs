@@ -19,6 +19,7 @@ use crate::storage::Storage;
 use crate::sync::contact_protocol::{ContactMessage, CONTACT_ALPN};
 use crate::sync::ContactEvent;
 use crate::types::contact::{ContactState, PendingContact};
+use crate::types::peer::{ContactDetails, Peer, PeerSource, PeerStatus};
 
 /// Protocol handler for contact exchange
 ///
@@ -30,6 +31,8 @@ pub struct ContactProtocolHandler {
     storage: Arc<Storage>,
     event_tx: broadcast::Sender<ContactEvent>,
     gossip: Gossip,
+    /// Our local DID for key derivation in the simplified protocol
+    local_did: String,
 }
 
 impl std::fmt::Debug for ContactProtocolHandler {
@@ -38,21 +41,27 @@ impl std::fmt::Debug for ContactProtocolHandler {
             .field("storage", &"<Storage>")
             .field("event_tx", &"<Sender<ContactEvent>>")
             .field("gossip", &"<Gossip>")
+            .field("local_did", &self.local_did)
             .finish()
     }
 }
 
 impl ContactProtocolHandler {
     /// Create a new contact protocol handler
+    ///
+    /// The `local_did` is required for the simplified protocol to derive
+    /// contact keys locally without transmitting them.
     pub fn new(
         storage: Arc<Storage>,
         event_tx: broadcast::Sender<ContactEvent>,
         gossip: Gossip,
+        local_did: String,
     ) -> Self {
         Self {
             storage,
             event_tx,
             gossip,
+            local_did,
         }
     }
 
@@ -69,6 +78,7 @@ impl ContactProtocolHandler {
         storage: Arc<Storage>,
         event_tx: broadcast::Sender<ContactEvent>,
         gossip: Gossip,
+        local_did: String,
     ) -> Result<(), SyncError> {
         let remote_id = connection.remote_id();
         debug!(?remote_id, "Handling routed contact connection");
@@ -192,104 +202,81 @@ impl ContactProtocolHandler {
                 });
             }
 
-            ContactMessage::ContactResponse {
+            ContactMessage::ContactAccept {
                 invite_id,
-                accepted,
-                inviter_profile,
-            } => {
-                debug!(
-                    invite_id = ?invite_id,
-                    accepted,
-                    "Received ContactResponse"
-                );
-
-                if accepted {
-                    // Update pending from OutgoingPending to WaitingForMutual
-                    if let Ok(Some(mut pending)) = storage.load_pending(&invite_id) {
-                        if pending.state == ContactState::OutgoingPending {
-                            pending.state = ContactState::WaitingForMutual;
-
-                            // Update profile if provided
-                            if let Some(profile) = inviter_profile {
-                                pending.profile = profile;
-                            }
-
-                            storage.save_pending(&pending)?;
-                            info!(
-                                invite_id = ?invite_id,
-                                "Updated to WaitingForMutual, awaiting ContactAccepted"
-                            );
-                        }
-                    }
-                } else {
-                    // Declined - delete pending
-                    storage.delete_pending(&invite_id)?;
-                    info!(invite_id = ?invite_id, "Contact request was declined");
-
-                    let _ = event_tx.send(ContactEvent::ContactDeclined { invite_id });
-                }
-            }
-
-            ContactMessage::ContactAccepted {
-                invite_id,
-                sender_did,
-                sender_pubkey,
-                contact_topic,
-                contact_key,
+                accepter_did,
+                accepter_pubkey,
+                accepter_profile,
+                accepter_node_addr,
                 signature,
             } => {
                 // Verify signature
                 use crate::identity::{Did, HybridPublicKey, HybridSignature};
+                use crate::sync::contact_protocol::{derive_contact_key, derive_contact_topic};
 
                 // Deserialize public key
-                let pubkey = HybridPublicKey::from_bytes(&sender_pubkey)
+                let pubkey = HybridPublicKey::from_bytes(&accepter_pubkey)
                     .map_err(|e| SyncError::Identity(format!("Invalid public key: {}", e)))?;
 
                 // Verify DID matches public key
                 let expected_did = Did::from_public_key(&pubkey);
-                let sender_did_parsed = Did::parse(&sender_did)
+                let accepter_did_parsed = Did::parse(&accepter_did)
                     .map_err(|e| SyncError::Identity(format!("Invalid DID: {}", e)))?;
 
-                if expected_did != sender_did_parsed {
+                if expected_did != accepter_did_parsed {
                     return Err(SyncError::Identity(format!(
-                        "DID mismatch in ContactAccepted: expected {} but got {}",
-                        expected_did, sender_did
+                        "DID mismatch in ContactAccept: expected {} but got {}",
+                        expected_did, accepter_did
                     )));
                 }
 
-                // Rebuild signed data to verify
+                // Rebuild signed data to verify: invite_id + did + pubkey + profile + node_addr
                 let mut data_to_verify = Vec::new();
                 data_to_verify.extend_from_slice(&invite_id);
-                data_to_verify.extend_from_slice(sender_did.as_bytes());
-                data_to_verify.extend_from_slice(&sender_pubkey);
-                data_to_verify.extend_from_slice(&contact_topic);
-                data_to_verify.extend_from_slice(&contact_key);
+                data_to_verify.extend_from_slice(accepter_did.as_bytes());
+                data_to_verify.extend_from_slice(&accepter_pubkey);
+
+                let profile_bytes = postcard::to_allocvec(&accepter_profile)
+                    .map_err(|e| SyncError::Serialization(format!("Failed to serialize profile: {}", e)))?;
+                data_to_verify.extend_from_slice(&profile_bytes);
+                data_to_verify.extend_from_slice(&accepter_node_addr);
 
                 // Verify signature
                 let sig = HybridSignature::from_bytes(&signature)
                     .map_err(|e| SyncError::Identity(format!("Invalid signature: {}", e)))?;
 
                 if !pubkey.verify(&data_to_verify, &sig) {
-                    return Err(SyncError::Identity("ContactAccepted signature verification failed".to_string()));
+                    return Err(SyncError::Identity("ContactAccept signature verification failed".to_string()));
                 }
 
                 debug!(
                     invite_id = ?invite_id,
-                    sender_did = %sender_did,
-                    "ContactAccepted signature verified, finalizing contact"
+                    accepter_did = %accepter_did,
+                    "ContactAccept signature verified, finalizing contact"
                 );
 
-                // Load and verify pending is in WaitingForMutual state
+                // Load and verify pending is in OutgoingPending state
                 if let Ok(Some(pending)) = storage.load_pending(&invite_id) {
-                    if pending.state == ContactState::WaitingForMutual {
+                    if pending.state == ContactState::OutgoingPending {
+                        // Deserialize accepter's node address
+                        let node_addr: NodeAddrBytes = postcard::from_bytes(&accepter_node_addr)
+                            .map_err(|e| {
+                                SyncError::Serialization(format!("Invalid node address: {}", e))
+                            })?;
+
+                        // Derive keys locally from DIDs (no transmission needed!)
+                        // Use local_did (our DID) and accepter_did (peer's DID)
+                        let contact_topic = derive_contact_topic(&local_did, &accepter_did);
+                        let contact_key = derive_contact_key(&local_did, &accepter_did);
+
                         // Create ContactInfo and save to contacts table
                         use crate::types::contact::{ContactInfo, ContactStatus};
 
                         let contact = ContactInfo {
-                            peer_did: pending.peer_did.clone(),
-                            peer_endpoint_id: pending.node_addr.node_id,
-                            profile: pending.profile.clone(),
-                            node_addr: pending.node_addr.clone(),
+                            peer_did: accepter_did.clone(),
+                            peer_endpoint_id: node_addr.node_id,
+                            profile: accepter_profile.clone(),
+                            node_addr: node_addr.clone(),
                             contact_topic,
                             contact_key,
                             accepted_at: chrono::Utc::now().timestamp(),
@@ -298,13 +285,38 @@ impl ContactProtocolHandler {
                             is_favorite: false,
                         };
 
+                        // Save to legacy contacts table
                         storage.save_contact(&contact)?;
+
+                        // Also save to unified peers table (new system)
+                        let unified_peer = Peer {
+                            endpoint_id: contact.peer_endpoint_id,
+                            did: Some(contact.peer_did.clone()),
+                            profile: Some(contact.profile.clone()),
+                            nickname: None,
+                            contact_info: Some(ContactDetails {
+                                contact_topic,
+                                contact_key,
+                                accepted_at: contact.accepted_at,
+                                is_favorite: false,
+                            }),
+                            source: PeerSource::FromContact,
+                            shared_realms: Vec::new(),
+                            node_addr: Some(contact.node_addr.clone()),
+                            status: PeerStatus::Online,
+                            last_seen: contact.last_seen,
+                            connection_attempts: 0,
+                            successful_connections: 1, // Just succeeded
+                            last_attempt: contact.last_seen,
+                        };
+                        storage.save_peer(&unified_peer)?;
+
                         storage.delete_pending(&invite_id)?;
 
                         info!(
                             invite_id = ?invite_id,
                             peer_did = %contact.peer_did,
-                            "Contact mutually accepted and finalized"
+                            "Contact accepted and finalized with simplified protocol (keys derived locally)"
                         );
 
                         // Subscribe to the contact gossip topic (no bootstrap peers for direct 1:1)
@@ -339,15 +351,20 @@ impl ContactProtocolHandler {
                         debug!(
                             invite_id = ?invite_id,
                             state = ?pending.state,
-                            "Received ContactAccepted but not in WaitingForMutual state"
+                            "Received ContactAccept but not in OutgoingPending state"
                         );
                     }
                 }
             }
 
-            ContactMessage::ContactAcknowledged { invite_id: _ } => {
-                // Future: handle final acknowledgment if needed
-                debug!("Received ContactAcknowledged");
+            ContactMessage::ContactDecline { invite_id } => {
+                debug!(invite_id = ?invite_id, "Received ContactDecline");
+
+                // Delete pending and emit event
+                storage.delete_pending(&invite_id)?;
+                info!(invite_id = ?invite_id, "Contact request was declined");
+
+                let _ = event_tx.send(ContactEvent::ContactDeclined { invite_id });
             }
         }
 
@@ -363,12 +380,13 @@ impl ProtocolHandler for ContactProtocolHandler {
         let storage = self.storage.clone();
         let event_tx = self.event_tx.clone();
         let gossip = self.gossip.clone();
+        let local_did = self.local_did.clone();
 
         async move {
             debug!(peer = %conn.remote_id(), "Router accepting contact connection");
 
             // Process the connection fully before returning
-            if let Err(e) = Self::handle_connection(conn, storage, event_tx, gossip).await {
+            if let Err(e) = Self::handle_connection(conn, storage, event_tx, gossip, local_did).await {
                 error!(error = ?e, "Failed to handle contact connection");
                 return Err(iroh::protocol::AcceptError::from_err(e));
             }

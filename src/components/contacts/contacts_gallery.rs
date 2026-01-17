@@ -1,17 +1,20 @@
 //! Contacts Gallery Component
 //!
 //! Grid display of all accepted contacts with real-time online/offline status.
+//! Now uses the unified Peer type for consistency with the rest of the system.
 
 use dioxus::prelude::*;
 use syncengine_core::sync::ContactEvent;
-use syncengine_core::types::contact::{ContactInfo, ContactStatus};
+use syncengine_core::types::contact::ContactStatus;
+use syncengine_core::{Peer, PeerStatus};
 
 use super::ContactCard;
 use crate::context::use_engine;
 
 /// Contacts Gallery
 ///
-/// Displays all accepted contacts in a grid layout with real-time status updates.
+/// Displays all accepted contacts (peers with is_contact() == true) in a grid layout
+/// with real-time status updates.
 ///
 /// # Example
 ///
@@ -23,7 +26,7 @@ use crate::context::use_engine;
 #[component]
 pub fn ContactsGallery() -> Element {
     let engine = use_engine();
-    let mut contacts = use_signal(|| Vec::<ContactInfo>::new());
+    let mut contacts = use_signal(|| Vec::<Peer>::new());
     let mut loading = use_signal(|| true);
 
     // Load contacts on mount and poll for updates
@@ -34,7 +37,8 @@ pub fn ContactsGallery() -> Element {
                 let guard = shared.read().await;
 
                 if let Some(ref eng) = *guard {
-                    match eng.list_contacts() {
+                    // Use the new unified peer list, filtered to contacts only
+                    match eng.list_peer_contacts() {
                         Ok(loaded_contacts) => {
                             contacts.set(loaded_contacts);
                         }
@@ -66,16 +70,25 @@ pub fn ContactsGallery() -> Element {
                         while let Ok(event) = event_rx.recv().await {
                             match event {
                                 ContactEvent::ContactAccepted { contact } => {
-                                    contacts.write().push(contact);
+                                    // Convert ContactInfo to Peer for the list
+                                    // We'll reload the full list to get the proper Peer object
+                                    let shared = engine();
+                                    let guard = shared.read().await;
+                                    if let Some(ref eng) = *guard {
+                                        if let Ok(updated_list) = eng.list_peer_contacts() {
+                                            contacts.set(updated_list);
+                                        }
+                                    }
+                                    let _ = contact; // Suppress unused warning
                                 }
                                 ContactEvent::ContactOnline { did } => {
-                                    if let Some(c) = contacts.write().iter_mut().find(|c| c.peer_did == did) {
-                                        c.status = ContactStatus::Online;
+                                    if let Some(c) = contacts.write().iter_mut().find(|c| c.did.as_deref() == Some(&did)) {
+                                        c.status = PeerStatus::Online;
                                     }
                                 }
                                 ContactEvent::ContactOffline { did } => {
-                                    if let Some(c) = contacts.write().iter_mut().find(|c| c.peer_did == did) {
-                                        c.status = ContactStatus::Offline;
+                                    if let Some(c) = contacts.write().iter_mut().find(|c| c.did.as_deref() == Some(&did)) {
+                                        c.status = PeerStatus::Offline;
                                     }
                                 }
                                 _ => {}
@@ -101,7 +114,7 @@ pub fn ContactsGallery() -> Element {
     let contact_list = contacts();
     let online_count = contact_list
         .iter()
-        .filter(|c| matches!(c.status, ContactStatus::Online))
+        .filter(|c| matches!(c.status, PeerStatus::Online))
         .count();
 
     if contact_list.is_empty() {
@@ -128,11 +141,11 @@ pub fn ContactsGallery() -> Element {
 
             div { class: "contact-grid",
                 {contact_list.iter().enumerate().map(|(index, contact)| {
-                    let contact_did = contact.peer_did.clone();
-                    let contact_did_for_click = contact_did.clone(); // Clone for closure
-                    let contact_name_display = contact.profile.display_name.clone();
-                    let contact_avatar_display = contact.profile.avatar_blob_id.clone();
-                    let is_online_display = matches!(contact.status, ContactStatus::Online);
+                    let contact_did = contact.did.clone().unwrap_or_else(|| format!("peer_{}", hex::encode(&contact.endpoint_id[..4])));
+                    let contact_did_for_click = contact_did.clone();
+                    let contact_name_display = contact.display_name();
+                    let contact_avatar_display = contact.profile.as_ref().and_then(|p| p.avatar_blob_id.clone());
+                    let is_online_display = matches!(contact.status, PeerStatus::Online);
 
                     rsx! {
                         ContactCard {
