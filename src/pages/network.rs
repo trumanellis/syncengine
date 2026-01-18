@@ -9,6 +9,7 @@ use dioxus::prelude::*;
 use syncengine_core::{NetworkStats, Peer, PeerStatus, PinnerInfo, ProfilePin};
 
 use crate::app::Route;
+use crate::components::{NavHeader, NavLocation};
 use crate::context::{use_engine, use_engine_ready};
 
 /// Format timestamp as relative time string.
@@ -90,17 +91,14 @@ pub fn Network() -> Element {
 
     rsx! {
         div { class: "network-page",
-            // Header with back navigation
-            header { class: "network-header",
-                Link {
-                    to: Route::Field {},
-                    button {
-                        class: "back-link",
-                        title: "Return to Field",
-                        "← field"
-                    }
-                }
-                h1 { class: "network-title", "The Network" }
+            // Sacred Navigation Console
+            NavHeader {
+                current: NavLocation::Network,
+                status: if online_count > 0 {
+                    Some(format!("{} online · {} total", online_count, total_people))
+                } else {
+                    Some(format!("{} connections", total_people))
+                },
             }
 
             if loading() {

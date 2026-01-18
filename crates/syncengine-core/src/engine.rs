@@ -150,6 +150,10 @@ pub struct SyncEngine {
     sync_rx: tokio::sync::mpsc::UnboundedReceiver<SyncChannelMessage>,
     /// Sender for sync messages (cloned to background tasks)
     sync_tx: tokio::sync::mpsc::UnboundedSender<SyncChannelMessage>,
+    /// Persistent sender for the global profile topic.
+    /// Used to broadcast profile announcements to contacts.
+    /// Initialized by start_profile_sync(), used by announce_profile() and related methods.
+    profile_gossip_sender: Option<TopicSender>,
 }
 
 impl SyncEngine {
@@ -200,6 +204,7 @@ impl SyncEngine {
             contact_event_tx,
             sync_rx,
             sync_tx,
+            profile_gossip_sender: None,
         };
 
         // Initialize the Private realm if it doesn't exist
@@ -1236,11 +1241,24 @@ impl SyncEngine {
 
         // Ensure identity is initialized
         self.init_identity()?;
+
+        // Ensure our own profile is signed and pinned (required for announcements to work)
+        // This must be done BEFORE we borrow keypair to avoid borrow checker issues
+        // This is idempotent - if already signed, it just updates the pin
+        if let Err(e) = self.sign_and_pin_own_profile() {
+            warn!("Failed to sign and pin own profile: {}", e);
+        } else {
+            debug!("Own profile signed and pinned for contact exchange announcements");
+        }
+
         let keypair = self
             .identity
             .as_ref()
             .ok_or_else(|| SyncError::Identity("Identity not initialized".to_string()))?;
         let did = Did::from_public_key(&keypair.public_key());
+
+        // Clone gossip for the profile announcer before moving into ContactManager
+        let gossip_for_announcer = gossip.clone();
 
         // Create contact manager (shares event_tx with ContactProtocolHandler)
         let manager = Arc::new(ContactManager::new(
@@ -1254,8 +1272,109 @@ impl SyncEngine {
         // Start the auto-accept task for our own invites
         manager.clone().start_auto_accept_task();
 
+        // Start the contact accepted profile announcer
+        // This broadcasts our profile when a contact is accepted, triggering auto-pinning
+        Self::start_contact_accepted_profile_announcer(
+            self.contact_event_tx.subscribe(),
+            gossip_for_announcer,
+            self.storage.clone(),
+        );
+
+        // Start profile sync listener to process incoming announcements (enables auto-pinning)
+        // This uses empty bootstrap peers since we discover peers through contact exchange
+        if let Err(e) = self.start_profile_sync(vec![]).await {
+            warn!("Failed to start profile sync listener: {}", e);
+        }
+
         self.contact_manager = Some(manager.clone());
         Ok(manager)
+    }
+
+    /// Start a background task that announces our profile when a contact is accepted.
+    ///
+    /// When the ContactAccepted event fires (either direction - we accept or they accept us),
+    /// this broadcasts our signed profile to the global profile topic. The peer's profile
+    /// sync listener will receive it and auto-pin because we're now contacts.
+    ///
+    /// This enables mutual profile pinning after contact exchange completes.
+    fn start_contact_accepted_profile_announcer(
+        mut event_rx: broadcast::Receiver<ContactEvent>,
+        gossip: Arc<GossipSync>,
+        storage: Storage,
+    ) {
+        tokio::spawn(async move {
+            loop {
+                match event_rx.recv().await {
+                    Ok(ContactEvent::ContactAccepted { contact }) => {
+                        info!(peer_did = %contact.peer_did, "Contact accepted, announcing profile for auto-pinning");
+
+                        // Load our signed profile from storage
+                        match storage.get_own_pinned_profile() {
+                            Ok(Some(pin)) => {
+                                let signed_profile = pin.signed_profile;
+
+                                // Subscribe to the global profile topic and broadcast
+                                let topic_id = crate::sync::global_profile_topic();
+                                match gossip.subscribe_split(topic_id, vec![]).await {
+                                    Ok((sender, _receiver)) => {
+                                        // Create announcement (no avatar ticket needed for basic pinning)
+                                        let announcement = crate::sync::ProfileGossipMessage::announce(
+                                            signed_profile,
+                                            None,
+                                        );
+                                        match announcement.to_bytes() {
+                                            Ok(bytes) => {
+                                                if let Err(e) = sender.broadcast(bytes).await {
+                                                    warn!(
+                                                        peer_did = %contact.peer_did,
+                                                        error = %e,
+                                                        "Failed to broadcast profile after contact accepted"
+                                                    );
+                                                } else {
+                                                    info!(
+                                                        peer_did = %contact.peer_did,
+                                                        "Profile announced after contact accepted - peer should auto-pin"
+                                                    );
+                                                }
+                                            }
+                                            Err(e) => {
+                                                warn!(
+                                                    error = %e,
+                                                    "Failed to serialize profile announcement"
+                                                );
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        warn!(
+                                            error = %e,
+                                            "Failed to subscribe to profile topic for announcement"
+                                        );
+                                    }
+                                }
+                            }
+                            Ok(None) => {
+                                warn!("No own profile found, cannot announce after contact accepted");
+                            }
+                            Err(e) => {
+                                warn!(error = %e, "Failed to load own profile for announcement");
+                            }
+                        }
+                    }
+                    Ok(_) => {} // Ignore other contact events
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        debug!("Contact event receiver lagged by {} messages", n);
+                        continue;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        debug!("Contact event channel closed, stopping profile announcer");
+                        break;
+                    }
+                }
+            }
+        });
+
+        info!("Contact accepted profile announcer started");
     }
 
     /// Start the peer reconnection background task
@@ -2864,24 +2983,7 @@ impl SyncEngine {
         self.storage.count_pinners()
     }
 
-    /// Record that a peer has pinned our profile (from PinAcknowledgment).
-    ///
-    /// This is called when we receive a `PinAcknowledgment` gossip message.
-    pub fn record_pinner(
-        &self,
-        pinner_did: &str,
-        pinned_at: i64,
-        relationship: &str,
-    ) -> Result<(), SyncError> {
-        self.storage.upsert_pinner(pinner_did, pinned_at, relationship)
-    }
-
-    /// Remove a pinner record (from PinRemoval message).
-    ///
-    /// Called when we receive a `PinRemoval` gossip message.
-    pub fn remove_pinner(&self, pinner_did: &str) -> Result<(), SyncError> {
-        self.storage.delete_pinner(pinner_did)
-    }
+    // Note: record_pinner() and remove_pinner() removed - Indra's Net derives pinners from contacts
 
     /// Get network statistics for the Network page.
     ///
@@ -3092,12 +3194,13 @@ impl SyncEngine {
         // Ensure we have a signed profile
         let signed = self.sign_and_pin_own_profile()?;
 
-        // Ensure gossip is initialized
-        let gossip = self.ensure_gossip().await?;
-
-        // Get or create the profile topic subscription
-        let topic_id = crate::sync::global_profile_topic();
-        let (sender, _receiver) = gossip.subscribe_split(topic_id, vec![]).await?;
+        // Use the PERSISTENT sender from start_profile_sync() instead of creating a new subscription.
+        // A new subscription has no connected peers yet, so broadcasts would go nowhere.
+        let sender = self.profile_gossip_sender.as_ref().ok_or_else(|| {
+            SyncError::Network(
+                "Profile sync not initialized. Call start_profile_sync() first.".to_string(),
+            )
+        })?;
 
         // Create and send announcement
         let announcement = crate::sync::ProfileGossipMessage::announce(signed, avatar_ticket);
@@ -3107,15 +3210,57 @@ impl SyncEngine {
             SyncError::Network(format!("Failed to broadcast profile announcement: {}", e))
         })?;
 
-        info!("Profile announcement broadcast to global topic");
+        info!("Profile announcement broadcast via persistent sender");
         Ok(())
     }
 
-    /// Start listening for profile announcements on the global profile topic.
+    // Note: send_pin_acknowledgment() and send_pin_removal() removed - Indra's Net derives pinners from contacts
+    // In Indra's Net, contact acceptance = implicit mutual mirroring. No explicit acknowledgment needed.
+
+    /// Update our own profile and broadcast the change to peers.
     ///
-    /// This subscribes to the global profile topic and spawns a background task
-    /// to process incoming profile announcements. When a profile announcement
-    /// is received from a contact or realm member, their profile is auto-pinned.
+    /// This is the main method to use when the user edits their profile.
+    /// It saves the profile locally and broadcasts an announcement so peers
+    /// who have pinned our profile can update their copy.
+    ///
+    /// # Arguments
+    ///
+    /// * `profile` - The updated profile data
+    /// * `avatar_ticket` - Optional blob ticket for avatar (if avatar changed)
+    ///
+    /// # Returns
+    ///
+    /// Ok(()) if profile was saved and broadcast successfully.
+    pub async fn update_own_profile(
+        &mut self,
+        profile: &crate::types::UserProfile,
+        avatar_ticket: Option<String>,
+    ) -> Result<(), SyncError> {
+        // Save the profile locally
+        self.storage.save_profile(profile)?;
+
+        // Sign, pin, and broadcast the update
+        self.announce_profile(avatar_ticket).await?;
+
+        info!(peer_id = %profile.peer_id, "Profile updated and broadcast");
+        Ok(())
+    }
+
+    /// Start listening for profile announcements.
+    ///
+    /// This method sets up profile sync by subscribing to:
+    /// 1. **Our own profile topic** (derived from our DID) - for broadcasting our profile updates
+    /// 2. **Global profile topic** (legacy) - for backwards compatibility during migration
+    ///
+    /// When a profile announcement is received from a contact, their profile is auto-pinned.
+    /// Contacts also subscribe to our per-peer topic via `finalize_contact()`.
+    ///
+    /// # Per-Peer Topic Architecture
+    ///
+    /// Each peer has their own profile topic: `BLAKE3("sync-profile" || peer_did)`
+    /// - Only contacts receive your updates (targeted, not global)
+    /// - Scalability: O(contacts) messages instead of O(all users)
+    /// - Privacy: Non-contacts don't receive your profile updates
     ///
     /// # Arguments
     ///
@@ -3128,11 +3273,34 @@ impl SyncEngine {
         &mut self,
         bootstrap_peers: Vec<iroh::PublicKey>,
     ) -> Result<(), SyncError> {
+        // Get our DID for processing messages directed at us
+        let our_did = self
+            .did()
+            .ok_or_else(|| SyncError::Identity("Identity not initialized".to_string()))?
+            .to_string();
+
         // Ensure gossip is initialized
         let gossip = self.ensure_gossip().await?;
 
-        let topic_id = crate::sync::global_profile_topic();
-        let (sender, mut receiver) = gossip.subscribe_split(topic_id, bootstrap_peers).await?;
+        // Subscribe to our OWN profile topic (for broadcasting)
+        // Contacts subscribe to this topic via finalize_contact() to receive our updates
+        let own_topic_id = crate::sync::derive_profile_topic(&our_did);
+        let (sender, _own_receiver) = gossip.subscribe_split(own_topic_id, vec![]).await?;
+
+        // Store sender for reuse by announce_profile() and other profile broadcast methods.
+        // This allows all profile announcements to use the same persistent subscription.
+        self.profile_gossip_sender = Some(sender.clone());
+
+        info!(
+            did = %our_did,
+            ?own_topic_id,
+            "Subscribed to own profile topic for broadcasting"
+        );
+
+        // Also subscribe to the global topic for backwards compatibility
+        // This can be removed once all nodes are using per-peer topics
+        let global_topic_id = crate::sync::global_profile_topic();
+        let (_global_sender, mut receiver) = gossip.subscribe_split(global_topic_id, bootstrap_peers).await?;
 
         // Clone dependencies for the background task
         let storage = self.storage.clone();
@@ -3151,78 +3319,117 @@ impl SyncEngine {
                         // Try to parse as profile gossip message
                         match crate::sync::ProfileGossipMessage::from_bytes(&msg.content) {
                             Ok(profile_msg) => {
-                                // Process the message for auto-pinning
-                                if let crate::sync::ProfileGossipMessage::Announce {
-                                    signed_profile,
-                                    avatar_ticket,
-                                } = &profile_msg
-                                {
-                                    // Verify signature
-                                    if !signed_profile.verify() {
-                                        warn!("Received profile announcement with invalid signature");
-                                        continue;
-                                    }
+                                match profile_msg {
+                                    crate::sync::ProfileGossipMessage::Announce {
+                                        signed_profile,
+                                        avatar_ticket,
+                                    } => {
+                                        // Verify signature
+                                        if !signed_profile.verify() {
+                                            warn!("Received profile announcement with invalid signature");
+                                            continue;
+                                        }
 
-                                    let signer_did = signed_profile.did().to_string();
+                                        let signer_did = signed_profile.did().to_string();
 
-                                    // Check if we should auto-pin (is a contact)
-                                    if let Ok(contacts) = storage.list_contacts() {
-                                        let is_contact = contacts.iter().any(|c| c.peer_did == signer_did);
+                                        // Check if we should auto-pin (is a contact)
+                                        if let Ok(contacts) = storage.list_contacts() {
+                                            let is_contact = contacts.iter().any(|c| c.peer_did == signer_did);
 
-                                        if is_contact {
-                                            // Parse avatar ticket and check if we need to download
-                                            let avatar_hash = if let Some(ticket_str) = avatar_ticket {
-                                                if let Ok(blob_ticket) = ticket_str.parse::<iroh_blobs::ticket::BlobTicket>() {
-                                                    let hash = blob_ticket.hash();
+                                            if is_contact {
+                                                // Parse avatar ticket and check if we need to download
+                                                let avatar_hash = if let Some(ticket_str) = &avatar_ticket {
+                                                    if let Ok(blob_ticket) = ticket_str.parse::<iroh_blobs::ticket::BlobTicket>() {
+                                                        let hash = blob_ticket.hash();
 
-                                                    // Check if we already have this avatar
-                                                    let has_blob = blob_manager.has_blob(&hash).await.unwrap_or(false);
+                                                        // Check if we already have this avatar
+                                                        let has_blob = blob_manager.has_blob(&hash).await.unwrap_or(false);
 
-                                                    if !has_blob {
-                                                        // Download avatar via P2P
-                                                        match blob_manager.download_blob(&blob_ticket, &endpoint).await {
-                                                            Ok(downloaded_hash) => {
-                                                                info!(did = %signer_did, ?downloaded_hash, "Downloaded avatar via P2P");
-                                                            }
-                                                            Err(e) => {
-                                                                warn!(did = %signer_did, error = %e, "Failed to download avatar via P2P");
+                                                        if !has_blob {
+                                                            // Download avatar via P2P
+                                                            match blob_manager.download_blob(&blob_ticket, &endpoint).await {
+                                                                Ok(downloaded_hash) => {
+                                                                    info!(did = %signer_did, ?downloaded_hash, "Downloaded avatar via P2P");
+                                                                }
+                                                                Err(e) => {
+                                                                    warn!(did = %signer_did, error = %e, "Failed to download avatar via P2P");
+                                                                }
                                                             }
                                                         }
-                                                    }
 
-                                                    Some(*hash.as_bytes())
+                                                        Some(*hash.as_bytes())
+                                                    } else {
+                                                        None
+                                                    }
                                                 } else {
                                                     None
-                                                }
-                                            } else {
-                                                None
-                                            };
+                                                };
 
-                                            // Check if already pinned
-                                            if let Ok(Some(mut existing)) = storage.load_pinned_profile(&signer_did) {
-                                                // Update existing pin
-                                                if existing.update_profile(signed_profile.clone()) {
-                                                    if let Some(hash) = avatar_hash {
-                                                        existing.avatar_hash = Some(hash);
+                                                // Check if already pinned
+                                                let is_new_pin = storage.load_pinned_profile(&signer_did)
+                                                    .ok()
+                                                    .flatten()
+                                                    .is_none();
+
+                                                if let Ok(Some(mut existing)) = storage.load_pinned_profile(&signer_did) {
+                                                    // Update existing pin
+                                                    if existing.update_profile(signed_profile.clone()) {
+                                                        if let Some(hash) = avatar_hash {
+                                                            existing.avatar_hash = Some(hash);
+                                                        }
+                                                        let _ = storage.save_pinned_profile(&existing);
+                                                        debug!(did = %signer_did, "Updated pinned profile from gossip");
                                                     }
-                                                    let _ = storage.save_pinned_profile(&existing);
-                                                    debug!(did = %signer_did, "Updated pinned profile from gossip");
+                                                } else {
+                                                    // Create new pin
+                                                    let mut pin = crate::types::ProfilePin::new(
+                                                        signer_did.clone(),
+                                                        signed_profile.clone(),
+                                                        crate::types::PinRelationship::Contact,
+                                                    );
+                                                    if let Some(hash) = avatar_hash {
+                                                        pin.avatar_hash = Some(hash);
+                                                    }
+                                                    let config = crate::storage::PinningConfig::default();
+                                                    let _ = storage.save_pinned_profile_with_limits(&pin, &config);
+                                                    debug!(did = %signer_did, "Auto-pinned contact profile from gossip");
                                                 }
-                                            } else {
-                                                // Create new pin
-                                                let mut pin = crate::types::ProfilePin::new(
-                                                    signer_did.clone(),
-                                                    signed_profile.clone(),
-                                                    crate::types::PinRelationship::Contact,
-                                                );
-                                                if let Some(hash) = avatar_hash {
-                                                    pin.avatar_hash = Some(hash);
+
+                                                // Also update Peer.profile for UI display
+                                                // This keeps the unified Peer record in sync with profile changes
+                                                if let Ok(Some(mut peer)) = storage.load_peer_by_did(&signer_did) {
+                                                    peer.profile = Some(crate::types::ProfileSnapshot {
+                                                        display_name: signed_profile.profile.display_name.clone(),
+                                                        subtitle: signed_profile.profile.subtitle.clone(),
+                                                        avatar_blob_id: signed_profile.profile.avatar_blob_id.clone(),
+                                                        bio: crate::types::ProfileSnapshot::truncate_bio(&signed_profile.profile.bio),
+                                                    });
+                                                    if let Err(e) = storage.save_peer(&peer) {
+                                                        warn!(did = %signer_did, error = %e, "Failed to update Peer.profile");
+                                                    } else {
+                                                        info!(did = %signer_did, "Updated peer profile from topic");
+                                                    }
                                                 }
-                                                let config = crate::storage::PinningConfig::default();
-                                                let _ = storage.save_pinned_profile_with_limits(&pin, &config);
-                                                debug!(did = %signer_did, "Auto-pinned contact profile from gossip");
+
+                                                // Note: PinAcknowledgment removed - Indra's Net derives pinners from contacts
+                                                // In Indra's Net, contacts automatically mirror each other
+                                                if is_new_pin {
+                                                    debug!(target_did = %signer_did, "New profile pinned (implicit mirroring)");
+                                                }
                                             }
                                         }
+                                    }
+
+                                    // Note: PinAcknowledgment and PinRemoval handlers removed
+                                    // Indra's Net derives pinners from contacts instead
+
+                                    // Request and Response are for direct profile lookups
+                                    // They're handled by the profile processor in a different flow
+                                    crate::sync::ProfileGossipMessage::Request { .. } => {
+                                        debug!("Received profile request (handled by processor)");
+                                    }
+                                    crate::sync::ProfileGossipMessage::Response { .. } => {
+                                        debug!("Received profile response (handled by processor)");
                                     }
                                 }
                             }
@@ -3242,9 +3449,6 @@ impl SyncEngine {
 
             info!("Profile sync listener stopped");
         });
-
-        // Also announce our own profile to bootstrap the network
-        let _ = sender; // sender is dropped here, but the task has its own receiver
 
         info!("Profile sync started on global topic");
         Ok(())

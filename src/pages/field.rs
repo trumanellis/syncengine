@@ -9,7 +9,8 @@ use crate::components::IntentionData;
 
 use crate::app::Route;
 use crate::components::{
-    InvitePanel, JoinRealmModal, NetworkResonance, NetworkState, UnifiedFieldView,
+    InvitePanel, JoinRealmModal, NavHeader, NavLocation, NetworkResonance, NetworkState,
+    UnifiedFieldView,
 };
 use crate::context::{use_engine, use_engine_ready};
 
@@ -321,37 +322,27 @@ pub fn Field() -> Element {
     // Render
     rsx! {
         div { class: "app-shell",
-            // Header
-            header { class: "app-header",
-                h1 { class: "app-title", "Synchronicity Engine" }
-
-                // Header actions
-                div { class: "header-actions",
-                    button {
-                        class: "header-btn join-btn",
-                        onclick: move |_| show_join_modal.set(true),
-                        "Join Realm"
+            // Sacred Navigation Console
+            NavHeader {
+                current: NavLocation::Field,
+                status: {
+                    // Use the sacred label from network state
+                    let state = network_state();
+                    if state.label() != "field dormant" {
+                        Some(state.label())
+                    } else {
+                        None
                     }
+                },
+            }
 
-                    // Network navigation button
-                    Link {
-                        to: Route::Network {},
-                        button {
-                            class: "profile-nav-button",
-                            title: "Network - View connected souls",
-                            "🌐"
-                        }
-                    }
-
-                    // Profile navigation button
-                    Link {
-                        to: Route::Profile {},
-                        button {
-                            class: "profile-nav-button",
-                            title: "Profile",
-                            "👤"
-                        }
-                    }
+            // Quick actions bar (below header)
+            div { class: "field-actions-bar",
+                button {
+                    class: "action-btn join-btn",
+                    onclick: move |_| show_join_modal.set(true),
+                    span { class: "action-icon", "⊕" }
+                    span { class: "action-text", "Join Realm" }
                 }
 
                 NetworkResonance { state: network_state(), debug_info: network_debug() }

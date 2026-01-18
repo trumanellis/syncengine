@@ -25,13 +25,50 @@ use crate::types::SignedProfile;
 /// The seed used to derive the global profile topic ID
 const PROFILE_TOPIC_SEED: &[u8] = b"syncengine:profiles:v1";
 
+/// The domain separator for per-peer profile topics
+const PROFILE_TOPIC_DOMAIN: &[u8] = b"sync-profile";
+
 /// Get the global profile topic ID.
 ///
 /// All profile announcements and requests use this single topic.
 /// The topic ID is deterministic and identical across all nodes.
+///
+/// **DEPRECATED**: Use `derive_profile_topic()` for per-peer topics instead.
+/// This global topic is kept for backwards compatibility during migration.
 pub fn global_profile_topic() -> iroh_gossip::proto::TopicId {
     let hash = blake3::hash(PROFILE_TOPIC_SEED);
     iroh_gossip::proto::TopicId::from_bytes(*hash.as_bytes())
+}
+
+/// Derive a profile topic for a specific peer's profile broadcasts.
+///
+/// Each peer has their own profile topic where they broadcast updates.
+/// Contacts subscribe to this topic to receive profile changes.
+///
+/// # Algorithm
+///
+/// ```text
+/// BLAKE3("sync-profile" || peer_did)
+/// ```
+///
+/// # Benefits
+///
+/// - **Targeted delivery**: Only contacts receive updates
+/// - **Scalability**: O(contacts) messages instead of O(all users)
+/// - **Privacy**: Profile updates don't go to non-contacts
+/// - **Ownership**: Each peer controls their profile topic
+///
+/// # Example
+///
+/// ```ignore
+/// let topic = derive_profile_topic("did:sync:abc123");
+/// gossip.subscribe(topic, bootstrap_peers).await?;
+/// ```
+pub fn derive_profile_topic(did: &str) -> iroh_gossip::proto::TopicId {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(PROFILE_TOPIC_DOMAIN);
+    hasher.update(did.as_bytes());
+    iroh_gossip::proto::TopicId::from_bytes(*hasher.finalize().as_bytes())
 }
 
 /// Messages sent over the profile gossip topic.
@@ -74,32 +111,6 @@ pub enum ProfileGossipMessage {
         requester_did: String,
     },
 
-    /// Acknowledgment that a peer has pinned our profile
-    ///
-    /// Sent when a peer decides to pin our profile (e.g., after becoming a contact
-    /// or joining a shared realm). This enables bidirectional awareness - we know
-    /// who is carrying our data in the P2P network.
-    PinAcknowledgment {
-        /// DID of the peer who is pinning (the sender)
-        pinner_did: String,
-        /// DID of the profile being pinned (should be our DID)
-        target_did: String,
-        /// Unix timestamp when the pin was created
-        pinned_at: i64,
-        /// Relationship type: "contact", "realm_member", "manual"
-        relationship: String,
-    },
-
-    /// Notification that a peer has unpinned our profile
-    ///
-    /// Sent when a peer removes their pin (e.g., contact removed, left realm).
-    /// Allows us to update our "who pins me" list.
-    PinRemoval {
-        /// DID of the peer who unpinned (the sender)
-        pinner_did: String,
-        /// DID of the profile that was unpinned (should be our DID)
-        target_did: String,
-    },
 }
 
 impl ProfileGossipMessage {
@@ -132,33 +143,6 @@ impl ProfileGossipMessage {
         }
     }
 
-    /// Create a pin acknowledgment message.
-    ///
-    /// Sent to notify a peer that we have pinned their profile.
-    pub fn pin_acknowledgment(
-        pinner_did: impl Into<String>,
-        target_did: impl Into<String>,
-        pinned_at: i64,
-        relationship: impl Into<String>,
-    ) -> Self {
-        Self::PinAcknowledgment {
-            pinner_did: pinner_did.into(),
-            target_did: target_did.into(),
-            pinned_at,
-            relationship: relationship.into(),
-        }
-    }
-
-    /// Create a pin removal message.
-    ///
-    /// Sent to notify a peer that we have unpinned their profile.
-    pub fn pin_removal(pinner_did: impl Into<String>, target_did: impl Into<String>) -> Self {
-        Self::PinRemoval {
-            pinner_did: pinner_did.into(),
-            target_did: target_did.into(),
-        }
-    }
-
     /// Serialize the message to bytes.
     pub fn to_bytes(&self) -> Result<Vec<u8>, crate::SyncError> {
         postcard::to_allocvec(self).map_err(|e| crate::SyncError::Serialization(e.to_string()))
@@ -182,15 +166,11 @@ impl ProfileGossipMessage {
     /// - Announce: Always relevant (we might want to pin)
     /// - Request: Only if we might have the profile
     /// - Response: Only if we're the requester
-    /// - PinAcknowledgment: Only if we're the target (someone pinned our profile)
-    /// - PinRemoval: Only if we're the target (someone unpinned our profile)
     pub fn is_relevant_to(&self, our_did: &str) -> bool {
         match self {
             Self::Announce { .. } => true, // Always process announcements
             Self::Request { .. } => true,  // We might have the profile
             Self::Response { requester_did, .. } => requester_did == our_did,
-            Self::PinAcknowledgment { target_did, .. } => target_did == our_did,
-            Self::PinRemoval { target_did, .. } => target_did == our_did,
         }
     }
 }
@@ -304,41 +284,6 @@ impl ProfileMessageHandler {
                 }
             }
 
-            ProfileGossipMessage::PinAcknowledgment {
-                pinner_did,
-                target_did,
-                pinned_at,
-                relationship,
-            } => {
-                // Only process if we're the target (someone pinned our profile)
-                if target_did != &self.our_did {
-                    debug!(target = %target_did, our_did = %self.our_did, "Ignoring PinAck for different target");
-                    return ProfileAction::Ignore;
-                }
-
-                debug!(pinner = %pinner_did, relationship = %relationship, "Received pin acknowledgment");
-                ProfileAction::RecordPinner {
-                    pinner_did: pinner_did.clone(),
-                    pinned_at: *pinned_at,
-                    relationship: relationship.clone(),
-                }
-            }
-
-            ProfileGossipMessage::PinRemoval {
-                pinner_did,
-                target_did,
-            } => {
-                // Only process if we're the target (someone unpinned our profile)
-                if target_did != &self.our_did {
-                    debug!(target = %target_did, our_did = %self.our_did, "Ignoring PinRemoval for different target");
-                    return ProfileAction::Ignore;
-                }
-
-                debug!(pinner = %pinner_did, "Received pin removal notification");
-                ProfileAction::RemovePinner {
-                    pinner_did: pinner_did.clone(),
-                }
-            }
         }
     }
 }
@@ -366,18 +311,6 @@ pub enum ProfileAction {
         signed_profile: SignedProfile,
         avatar_ticket: Option<String>,
     },
-
-    /// Record that a peer has pinned our profile (for "Souls Carrying Your Light")
-    RecordPinner {
-        pinner_did: String,
-        pinned_at: i64,
-        relationship: String,
-    },
-
-    /// Remove a pinner record (peer unpinned our profile)
-    RemovePinner {
-        pinner_did: String,
-    },
 }
 
 #[cfg(test)]
@@ -397,6 +330,28 @@ mod tests {
         let topic1 = global_profile_topic();
         let topic2 = global_profile_topic();
         assert_eq!(topic1, topic2);
+    }
+
+    #[test]
+    fn test_derive_profile_topic_is_deterministic() {
+        let did = "did:sync:abc123";
+        let topic1 = derive_profile_topic(did);
+        let topic2 = derive_profile_topic(did);
+        assert_eq!(topic1, topic2, "Same DID should produce same topic");
+    }
+
+    #[test]
+    fn test_derive_profile_topic_unique_per_peer() {
+        let alice_topic = derive_profile_topic("did:sync:alice");
+        let bob_topic = derive_profile_topic("did:sync:bob");
+        assert_ne!(alice_topic, bob_topic, "Different DIDs should produce different topics");
+    }
+
+    #[test]
+    fn test_derive_profile_topic_differs_from_global() {
+        let per_peer = derive_profile_topic("did:sync:test");
+        let global = global_profile_topic();
+        assert_ne!(per_peer, global, "Per-peer topic should differ from global topic");
     }
 
     #[test]
@@ -594,129 +549,4 @@ mod tests {
         assert!(matches!(action, ProfileAction::Ignore));
     }
 
-    #[test]
-    fn test_pin_acknowledgment_message_serialization() {
-        let msg = ProfileGossipMessage::pin_acknowledgment(
-            "did:sync:pinner",
-            "did:sync:target",
-            1234567890,
-            "contact",
-        );
-
-        let bytes = msg.to_bytes().unwrap();
-        let recovered = ProfileGossipMessage::from_bytes(&bytes).unwrap();
-
-        match recovered {
-            ProfileGossipMessage::PinAcknowledgment {
-                pinner_did,
-                target_did,
-                pinned_at,
-                relationship,
-            } => {
-                assert_eq!(pinner_did, "did:sync:pinner");
-                assert_eq!(target_did, "did:sync:target");
-                assert_eq!(pinned_at, 1234567890);
-                assert_eq!(relationship, "contact");
-            }
-            _ => panic!("Expected PinAcknowledgment message"),
-        }
-    }
-
-    #[test]
-    fn test_pin_removal_message_serialization() {
-        let msg = ProfileGossipMessage::pin_removal("did:sync:pinner", "did:sync:target");
-
-        let bytes = msg.to_bytes().unwrap();
-        let recovered = ProfileGossipMessage::from_bytes(&bytes).unwrap();
-
-        match recovered {
-            ProfileGossipMessage::PinRemoval {
-                pinner_did,
-                target_did,
-            } => {
-                assert_eq!(pinner_did, "did:sync:pinner");
-                assert_eq!(target_did, "did:sync:target");
-            }
-            _ => panic!("Expected PinRemoval message"),
-        }
-    }
-
-    #[test]
-    fn test_pin_acknowledgment_relevance() {
-        let pin_ack =
-            ProfileGossipMessage::pin_acknowledgment("did:sync:pinner", "did:sync:me", 123, "contact");
-
-        // Relevant to the target
-        assert!(pin_ack.is_relevant_to("did:sync:me"));
-        // Not relevant to others
-        assert!(!pin_ack.is_relevant_to("did:sync:other"));
-    }
-
-    #[test]
-    fn test_pin_removal_relevance() {
-        let pin_removal = ProfileGossipMessage::pin_removal("did:sync:pinner", "did:sync:me");
-
-        // Relevant to the target
-        assert!(pin_removal.is_relevant_to("did:sync:me"));
-        // Not relevant to others
-        assert!(!pin_removal.is_relevant_to("did:sync:other"));
-    }
-
-    #[test]
-    fn test_handler_processes_pin_acknowledgment_for_us() {
-        let handler = ProfileMessageHandler::new("did:sync:me");
-
-        let msg =
-            ProfileGossipMessage::pin_acknowledgment("did:sync:alice", "did:sync:me", 1234567890, "contact");
-        let action = handler.process_message(&msg);
-
-        match action {
-            ProfileAction::RecordPinner {
-                pinner_did,
-                pinned_at,
-                relationship,
-            } => {
-                assert_eq!(pinner_did, "did:sync:alice");
-                assert_eq!(pinned_at, 1234567890);
-                assert_eq!(relationship, "contact");
-            }
-            _ => panic!("Expected RecordPinner action"),
-        }
-    }
-
-    #[test]
-    fn test_handler_ignores_pin_acknowledgment_for_others() {
-        let handler = ProfileMessageHandler::new("did:sync:me");
-
-        let msg =
-            ProfileGossipMessage::pin_acknowledgment("did:sync:alice", "did:sync:other", 1234567890, "contact");
-        let action = handler.process_message(&msg);
-
-        assert!(matches!(action, ProfileAction::Ignore));
-    }
-
-    #[test]
-    fn test_handler_processes_pin_removal_for_us() {
-        let handler = ProfileMessageHandler::new("did:sync:me");
-
-        let msg = ProfileGossipMessage::pin_removal("did:sync:alice", "did:sync:me");
-        let action = handler.process_message(&msg);
-
-        match action {
-            ProfileAction::RemovePinner { pinner_did } => {
-                assert_eq!(pinner_did, "did:sync:alice");
-            }
-            _ => panic!("Expected RemovePinner action"),
-        }
-    }
-
-    #[test]
-    fn test_handler_ignores_pin_removal_for_others() {
-        let handler = ProfileMessageHandler::new("did:sync:me");
-
-        let msg = ProfileGossipMessage::pin_removal("did:sync:alice", "did:sync:other");
-        let action = handler.process_message(&msg);
-
-        assert!(matches!(action, ProfileAction::Ignore));
-    }
 }

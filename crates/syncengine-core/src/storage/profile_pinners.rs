@@ -1,61 +1,66 @@
-//! Profile Pinners Storage - Track peers who are pinning OUR profile
+//! Profile Pinners - Indra's Net Implicit Mirroring
 //!
-//! This is the reverse index of pinned_profiles. While pinned_profiles tracks
-//! profiles WE pin, profile_pinners tracks peers who pin US.
+//! In Indra's Net, each jewel reflects all other jewels. Mirroring is implicit,
+//! not announced. Being a contact IS the acknowledgment of mutual mirroring.
 //!
-//! This enables the "Souls Carrying Your Light" feature in the Network page,
-//! showing users who is caching their profile for P2P redundancy.
+//! This module provides the `PinnerInfo` type for UI compatibility, but the
+//! actual pinner data is derived from contacts - no separate storage needed.
+//!
+//! # Philosophy
+//!
+//! Previous approach (broken):
+//! - Send PinAcknowledgment messages via gossip
+//! - Store pinners in a separate table
+//! - Bug: Messages sent to wrong topic, never received
+//!
+//! Indra's Net approach (current):
+//! - Contact acceptance = mutual mirroring agreement
+//! - Pinner count = contact count
+//! - No explicit acknowledgment messages needed
+//!
+//! # Benefits
+//!
+//! 1. **Simpler**: No complex acknowledgment protocol
+//! 2. **Reliable**: No gossip messages that can be lost
+//! 3. **Consistent**: Pinner count always matches contacts
+//! 4. **Philosophical**: Aligns with mutual reflection principle
 
-use crate::error::SyncError;
-use redb::{ReadableTable, TableDefinition};
 use serde::{Deserialize, Serialize};
 
+use crate::types::contact::ContactInfo;
 use super::Storage;
+use crate::error::SyncError;
 
-/// Table for storing profile pinners (key: pinner DID, value: serialized PinnerInfo)
-pub(crate) const PROFILE_PINNERS_TABLE: TableDefinition<&str, &[u8]> =
-    TableDefinition::new("profile_pinners");
-
-/// Information about a peer who is pinning our profile.
+/// Information about a peer who is mirroring your profile.
 ///
-/// This is received via PinAcknowledgment gossip messages when peers
-/// decide to pin our profile (e.g., after becoming contacts or joining
-/// a shared realm).
+/// In Indra's Net, contacts automatically mirror each other's profiles.
+/// This struct is derived from contact information for UI display.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PinnerInfo {
-    /// DID of the peer who is pinning our profile
+    /// DID of the peer who is mirroring your profile
     pub pinner_did: String,
-    /// Unix timestamp when they started pinning
+    /// Unix timestamp when they became a contact (= started mirroring)
     pub pinned_at: i64,
-    /// Relationship type: "contact", "realm_member", "manual"
+    /// Relationship type: always "contact" in Indra's Net model
     pub relationship: String,
-    /// Unix timestamp when we last received confirmation they're still pinning
+    /// Unix timestamp when we last saw them online
     pub last_confirmed: i64,
-    /// Optional display name (if we have it from their profile)
+    /// Display name from their profile (if available)
     pub display_name: Option<String>,
 }
 
 impl PinnerInfo {
-    /// Create a new PinnerInfo from a received PinAcknowledgment.
-    pub fn new(pinner_did: String, pinned_at: i64, relationship: String) -> Self {
+    /// Create a PinnerInfo from a ContactInfo.
+    ///
+    /// In Indra's Net, contacts ARE pinners - mutual mirroring is implicit.
+    pub fn from_contact(contact: &ContactInfo) -> Self {
         Self {
-            pinner_did,
-            pinned_at,
-            relationship,
-            last_confirmed: chrono::Utc::now().timestamp(),
-            display_name: None,
+            pinner_did: contact.peer_did.clone(),
+            pinned_at: contact.accepted_at,
+            relationship: "contact".to_string(),
+            last_confirmed: contact.last_seen as i64,
+            display_name: Some(contact.profile.display_name.clone()),
         }
-    }
-
-    /// Update the last_confirmed timestamp.
-    pub fn confirm(&mut self) {
-        self.last_confirmed = chrono::Utc::now().timestamp();
-    }
-
-    /// Set the display name.
-    pub fn with_display_name(mut self, name: impl Into<String>) -> Self {
-        self.display_name = Some(name.into());
-        self
     }
 
     /// Check if this is a contact relationship.
@@ -70,68 +75,18 @@ impl PinnerInfo {
 }
 
 impl Storage {
-    /// Save a pinner record to the database.
+    /// List all peers who are mirroring your profile (Indra's Net).
     ///
-    /// Called when we receive a PinAcknowledgment message from a peer.
-    pub fn save_pinner(&self, pinner: &PinnerInfo) -> Result<(), SyncError> {
-        let db = self.db_handle();
-        let db_guard = db.read();
-        let write_txn = db_guard.begin_write()?;
-        {
-            let mut table = write_txn.open_table(PROFILE_PINNERS_TABLE)?;
-            let serialized = postcard::to_allocvec(pinner)
-                .map_err(|e| SyncError::Serialization(e.to_string()))?;
-            table.insert(pinner.pinner_did.as_str(), serialized.as_slice())?;
-        }
-        write_txn.commit()?;
-        Ok(())
-    }
-
-    /// Load a pinner by their DID.
-    pub fn load_pinner(&self, pinner_did: &str) -> Result<Option<PinnerInfo>, SyncError> {
-        let db = self.db_handle();
-        let db_guard = db.read();
-        let read_txn = db_guard.begin_read()?;
-        let table = read_txn.open_table(PROFILE_PINNERS_TABLE)?;
-
-        if let Some(data) = table.get(pinner_did)? {
-            let pinner: PinnerInfo = postcard::from_bytes(data.value())
-                .map_err(|e| SyncError::Serialization(e.to_string()))?;
-            Ok(Some(pinner))
-        } else {
-            Ok(None)
-        }
-    }
-
-    /// Delete a pinner record (when they unpin our profile).
-    pub fn delete_pinner(&self, pinner_did: &str) -> Result<(), SyncError> {
-        let db = self.db_handle();
-        let db_guard = db.read();
-        let write_txn = db_guard.begin_write()?;
-        {
-            let mut table = write_txn.open_table(PROFILE_PINNERS_TABLE)?;
-            table.remove(pinner_did)?;
-        }
-        write_txn.commit()?;
-        Ok(())
-    }
-
-    /// List all peers who are pinning our profile.
+    /// In Indra's Net, contacts automatically mirror each other.
+    /// This returns contacts transformed into PinnerInfo for UI compatibility.
     ///
     /// Returns a vector sorted by pinned_at (newest first).
     pub fn list_pinners(&self) -> Result<Vec<PinnerInfo>, SyncError> {
-        let db = self.db_handle();
-        let db_guard = db.read();
-        let read_txn = db_guard.begin_read()?;
-        let table = read_txn.open_table(PROFILE_PINNERS_TABLE)?;
-
-        let mut pinners = Vec::new();
-        for entry in table.iter()? {
-            let (_, value) = entry?;
-            let pinner: PinnerInfo = postcard::from_bytes(value.value())
-                .map_err(|e| SyncError::Serialization(e.to_string()))?;
-            pinners.push(pinner);
-        }
+        let contacts = self.list_contacts()?;
+        let mut pinners: Vec<PinnerInfo> = contacts
+            .iter()
+            .map(PinnerInfo::from_contact)
+            .collect();
 
         // Sort by pinned_at descending (newest first)
         pinners.sort_by(|a, b| b.pinned_at.cmp(&a.pinned_at));
@@ -139,53 +94,20 @@ impl Storage {
         Ok(pinners)
     }
 
-    /// List pinners filtered by relationship type.
-    pub fn list_pinners_by_relationship(&self, relationship: &str) -> Result<Vec<PinnerInfo>, SyncError> {
-        let all_pinners = self.list_pinners()?;
-        Ok(all_pinners
-            .into_iter()
-            .filter(|p| p.relationship == relationship)
-            .collect())
-    }
-
-    /// Count the number of peers pinning our profile.
-    pub fn count_pinners(&self) -> Result<usize, SyncError> {
-        Ok(self.list_pinners()?.len())
-    }
-
-    /// Update or create a pinner record.
+    /// Count the number of peers mirroring your profile (Indra's Net).
     ///
-    /// If the pinner already exists, updates last_confirmed.
-    /// If not, creates a new record.
-    pub fn upsert_pinner(
-        &self,
-        pinner_did: &str,
-        pinned_at: i64,
-        relationship: &str,
-    ) -> Result<(), SyncError> {
-        if let Some(mut existing) = self.load_pinner(pinner_did)? {
-            // Update existing pinner
-            existing.confirm();
-            // Update relationship if it changed (e.g., realm_member -> contact)
-            if existing.relationship != relationship {
-                existing.relationship = relationship.to_string();
-            }
-            self.save_pinner(&existing)
-        } else {
-            // Create new pinner
-            let pinner = PinnerInfo::new(
-                pinner_did.to_string(),
-                pinned_at,
-                relationship.to_string(),
-            );
-            self.save_pinner(&pinner)
-        }
+    /// In Indra's Net, your contact count IS your pinner count.
+    /// Contacts automatically mirror each other's profiles.
+    pub fn count_pinners(&self) -> Result<usize, SyncError> {
+        Ok(self.list_contacts()?.len())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::invite::NodeAddrBytes;
+    use crate::types::contact::{ContactStatus, ProfileSnapshot};
     use tempfile::tempdir;
 
     fn create_test_storage() -> Storage {
@@ -194,159 +116,84 @@ mod tests {
         Storage::new(&db_path).unwrap()
     }
 
-    #[test]
-    fn test_save_and_load_pinner() {
-        let storage = create_test_storage();
-        let pinner = PinnerInfo::new(
-            "did:sync:alice".to_string(),
-            1234567890,
-            "contact".to_string(),
-        );
-
-        storage.save_pinner(&pinner).unwrap();
-
-        let loaded = storage.load_pinner("did:sync:alice").unwrap();
-        assert!(loaded.is_some());
-        let loaded = loaded.unwrap();
-        assert_eq!(loaded.pinner_did, "did:sync:alice");
-        assert_eq!(loaded.pinned_at, 1234567890);
-        assert_eq!(loaded.relationship, "contact");
+    fn create_test_contact(did: &str, name: &str, accepted_at: i64) -> ContactInfo {
+        ContactInfo {
+            peer_did: did.to_string(),
+            peer_endpoint_id: [0u8; 32],
+            profile: ProfileSnapshot {
+                display_name: name.to_string(),
+                subtitle: None,
+                avatar_blob_id: None,
+                bio: String::new(),
+            },
+            node_addr: NodeAddrBytes {
+                node_id: [0u8; 32],
+                relay_url: None,
+                direct_addresses: Vec::new(),
+            },
+            contact_topic: [0u8; 32],
+            contact_key: [0u8; 32],
+            accepted_at,
+            last_seen: (accepted_at + 100) as u64,
+            status: ContactStatus::Offline,
+            is_favorite: false,
+        }
     }
 
     #[test]
-    fn test_load_nonexistent_pinner() {
-        let storage = create_test_storage();
-        let loaded = storage.load_pinner("did:sync:nonexistent").unwrap();
-        assert!(loaded.is_none());
+    fn test_pinner_info_from_contact() {
+        let contact = create_test_contact("did:sync:alice", "Alice", 1000);
+        let pinner = PinnerInfo::from_contact(&contact);
+
+        assert_eq!(pinner.pinner_did, "did:sync:alice");
+        assert_eq!(pinner.pinned_at, 1000);
+        assert_eq!(pinner.relationship, "contact");
+        assert_eq!(pinner.display_name, Some("Alice".to_string()));
+        assert!(pinner.is_contact());
+        assert!(!pinner.is_realm_member());
     }
 
     #[test]
-    fn test_delete_pinner() {
-        let storage = create_test_storage();
-        let pinner = PinnerInfo::new(
-            "did:sync:bob".to_string(),
-            1234567890,
-            "contact".to_string(),
-        );
-
-        storage.save_pinner(&pinner).unwrap();
-        assert!(storage.load_pinner("did:sync:bob").unwrap().is_some());
-
-        storage.delete_pinner("did:sync:bob").unwrap();
-        assert!(storage.load_pinner("did:sync:bob").unwrap().is_none());
-    }
-
-    #[test]
-    fn test_list_pinners() {
+    fn test_list_pinners_returns_contacts() {
         let storage = create_test_storage();
 
-        let pinner1 = PinnerInfo::new("did:sync:alice".to_string(), 100, "contact".to_string());
-        let pinner2 = PinnerInfo::new("did:sync:bob".to_string(), 200, "contact".to_string());
-        let pinner3 = PinnerInfo::new("did:sync:charlie".to_string(), 150, "realm_member".to_string());
+        // Add some contacts
+        let contact1 = create_test_contact("did:sync:alice", "Alice", 100);
+        let contact2 = create_test_contact("did:sync:bob", "Bob", 200);
+        let contact3 = create_test_contact("did:sync:charlie", "Charlie", 150);
 
-        storage.save_pinner(&pinner1).unwrap();
-        storage.save_pinner(&pinner2).unwrap();
-        storage.save_pinner(&pinner3).unwrap();
+        storage.save_contact(&contact1).unwrap();
+        storage.save_contact(&contact2).unwrap();
+        storage.save_contact(&contact3).unwrap();
 
+        // List pinners (should be contacts)
         let pinners = storage.list_pinners().unwrap();
         assert_eq!(pinners.len(), 3);
 
-        // Should be sorted by pinned_at descending
+        // Should be sorted by pinned_at (accepted_at) descending
         assert_eq!(pinners[0].pinner_did, "did:sync:bob"); // 200
         assert_eq!(pinners[1].pinner_did, "did:sync:charlie"); // 150
         assert_eq!(pinners[2].pinner_did, "did:sync:alice"); // 100
     }
 
     #[test]
-    fn test_list_pinners_by_relationship() {
+    fn test_count_pinners_equals_contact_count() {
         let storage = create_test_storage();
 
-        let pinner1 = PinnerInfo::new("did:sync:alice".to_string(), 100, "contact".to_string());
-        let pinner2 = PinnerInfo::new("did:sync:bob".to_string(), 200, "contact".to_string());
-        let pinner3 = PinnerInfo::new("did:sync:charlie".to_string(), 150, "realm_member".to_string());
-
-        storage.save_pinner(&pinner1).unwrap();
-        storage.save_pinner(&pinner2).unwrap();
-        storage.save_pinner(&pinner3).unwrap();
-
-        let contacts = storage.list_pinners_by_relationship("contact").unwrap();
-        assert_eq!(contacts.len(), 2);
-
-        let realm_members = storage.list_pinners_by_relationship("realm_member").unwrap();
-        assert_eq!(realm_members.len(), 1);
-    }
-
-    #[test]
-    fn test_count_pinners() {
-        let storage = create_test_storage();
-
+        // Initially no pinners
         assert_eq!(storage.count_pinners().unwrap(), 0);
 
-        let pinner1 = PinnerInfo::new("did:sync:alice".to_string(), 100, "contact".to_string());
-        let pinner2 = PinnerInfo::new("did:sync:bob".to_string(), 200, "contact".to_string());
+        // Add contacts
+        let contact1 = create_test_contact("did:sync:alice", "Alice", 100);
+        let contact2 = create_test_contact("did:sync:bob", "Bob", 200);
 
-        storage.save_pinner(&pinner1).unwrap();
+        storage.save_contact(&contact1).unwrap();
         assert_eq!(storage.count_pinners().unwrap(), 1);
 
-        storage.save_pinner(&pinner2).unwrap();
+        storage.save_contact(&contact2).unwrap();
         assert_eq!(storage.count_pinners().unwrap(), 2);
-    }
 
-    #[test]
-    fn test_upsert_pinner_creates_new() {
-        let storage = create_test_storage();
-
-        storage
-            .upsert_pinner("did:sync:alice", 1234567890, "contact")
-            .unwrap();
-
-        let loaded = storage.load_pinner("did:sync:alice").unwrap().unwrap();
-        assert_eq!(loaded.pinner_did, "did:sync:alice");
-        assert_eq!(loaded.pinned_at, 1234567890);
-    }
-
-    #[test]
-    fn test_upsert_pinner_updates_existing() {
-        let storage = create_test_storage();
-
-        // Create initial pinner
-        storage
-            .upsert_pinner("did:sync:alice", 1234567890, "realm_member")
-            .unwrap();
-
-        let original = storage.load_pinner("did:sync:alice").unwrap().unwrap();
-        let original_confirmed = original.last_confirmed;
-
-        // Small delay to ensure timestamp changes
-        std::thread::sleep(std::time::Duration::from_millis(10));
-
-        // Upsert with new relationship
-        storage
-            .upsert_pinner("did:sync:alice", 1234567890, "contact")
-            .unwrap();
-
-        let updated = storage.load_pinner("did:sync:alice").unwrap().unwrap();
-        assert_eq!(updated.relationship, "contact"); // Relationship updated
-        assert!(updated.last_confirmed >= original_confirmed); // Confirmed updated
-    }
-
-    #[test]
-    fn test_pinner_info_helpers() {
-        let pinner = PinnerInfo::new("did:sync:alice".to_string(), 100, "contact".to_string());
-        assert!(pinner.is_contact());
-        assert!(!pinner.is_realm_member());
-
-        let realm_pinner =
-            PinnerInfo::new("did:sync:bob".to_string(), 100, "realm_member:abc123".to_string());
-        assert!(!realm_pinner.is_contact());
-        assert!(realm_pinner.is_realm_member());
-    }
-
-    #[test]
-    fn test_pinner_info_with_display_name() {
-        let pinner = PinnerInfo::new("did:sync:alice".to_string(), 100, "contact".to_string())
-            .with_display_name("Alice");
-
-        assert_eq!(pinner.display_name, Some("Alice".to_string()));
+        // Verify contacts count matches - Indra's Net principle
+        assert_eq!(storage.list_contacts().unwrap().len(), storage.count_pinners().unwrap());
     }
 }

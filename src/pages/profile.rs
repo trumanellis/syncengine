@@ -14,6 +14,7 @@ use crate::components::contacts::{
 };
 use crate::components::images::AsyncImage;
 use crate::components::profile::QRSignature;
+use crate::components::{NavHeader, NavLocation};
 use crate::context::{use_engine, use_engine_ready};
 
 // Embed default profile image as base64 data URI
@@ -79,6 +80,13 @@ pub fn Profile() -> Element {
                     Ok(_) => {
                         tracing::info!("Profile saved successfully");
                         profile.set(Some(updated));
+
+                        // Broadcast the updated profile to contacts
+                        if let Err(e) = eng.announce_profile(None).await {
+                            tracing::error!("Failed to announce profile update: {:?}", e);
+                        } else {
+                            tracing::info!("Profile update broadcast to contacts");
+                        }
                     }
                     Err(e) => {
                         tracing::error!("Failed to save profile: {:?}", e);
@@ -90,17 +98,10 @@ pub fn Profile() -> Element {
 
     rsx! {
         div { class: "profile-page",
-            // Header with back navigation
-            header { class: "profile-header",
-                Link {
-                    to: Route::Field {},
-                    button {
-                        class: "back-link",
-                        title: "Return to Field",
-                        "← field"
-                    }
-                }
-                h1 { class: "profile-title", "Identity & Connections" }
+            // Sacred Navigation Console
+            NavHeader {
+                current: NavLocation::Profile,
+                status: None,
             }
 
             // Main content
