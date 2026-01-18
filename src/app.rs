@@ -53,6 +53,24 @@ pub fn App() -> Element {
                         tracing::error!("Failed to initialize identity: {}", e);
                     }
 
+                    // Perform immediate startup sync with known peers
+                    // Uses jitter to avoid the simultaneous wake-up problem
+                    match eng.startup_sync().await {
+                        Ok(result) => {
+                            tracing::info!(
+                                "Startup sync complete: {} succeeded, {} attempted, {} skipped (backoff), jitter={}ms",
+                                result.peers_succeeded,
+                                result.peers_attempted,
+                                result.peers_skipped_backoff,
+                                result.jitter_delay_ms
+                            );
+                        }
+                        Err(e) => {
+                            // Non-fatal - app continues, will retry via background task
+                            tracing::warn!("Startup sync failed (will retry in background): {}", e);
+                        }
+                    }
+
                     let shared = engine();
                     let mut guard = shared.write().await;
                     *guard = Some(eng);

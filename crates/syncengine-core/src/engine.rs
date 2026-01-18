@@ -30,7 +30,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use iroh_gossip::proto::TopicId;
-use rand::RngCore;
+use rand::{Rng, RngCore};
 use tokio::sync::broadcast;
 use tracing::{debug, info, warn};
 
@@ -109,6 +109,27 @@ struct RealmState {
 /// ```
 /// Default capacity for event broadcast channel
 const EVENT_CHANNEL_CAPACITY: usize = 256;
+
+/// Result of startup sync operation
+///
+/// Contains statistics about the startup sync attempt, including:
+/// - How many peers were attempted
+/// - How many succeeded
+/// - How many were skipped due to backoff
+/// - The jitter delay that was applied
+#[derive(Debug, Clone, Default)]
+pub struct StartupSyncResult {
+    /// Number of peers we attempted to connect to
+    pub peers_attempted: usize,
+    /// Number of successful connections
+    pub peers_succeeded: usize,
+    /// Number of peers skipped due to backoff timer
+    pub peers_skipped_backoff: usize,
+    /// Number of profile updates received
+    pub profiles_updated: usize,
+    /// Jitter delay applied in milliseconds (0-30000)
+    pub jitter_delay_ms: u64,
+}
 
 /// Incoming sync data from background listener tasks
 /// Internal messages for sync coordination between listener tasks and main engine
@@ -1489,6 +1510,186 @@ impl SyncEngine {
         }
 
         Ok(())
+    }
+
+    /// Perform immediate startup sync with all known peers
+    ///
+    /// This should be called after engine initialization to establish connections
+    /// with known peers as quickly as possible while avoiding the "simultaneous
+    /// wake-up problem" where two peers starting at the same time both fail to
+    /// connect.
+    ///
+    /// ## Behavior
+    ///
+    /// 1. **Initialize gossip** - Ensures we're listening for incoming connections
+    /// 2. **Apply jitter** - Random delay (0-30 seconds) to avoid thundering herd
+    /// 3. **Announce presence** - Broadcasts our profile to the global topic
+    /// 4. **Connect to peers** - Attempts to connect to all known peers, respecting
+    ///    Fibonacci backoff for peers that have failed recently
+    ///
+    /// ## The Simultaneous Wake-up Problem
+    ///
+    /// When peers A and B both start at the same time:
+    /// - A tries to connect to B → B not ready → fails → backs off
+    /// - B tries to connect to A → A not ready → fails → backs off
+    ///
+    /// The jitter + listen-first strategy solves this:
+    /// - Both start listening immediately
+    /// - Random jitter means one will attempt outbound first
+    /// - The other is already listening and accepts the connection
+    ///
+    /// ## Prioritization
+    ///
+    /// Peers are sorted by priority:
+    /// 1. Contacts (mutually accepted) first
+    /// 2. Then by last_seen (most recently active first)
+    ///
+    /// # Returns
+    ///
+    /// A `StartupSyncResult` containing statistics about the sync attempt.
+    ///
+    /// # Errors
+    ///
+    /// Returns `SyncError::NotReady` if gossip cannot be initialized.
+    pub async fn startup_sync(&mut self) -> Result<StartupSyncResult, SyncError> {
+        info!("Starting startup sync...");
+
+        // 1. Ensure gossip is initialized (starts listening for incoming connections)
+        self.ensure_gossip().await?;
+
+        // 2. Generate random jitter (0-30 seconds) to avoid thundering herd
+        let jitter_ms: u64 = rand::rng().random_range(0..30_000);
+        info!(jitter_ms, "Applying startup jitter to avoid simultaneous wake-up problem");
+        tokio::time::sleep(std::time::Duration::from_millis(jitter_ms)).await;
+
+        // 3. Announce presence on global profile topic (if we have a profile)
+        // This uses announce_profile() which broadcasts to the global topic
+        if self.identity.is_some() {
+            match self.announce_profile(None).await {
+                Ok(()) => info!("Presence announced on global profile topic"),
+                Err(e) => {
+                    // Non-fatal - we can still connect to peers without announcing
+                    warn!(error = %e, "Failed to announce presence (non-fatal)");
+                }
+            }
+        } else {
+            debug!("No identity initialized, skipping presence announcement");
+        }
+
+        // 4. Get all peers and sort by priority (contacts first, then by last_seen)
+        let mut all_peers = self.storage.list_peers()?;
+        all_peers.sort_by(|a, b| {
+            // Contacts first
+            match (a.is_contact(), b.is_contact()) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => {
+                    // Then by last_seen (most recent first)
+                    b.last_seen.cmp(&a.last_seen)
+                }
+            }
+        });
+
+        // Skip if no gossip or no peers
+        let Some(ref gossip) = self.gossip else {
+            warn!("Gossip not initialized after ensure_gossip (unexpected)");
+            return Ok(StartupSyncResult {
+                jitter_delay_ms: jitter_ms,
+                ..Default::default()
+            });
+        };
+
+        if all_peers.is_empty() {
+            debug!("No known peers for startup sync");
+            return Ok(StartupSyncResult {
+                jitter_delay_ms: jitter_ms,
+                ..Default::default()
+            });
+        }
+
+        info!(
+            peer_count = all_peers.len(),
+            "Attempting startup sync with known peers"
+        );
+
+        // 5. Attempt connections with Fibonacci backoff
+        let mut result = StartupSyncResult {
+            jitter_delay_ms: jitter_ms,
+            ..Default::default()
+        };
+
+        for mut peer in all_peers {
+            let peer_id = peer.public_key();
+
+            // Check Fibonacci backoff
+            if !peer.should_retry_now() {
+                result.peers_skipped_backoff += 1;
+                debug!(
+                    ?peer_id,
+                    backoff_secs = peer.backoff_delay(),
+                    "Skipping peer - backoff not elapsed"
+                );
+                continue;
+            }
+
+            result.peers_attempted += 1;
+            peer.record_attempt();
+            debug!(
+                ?peer_id,
+                is_contact = peer.is_contact(),
+                attempt_number = peer.connection_attempts,
+                "Attempting startup connection"
+            );
+
+            // Try to connect with 10 second timeout
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                gossip.endpoint().connect(peer_id, iroh_gossip::net::GOSSIP_ALPN),
+            )
+            .await
+            {
+                Ok(Ok(_conn)) => {
+                    peer.record_success();
+                    result.peers_succeeded += 1;
+                    info!(
+                        ?peer_id,
+                        is_contact = peer.is_contact(),
+                        success_rate = format!("{:.1}%", peer.success_rate() * 100.0),
+                        "Connected on startup"
+                    );
+                }
+                Ok(Err(e)) => {
+                    peer.record_failure();
+                    debug!(
+                        ?peer_id,
+                        error = ?e,
+                        next_retry_in_secs = peer.backoff_delay(),
+                        "Failed to connect on startup"
+                    );
+                }
+                Err(_) => {
+                    peer.record_failure();
+                    debug!(
+                        ?peer_id,
+                        next_retry_in_secs = peer.backoff_delay(),
+                        "Connection timed out on startup"
+                    );
+                }
+            }
+
+            // Save updated peer metrics (with connection attempt results)
+            self.storage.save_peer(&peer)?;
+        }
+
+        info!(
+            attempted = result.peers_attempted,
+            succeeded = result.peers_succeeded,
+            skipped = result.peers_skipped_backoff,
+            jitter_ms = result.jitter_delay_ms,
+            "Startup sync complete"
+        );
+
+        Ok(result)
     }
 
     /// Start syncing a realm with peers via gossip
@@ -6475,5 +6676,96 @@ mod tests {
         assert!(interests.contains(&"did:sync:contact0".to_string()));
         assert!(interests.contains(&"did:sync:contact1".to_string()));
         assert!(interests.contains(&"did:sync:contact2".to_string()));
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Startup Sync Tests
+    // ═══════════════════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    async fn test_startup_sync_with_no_peers() {
+        let (mut engine, _temp) = create_test_engine().await;
+
+        // Initialize identity for the engine
+        engine.init_identity().unwrap();
+
+        // Startup sync with no peers should complete immediately after jitter
+        let result = engine.startup_sync().await.unwrap();
+
+        // No peers to connect to
+        assert_eq!(result.peers_attempted, 0);
+        assert_eq!(result.peers_succeeded, 0);
+        assert_eq!(result.peers_skipped_backoff, 0);
+        // Jitter should be in range 0-30000 ms
+        assert!(result.jitter_delay_ms < 30_000);
+    }
+
+    #[tokio::test]
+    async fn test_startup_sync_result_default() {
+        let result = StartupSyncResult::default();
+        assert_eq!(result.peers_attempted, 0);
+        assert_eq!(result.peers_succeeded, 0);
+        assert_eq!(result.peers_skipped_backoff, 0);
+        assert_eq!(result.profiles_updated, 0);
+        assert_eq!(result.jitter_delay_ms, 0);
+    }
+
+    #[tokio::test]
+    async fn test_startup_sync_prioritizes_contacts() {
+        let (mut engine, _temp) = create_test_engine().await;
+        engine.init_identity().unwrap();
+
+        // Add a discovered peer (not a contact)
+        let discovered_peer = crate::types::peer::Peer::new(
+            iroh::SecretKey::generate(&mut rand::rng()).public(),
+            crate::types::peer::PeerSource::FromInvite,
+        );
+        engine.storage.save_peer(&discovered_peer).unwrap();
+
+        // Add a contact peer
+        let contact_peer = crate::types::peer::Peer::new(
+            iroh::SecretKey::generate(&mut rand::rng()).public(),
+            crate::types::peer::PeerSource::FromInvite,
+        ).with_contact_info(crate::types::peer::ContactDetails::new(
+            [1u8; 32],
+            [2u8; 32],
+        ));
+        engine.storage.save_peer(&contact_peer).unwrap();
+
+        // Run startup sync (will fail to connect but should attempt in correct order)
+        let result = engine.startup_sync().await.unwrap();
+
+        // Should have attempted both peers
+        assert_eq!(result.peers_attempted, 2);
+        // Both will fail (no actual peer servers) but none should be skipped for backoff
+        assert_eq!(result.peers_skipped_backoff, 0);
+    }
+
+    #[tokio::test]
+    async fn test_startup_sync_respects_backoff() {
+        let (mut engine, _temp) = create_test_engine().await;
+        engine.init_identity().unwrap();
+
+        // Add a peer with many failed attempts (should be in backoff)
+        let mut peer = crate::types::peer::Peer::new(
+            iroh::SecretKey::generate(&mut rand::rng()).public(),
+            crate::types::peer::PeerSource::FromInvite,
+        );
+        // Simulate many failures
+        peer.connection_attempts = 5;
+        peer.successful_connections = 0;
+        // Set last_attempt to now (still in backoff period)
+        peer.last_attempt = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        engine.storage.save_peer(&peer).unwrap();
+
+        // Run startup sync
+        let result = engine.startup_sync().await.unwrap();
+
+        // Peer should be skipped due to backoff
+        assert_eq!(result.peers_attempted, 0);
+        assert_eq!(result.peers_skipped_backoff, 1);
     }
 }

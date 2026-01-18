@@ -55,7 +55,7 @@ pub mod types;
 // Re-exports
 pub use blobs::{BlobManager, BlobProtocolHandler};
 pub use crypto::RealmCrypto;
-pub use engine::{NetworkStats, NodeInfo, SyncEngine};
+pub use engine::{NetworkStats, NodeInfo, StartupSyncResult, SyncEngine};
 pub use error::SyncError;
 pub use identity::{Did, HybridKeypair, HybridPublicKey, HybridSignature};
 pub use invite::{InviteTicket, NodeAddrBytes};
