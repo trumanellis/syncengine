@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
 use crate::identity::Did;
+use crate::profile::PacketEnvelope;
 use crate::types::SignedProfile;
 
 /// The seed used to derive the global profile topic ID
@@ -111,6 +112,14 @@ pub enum ProfileGossipMessage {
         requester_did: String,
     },
 
+    /// A packet from a profile's append-only log
+    ///
+    /// Sent when a profile creates a new packet (heartbeat, message, etc.).
+    /// Recipients store these in their mirrors of the sender's log.
+    Packet {
+        /// The packet envelope containing sender, sequence, signature, and payload
+        envelope: PacketEnvelope,
+    },
 }
 
 impl ProfileGossipMessage {
@@ -143,6 +152,11 @@ impl ProfileGossipMessage {
         }
     }
 
+    /// Create a packet message from a profile log entry.
+    pub fn packet(envelope: PacketEnvelope) -> Self {
+        Self::Packet { envelope }
+    }
+
     /// Serialize the message to bytes.
     pub fn to_bytes(&self) -> Result<Vec<u8>, crate::SyncError> {
         postcard::to_allocvec(self).map_err(|e| crate::SyncError::Serialization(e.to_string()))
@@ -153,10 +167,11 @@ impl ProfileGossipMessage {
         postcard::from_bytes(bytes).map_err(|e| crate::SyncError::Serialization(e.to_string()))
     }
 
-    /// Get the DID of the signer if this is an Announce message.
+    /// Get the DID of the signer if this is an Announce or Packet message.
     pub fn signer_did(&self) -> Option<Did> {
         match self {
             Self::Announce { signed_profile, .. } => Some(signed_profile.did()),
+            Self::Packet { envelope } => Some(envelope.sender.clone()),
             _ => None,
         }
     }
@@ -166,11 +181,13 @@ impl ProfileGossipMessage {
     /// - Announce: Always relevant (we might want to pin)
     /// - Request: Only if we might have the profile
     /// - Response: Only if we're the requester
+    /// - Packet: Always relevant (we might mirror the sender's log)
     pub fn is_relevant_to(&self, our_did: &str) -> bool {
         match self {
-            Self::Announce { .. } => true, // Always process announcements
-            Self::Request { .. } => true,  // We might have the profile
+            Self::Announce { .. } => true,  // Always process announcements
+            Self::Request { .. } => true,   // We might have the profile
             Self::Response { requester_did, .. } => requester_did == our_did,
+            Self::Packet { .. } => true,    // Always process packets (mirror if from contact)
         }
     }
 }
@@ -284,6 +301,17 @@ impl ProfileMessageHandler {
                 }
             }
 
+            ProfileGossipMessage::Packet { envelope } => {
+                // Packets are handled directly by the engine's gossip receiver
+                // (see engine.rs profile sync listener)
+                // The ProfileMessageHandler only deals with profile metadata
+                debug!(
+                    sender = %envelope.sender,
+                    sequence = envelope.sequence,
+                    "Packet message (handled by engine)"
+                );
+                ProfileAction::Ignore
+            }
         }
     }
 }

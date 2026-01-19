@@ -47,6 +47,7 @@ pub mod error;
 pub mod identity;
 pub mod invite;
 pub mod peers;
+pub mod profile;
 pub mod realm;
 pub mod storage;
 pub mod sync;
@@ -66,7 +67,15 @@ pub use types::peer::{ContactDetails, Peer, PeerSource, PeerStatus};
 pub use realm::RealmDoc;
 pub use storage::{PinnerInfo, PinningConfig, Storage};
 pub use sync::{
-    GossipMessage, GossipSync, NetworkDebugInfo, SyncEnvelope, SyncEvent, SyncManager, SyncMessage,
-    SyncStatus, TopicHandle, WireMessage, ENVELOPE_VERSION,
+    ContactEvent, GossipMessage, GossipSync, NetworkDebugInfo, SyncEnvelope, SyncEvent,
+    SyncManager, SyncMessage, SyncStatus, TopicHandle, WireMessage, ENVELOPE_VERSION,
 };
 pub use types::*;
+
+// Profile packet layer (Indra's Network)
+pub use profile::{
+    derive_profile_packet_topic, derive_realm_packet_topic, ForkDetection, HybridKeyExchange,
+    LogEntry, MirrorStore, PacketAddress, PacketBuilder, PacketEnvelope, PacketPayload,
+    PacketRoute, ProfileKeys, ProfileLog, ProfilePublicKeys, ProfileTopicTracker, SealedBox,
+    SealedKey,
+};

@@ -322,18 +322,9 @@ pub fn Field() -> Element {
     // Render
     rsx! {
         div { class: "app-shell",
-            // Sacred Navigation Console
+            // Navigation Header
             NavHeader {
                 current: NavLocation::Field,
-                status: {
-                    // Use the sacred label from network state
-                    let state = network_state();
-                    if state.label() != "field dormant" {
-                        Some(state.label())
-                    } else {
-                        None
-                    }
-                },
             }
 
             // Quick actions bar (below header)

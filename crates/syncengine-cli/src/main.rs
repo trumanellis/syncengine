@@ -43,11 +43,12 @@
 //! ```
 
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::time::Duration;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use syncengine_core::{PeerStatus, RealmId, SyncEngine, TaskId};
+use syncengine_core::{Did, PeerStatus, RealmId, SyncEngine, TaskId};
 
 /// Synchronicity Engine - P2P Task Sharing
 #[derive(Parser)]
@@ -115,6 +116,12 @@ enum Commands {
     Profile {
         #[command(subcommand)]
         action: ProfileAction,
+    },
+
+    /// Packet layer commands (Indra's Network)
+    Packet {
+        #[command(subcommand)]
+        action: PacketAction,
     },
 
     /// Start serving/syncing as a persistent P2P node
@@ -313,6 +320,28 @@ enum ProfilePinAction {
 
     /// Sign and broadcast our own profile
     Announce,
+}
+
+/// Packet layer commands for Indra's Network
+#[derive(Subcommand)]
+enum PacketAction {
+    /// Show own packet log
+    Log,
+
+    /// Send a test packet (heartbeat)
+    SendHeartbeat,
+
+    /// Show mirror of another profile
+    Mirror {
+        /// DID of the profile to show
+        did: String,
+    },
+
+    /// List all mirrored profiles
+    Mirrors,
+
+    /// Show profile keys info
+    Keys,
 }
 
 fn setup_logging(verbosity: u8) {
@@ -942,6 +971,123 @@ async fn main() -> Result<()> {
                     println!("Use 'syncengine serve' to start the P2P network.");
                 }
             },
+        },
+
+        // ═══════════════════════════════════════════════════════════════════════
+        // Packet Layer Commands (Indra's Network)
+        // ═══════════════════════════════════════════════════════════════════════
+
+        Commands::Packet { action } => match action {
+            PacketAction::Keys => {
+                engine.init_profile_keys()?;
+                let did = engine.profile_did().unwrap();
+                let seq = engine.log_head_sequence();
+
+                println!("Profile Keys (Indra's Network):");
+                println!("  DID: {}", did);
+                println!("  Log Head Sequence: {}", seq);
+            }
+
+            PacketAction::Log => {
+                engine.init_profile_keys()?;
+                let seq = engine.log_head_sequence();
+                let did = engine.profile_did().unwrap();
+
+                println!("Own Packet Log:");
+                println!("  Owner: {}", did);
+                println!("  Head Sequence: {}", seq);
+                println!();
+
+                if seq == 0 {
+                    if let Some(log) = engine.my_log() {
+                        if log.head_sequence().is_none() {
+                            println!("  (empty log)");
+                        } else {
+                            // Show first packet
+                            if let Some(entry) = log.get(0) {
+                                let env = &entry.envelope;
+                                println!("  [0] {} - {}", env.timestamp, if env.is_global() { "global" } else { "sealed" });
+                            }
+                        }
+                    }
+                } else {
+                    if let Some(log) = engine.my_log() {
+                        for seq_num in 0..=seq {
+                            if let Some(entry) = log.get(seq_num) {
+                                let env = &entry.envelope;
+                                let kind = if env.is_global() { "global" } else { "sealed" };
+                                println!("  [{}] ts={} {}", seq_num, env.timestamp, kind);
+                            }
+                        }
+                    }
+                }
+            }
+
+            PacketAction::SendHeartbeat => {
+                engine.init_profile_keys()?;
+                let payload = syncengine_core::PacketPayload::Heartbeat {
+                    timestamp: chrono::Utc::now().timestamp_millis(),
+                };
+                let address = syncengine_core::PacketAddress::Global;
+
+                let seq = engine.create_and_broadcast_packet(payload, address).await?;
+                let did = engine.profile_did().unwrap();
+
+                println!("Sent heartbeat packet:");
+                println!("  Sender: {}", did);
+                println!("  Sequence: {}", seq);
+                println!("  Type: global (public, broadcast to peers)");
+            }
+
+            PacketAction::Mirror { did } => {
+                let did = Did::from_str(&did)
+                    .map_err(|e| anyhow::anyhow!("Invalid DID: {}", e))?;
+
+                match engine.mirror_head(&did) {
+                    Some(seq) => {
+                        println!("Mirror for {}:", did);
+                        println!("  Head Sequence: {}", seq);
+                        println!();
+
+                        // Show packets
+                        let packets = engine.mirror_packets_since(&did, 0)?;
+                        if packets.is_empty() {
+                            println!("  (no packets)");
+                        } else {
+                            for env in packets {
+                                let kind = if env.is_global() { "global" } else { "sealed" };
+                                println!("  [{}] ts={} {}", env.sequence, env.timestamp, kind);
+                            }
+                        }
+                    }
+                    None => {
+                        println!("No mirror found for {}", did);
+                        println!("(No packets received from this profile yet)");
+                    }
+                }
+            }
+
+            PacketAction::Mirrors => {
+                println!("Mirrored Profiles:");
+                println!();
+
+                // Get all mirrored DIDs
+                match engine.list_mirrored_dids() {
+                    Ok(dids) => {
+                        if dids.is_empty() {
+                            println!("  (no mirrors)");
+                        } else {
+                            for did in dids {
+                                let head = engine.mirror_head(&did).unwrap_or(0);
+                                println!("  {} (head: {})", did, head);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        println!("  Error: {}", e);
+                    }
+                }
+            }
         },
 
         Commands::Serve { realm } => {

@@ -66,6 +66,8 @@ pub enum ContactEvent {
     ContactOnline { did: String },
     /// A contact went offline
     ContactOffline { did: String },
+    /// A contact's profile was updated (name, bio, avatar, etc.)
+    ProfileUpdated { did: String },
     /// An error occurred during contact operations
     ContactError { message: String },
 }
@@ -726,6 +728,7 @@ impl ContactManager {
                     contact.peer_did.clone(),
                     sender,
                     receiver,
+                    self.event_tx.clone(),
                 );
             }
             Err(e) => {
@@ -767,11 +770,13 @@ impl ContactManager {
     /// * `peer_did` - The DID of the contact whose profile topic we're listening to
     /// * `sender` - The TopicSender from subscribe_split() - MUST be kept alive!
     /// * `receiver` - The TopicReceiver from subscribe_split()
+    /// * `event_tx` - Event broadcast channel for notifying UI of profile updates
     fn spawn_profile_topic_listener(
         storage: Arc<Storage>,
         peer_did: String,
         sender: crate::sync::TopicSender,
         mut receiver: crate::sync::TopicReceiver,
+        event_tx: broadcast::Sender<ContactEvent>,
     ) {
         tokio::spawn(async move {
             use crate::sync::TopicEvent;
@@ -834,6 +839,10 @@ impl ContactManager {
                                             name = %signed_profile.profile.display_name,
                                             "Updated contact profile from per-peer topic"
                                         );
+                                        // Notify UI of profile update
+                                        let _ = event_tx.send(ContactEvent::ProfileUpdated {
+                                            did: signer_did.clone(),
+                                        });
                                     }
                                 }
                                 Ok(None) => {
@@ -903,6 +912,7 @@ impl ContactManager {
             self.storage.clone(),
             contact.peer_did.clone(),
             receiver,
+            self.event_tx.clone(),
         );
 
         info!(
@@ -925,6 +935,7 @@ impl ContactManager {
         storage: Arc<Storage>,
         peer_did: String,
         mut receiver: crate::sync::TopicReceiver,
+        event_tx: broadcast::Sender<ContactEvent>,
     ) {
         tokio::spawn(async move {
             use crate::sync::TopicEvent;
@@ -978,6 +989,10 @@ impl ContactManager {
                                             name = %signed_profile.profile.display_name,
                                             "Updated contact profile from contact topic"
                                         );
+                                        // Notify UI of profile update
+                                        let _ = event_tx.send(ContactEvent::ProfileUpdated {
+                                            did: signer_did.clone(),
+                                        });
                                     }
                                 }
                                 Ok(None) => {
@@ -1156,6 +1171,7 @@ impl ContactManager {
                                 contact.peer_did.clone(),
                                 sender,
                                 receiver,
+                                self.event_tx.clone(),
                             );
                         }
                         Err(e) => {

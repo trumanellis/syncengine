@@ -7,6 +7,7 @@ use ulid::Ulid;
 use crate::invite::NodeAddrBytes;
 
 // Submodules for rich card types
+pub mod capability;
 pub mod contact;
 pub mod image;
 pub mod peer;

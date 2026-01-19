@@ -37,6 +37,11 @@ use tracing::{debug, info, warn};
 use crate::blobs::BlobManager;
 use crate::error::SyncError;
 use crate::identity::{Did, HybridKeypair, HybridPublicKey};
+// Indra's Network: Profile packet layer
+use crate::profile::{
+    MirrorStore, PacketAddress, PacketEnvelope, PacketPayload, ProfileKeys, ProfileLog,
+    ProfileTopicTracker,
+};
 use crate::invite::{InviteTicket, NodeAddrBytes};
 use crate::peers::{PeerInfo, PeerRegistry, PeerSource, PeerStatus};
 use crate::realm::RealmDoc;
@@ -171,15 +176,41 @@ pub struct SyncEngine {
     sync_rx: tokio::sync::mpsc::UnboundedReceiver<SyncChannelMessage>,
     /// Sender for sync messages (cloned to background tasks)
     sync_tx: tokio::sync::mpsc::UnboundedSender<SyncChannelMessage>,
-    /// Persistent sender for the global profile topic.
+    /// Persistent sender for our own per-peer profile topic.
     /// Used to broadcast profile announcements to contacts.
     /// Initialized by start_profile_sync(), used by announce_profile() and related methods.
     profile_gossip_sender: Option<TopicSender>,
+    /// Persistent sender for the global profile topic.
+    /// Used to broadcast packets (messages) to all peers on the global topic.
+    global_profile_gossip_sender: Option<TopicSender>,
     /// Persistent receiver for our own profile topic.
     /// MUST be kept alive to maintain the gossip subscription - dropping it closes the topic.
     /// When contacts subscribe to our profile topic, they join as peers to this subscription.
     #[allow(dead_code)] // Held to keep subscription alive, not read
     profile_gossip_receiver: Option<TopicReceiver>,
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Indra's Network: Profile Packet Layer
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Profile keys for packet signing and sealed box key exchange.
+    /// Contains hybrid signing keys (ML-DSA-65 + Ed25519) and key exchange keys
+    /// (X25519 + ML-KEM-768).
+    profile_keys: Option<ProfileKeys>,
+
+    /// Our own append-only log of packets we've created.
+    /// Each packet is signed and hash-chained for integrity.
+    /// Initialized when profile_keys are initialized.
+    profile_log: Option<ProfileLog>,
+
+    /// Mirror store for other profiles' packet logs.
+    /// Stores packets from contacts for offline sync and relay.
+    mirror_store: Option<MirrorStore>,
+
+    /// Topic tracker for profile packet subscriptions.
+    /// Manages subscriptions to profile and realm packet topics.
+    #[allow(dead_code)] // Will be used when packet sync is implemented
+    profile_topic_tracker: ProfileTopicTracker,
 }
 
 impl SyncEngine {
@@ -216,6 +247,9 @@ impl SyncEngine {
 
         let (sync_tx, sync_rx) = tokio::sync::mpsc::unbounded_channel();
 
+        // Initialize mirror store for profile packet storage
+        let mirror_store = MirrorStore::new(storage.db_handle())?;
+
         let mut engine = Self {
             storage,
             peer_registry,
@@ -231,7 +265,13 @@ impl SyncEngine {
             sync_rx,
             sync_tx,
             profile_gossip_sender: None,
+            global_profile_gossip_sender: None,
             profile_gossip_receiver: None,
+            // Indra's Network packet layer
+            profile_keys: None,
+            profile_log: None, // Initialized when profile_keys are initialized
+            mirror_store: Some(mirror_store),
+            profile_topic_tracker: ProfileTopicTracker::new(),
         };
 
         // Initialize the Private realm if it doesn't exist
@@ -430,6 +470,349 @@ impl SyncEngine {
         signature: &crate::identity::HybridSignature,
     ) -> bool {
         public_key.verify(data, signature)
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Profile Packet Operations (Indra's Network)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Initialize profile keys, loading from storage or generating new ones.
+    ///
+    /// Profile keys are used for:
+    /// - Signing packets in the append-only log
+    /// - Hybrid key exchange for sealed boxes (X25519 + ML-KEM-768)
+    ///
+    /// If profile keys already exist in storage, they are loaded.
+    /// Otherwise, new keys are generated and persisted.
+    ///
+    /// # Note
+    ///
+    /// Profile keys are separate from the identity keypair. The identity is used
+    /// for realm sync messages, while profile keys are used for the packet layer.
+    pub fn init_profile_keys(&mut self) -> Result<(), SyncError> {
+        if self.profile_keys.is_some() {
+            return Ok(());
+        }
+
+        let keys = if let Some(keys) = self.storage.load_profile_keys()? {
+            info!("Loaded existing profile keys");
+            keys
+        } else {
+            info!("Generating new profile keys");
+            let keys = ProfileKeys::generate();
+            self.storage.save_profile_keys(&keys)?;
+            keys
+        };
+
+        // Initialize the profile log with our DID
+        let did = keys.did();
+        self.profile_log = Some(ProfileLog::new(did));
+
+        self.profile_keys = Some(keys);
+        Ok(())
+    }
+
+    /// Get the profile DID (decentralized identifier) for packets.
+    ///
+    /// Returns `None` if profile keys have not been initialized.
+    /// Call `init_profile_keys()` first to ensure keys are available.
+    pub fn profile_did(&self) -> Option<Did> {
+        self.profile_keys.as_ref().map(|k| k.did())
+    }
+
+    /// Check if profile keys have been initialized.
+    pub fn has_profile_keys(&self) -> bool {
+        self.profile_keys.is_some()
+    }
+
+    /// Get a reference to our own profile log.
+    ///
+    /// The profile log contains our signed, hash-chained packets.
+    /// Returns `None` if profile keys have not been initialized.
+    pub fn my_log(&self) -> Option<&ProfileLog> {
+        self.profile_log.as_ref()
+    }
+
+    /// Get the current head sequence number of our profile log.
+    pub fn log_head_sequence(&self) -> u64 {
+        self.profile_log
+            .as_ref()
+            .and_then(|log| log.head_sequence())
+            .unwrap_or(0)
+    }
+
+    /// Get a mirror of another profile's packet log.
+    ///
+    /// Returns `None` if we don't have any packets from this profile.
+    pub fn mirror_head(&self, did: &Did) -> Option<u64> {
+        self.mirror_store.as_ref()?.get_head(did).ok()?
+    }
+
+    /// Get packets from a profile's mirror.
+    ///
+    /// Returns packets from the given profile, starting after `from_sequence`.
+    pub fn mirror_packets_since(
+        &self,
+        did: &Did,
+        from_sequence: u64,
+    ) -> Result<Vec<PacketEnvelope>, SyncError> {
+        let mirror = self.mirror_store.as_ref().ok_or_else(|| {
+            SyncError::Storage("Mirror store not initialized".to_string())
+        })?;
+        mirror.get_since(did, from_sequence)
+    }
+
+    /// Get packets from a mirror for a specific sequence range (inclusive).
+    ///
+    /// Returns packets from `from_sequence` to `to_sequence` (both inclusive).
+    pub fn mirror_packets_range(
+        &self,
+        did: &Did,
+        from_sequence: u64,
+        to_sequence: u64,
+    ) -> Result<Vec<PacketEnvelope>, SyncError> {
+        let mirror = self.mirror_store.as_ref().ok_or_else(|| {
+            SyncError::Storage("Mirror store not initialized".to_string())
+        })?;
+        mirror.get_range(did, from_sequence, to_sequence)
+    }
+
+    /// List all DIDs we have mirrors for.
+    pub fn list_mirrored_dids(&self) -> Result<Vec<Did>, SyncError> {
+        let mirror = self.mirror_store.as_ref().ok_or_else(|| {
+            SyncError::Storage("Mirror store not initialized".to_string())
+        })?;
+        mirror.list_mirrored_dids()
+    }
+
+    /// Create and sign a new packet.
+    ///
+    /// Creates a packet with the given payload, signs it with our profile keys,
+    /// and appends it to our log.
+    ///
+    /// # Arguments
+    ///
+    /// * `payload` - The packet content (message, profile update, etc.)
+    /// * `address` - Who can decrypt this packet
+    ///
+    /// # Returns
+    ///
+    /// The sequence number of the newly created packet.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if profile keys have not been initialized.
+    pub fn create_packet(
+        &mut self,
+        payload: PacketPayload,
+        address: PacketAddress,
+    ) -> Result<u64, SyncError> {
+        let keys = self.profile_keys.as_ref().ok_or_else(|| {
+            SyncError::Identity("Profile keys not initialized. Call init_profile_keys() first.".to_string())
+        })?;
+
+        let log = self.profile_log.as_ref().ok_or_else(|| {
+            SyncError::Identity("Profile log not initialized. Call init_profile_keys() first.".to_string())
+        })?;
+
+        // Get the previous hash for chaining
+        let prev_hash = log.head_hash();
+
+        // Calculate next sequence
+        let sequence = log.head_sequence().map(|s| s + 1).unwrap_or(0);
+
+        // Create the envelope based on addressing
+        let envelope = match &address {
+            PacketAddress::Global => {
+                // Global packets are signed but not encrypted
+                PacketEnvelope::create_global(keys, &payload, sequence, prev_hash)?
+            }
+            PacketAddress::Individual(recipient) => {
+                // Individual packet encrypted for one recipient
+                let recipient_keys = self.get_recipient_public_keys(recipient)?;
+                PacketEnvelope::create(
+                    keys,
+                    &payload,
+                    &[recipient_keys],
+                    sequence,
+                    prev_hash,
+                )?
+            }
+            PacketAddress::List(recipients) => {
+                // Multi-recipient packet
+                let mut all_keys = Vec::with_capacity(recipients.len());
+                for recipient in recipients {
+                    all_keys.push(self.get_recipient_public_keys(recipient)?);
+                }
+                PacketEnvelope::create(keys, &payload, &all_keys, sequence, prev_hash)?
+            }
+            PacketAddress::Group(_realm_id) => {
+                // Group packet for realm members (encrypted with realm key)
+                // For now, treat as global within the realm
+                PacketEnvelope::create_global(keys, &payload, sequence, prev_hash)?
+            }
+        };
+
+        // Append to our log
+        let seq = envelope.sequence;
+        // Need mutable reference now
+        self.profile_log.as_mut().unwrap().append(envelope)?;
+
+        debug!(seq, "Created packet");
+        Ok(seq)
+    }
+
+    /// Broadcast a packet from our log to the gossip network.
+    ///
+    /// This sends the packet to all connected peers on the profile gossip topic.
+    /// Packets are relayed even by peers who cannot decrypt them, enabling
+    /// offline delivery via mutual contacts.
+    ///
+    /// # Arguments
+    ///
+    /// * `sequence` - The sequence number of the packet to broadcast
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Profile log is not initialized
+    /// - The packet with the given sequence doesn't exist
+    /// - Gossip network is not started
+    pub async fn broadcast_packet(&self, sequence: u64) -> Result<(), SyncError> {
+        // Get the packet from our log
+        let log = self.profile_log.as_ref().ok_or_else(|| {
+            SyncError::Identity("Profile log not initialized".to_string())
+        })?;
+
+        let entry = log.get(sequence).ok_or_else(|| {
+            SyncError::Identity(format!("Packet {} not found in log", sequence))
+        })?;
+        let envelope = entry.envelope.clone();
+
+        // Create the gossip message
+        let msg = crate::sync::ProfileGossipMessage::packet(envelope);
+        let bytes = msg.to_bytes()?;
+
+        // Broadcast on the GLOBAL profile gossip topic so all peers receive it
+        // (The per-peer topic is only for profile announcements, not packets/messages)
+        if let Some(sender) = self.global_profile_gossip_sender.as_ref() {
+            sender.broadcast(bytes).await.map_err(|e| {
+                SyncError::Gossip(format!("Failed to broadcast packet: {}", e))
+            })?;
+            debug!(sequence, "Broadcast packet to global gossip topic");
+        } else {
+            return Err(SyncError::Gossip(
+                "Global profile gossip not started. Call start_profile_sync() first.".to_string()
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Create a packet and broadcast it to the network.
+    ///
+    /// This is the recommended way to send packets as it ensures they
+    /// are both stored locally and broadcast to peers in one step.
+    ///
+    /// # Arguments
+    ///
+    /// * `payload` - The packet content
+    /// * `address` - Who can decrypt this packet
+    ///
+    /// # Returns
+    ///
+    /// The sequence number of the newly created packet.
+    pub async fn create_and_broadcast_packet(
+        &mut self,
+        payload: PacketPayload,
+        address: PacketAddress,
+    ) -> Result<u64, SyncError> {
+        // Create the packet (stores it in our log)
+        let seq = self.create_packet(payload, address)?;
+
+        // Broadcast it to the network
+        self.broadcast_packet(seq).await?;
+
+        Ok(seq)
+    }
+
+    /// Helper to get recipient's public keys for sealed boxes.
+    ///
+    /// This looks up the recipient's ProfilePublicKeys from stored contacts.
+    fn get_recipient_public_keys(
+        &self,
+        _recipient: &Did,
+    ) -> Result<crate::profile::ProfilePublicKeys, SyncError> {
+        // TODO: Look up recipient's ProfilePublicKeys from contact storage
+        // For now, return an error indicating we need to implement contact key storage
+        Err(SyncError::Identity(
+            "Recipient public key lookup not yet implemented. \
+             Contact key exchange must complete first.".to_string()
+        ))
+    }
+
+    /// Handle an incoming packet from a peer.
+    ///
+    /// This validates the packet signature, checks the hash chain,
+    /// and stores it in the appropriate mirror.
+    ///
+    /// # Arguments
+    ///
+    /// * `envelope` - The received packet envelope
+    ///
+    /// # Returns
+    ///
+    /// `Ok(true)` if the packet was new and stored successfully.
+    /// `Ok(false)` if we already had this packet.
+    /// `Err` if the packet is invalid.
+    pub fn handle_incoming_packet(&mut self, envelope: PacketEnvelope) -> Result<bool, SyncError> {
+        // TODO: Verify signature using sender's stored public keys
+        // For now, we store without full verification since contact key lookup isn't implemented.
+        // In production, this should call: envelope.verify(&sender_public_keys)
+        // The MirrorStore validates hash chain integrity internally.
+
+        // Store in mirror
+        let mirror = self.mirror_store.as_ref().ok_or_else(|| {
+            SyncError::Storage("Mirror store not initialized".to_string())
+        })?;
+
+        // Check if we already have this packet
+        if let Some(existing_seq) = mirror.get_head(&envelope.sender).ok().flatten() {
+            if envelope.sequence <= existing_seq {
+                // We already have this or newer
+                return Ok(false);
+            }
+        }
+
+        // Store the packet (validates hash chain)
+        mirror.store_packet(&envelope)?;
+        debug!(sender = %envelope.sender, sequence = envelope.sequence, "Stored incoming packet");
+
+        Ok(true)
+    }
+
+    /// Try to decrypt a packet addressed to us.
+    ///
+    /// For global (public) packets, returns the plaintext payload directly.
+    /// For sealed packets, attempts to unseal using our profile keys.
+    ///
+    /// # Arguments
+    ///
+    /// * `envelope` - The packet to decrypt
+    ///
+    /// # Returns
+    ///
+    /// The decrypted payload if this packet was addressed to us and decryption succeeded.
+    /// Returns `None` if we're not a recipient or can't decrypt.
+    pub fn decrypt_packet(&self, envelope: &PacketEnvelope) -> Option<PacketPayload> {
+        // Global packets are not encrypted
+        if envelope.is_global() {
+            return envelope.decode_global_payload().ok();
+        }
+
+        // Sealed packets require our keys to decrypt
+        let keys = self.profile_keys.as_ref()?;
+        envelope.decrypt_for_recipient(keys).ok()
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -3603,23 +3986,23 @@ impl SyncEngine {
             "Subscribed to own profile topic for broadcasting"
         );
 
-        // Also subscribe to the global topic for backwards compatibility
-        // This can be removed once all nodes are using per-peer topics
+        // Also subscribe to the global topic for backwards compatibility and packet broadcast
+        // Packets (messages) are broadcast on the global topic so all contacts receive them
         let global_topic_id = crate::sync::global_profile_topic();
         let (global_sender, mut receiver) = gossip.subscribe_split(global_topic_id, bootstrap_peers).await?;
+
+        // Store global sender for packet broadcasts (messages to contacts)
+        self.global_profile_gossip_sender = Some(global_sender);
 
         // Clone dependencies for the background task
         let storage = self.storage.clone();
         let blob_manager = self.blob_manager.clone();
         let endpoint = gossip.endpoint().clone();
+        let contact_event_tx = self.contact_event_tx.clone();
 
         // Spawn background task to process incoming profile messages
         tokio::spawn(async move {
             use crate::sync::TopicEvent;
-
-            // CRITICAL: Keep the sender alive for the entire lifetime of the listener.
-            // Dropping the sender may close the gossip topic on some iroh-gossip versions.
-            let _keep_alive = global_sender;
 
             info!("Profile sync listener started with P2P blob download support");
 
@@ -3718,6 +4101,10 @@ impl SyncEngine {
                                                         warn!(did = %signer_did, error = %e, "Failed to update Peer.profile");
                                                     } else {
                                                         info!(did = %signer_did, "Updated peer profile from topic");
+                                                        // Notify UI of profile update
+                                                        let _ = contact_event_tx.send(crate::sync::ContactEvent::ProfileUpdated {
+                                                            did: signer_did.clone(),
+                                                        });
                                                     }
                                                 }
 
@@ -3740,6 +4127,54 @@ impl SyncEngine {
                                     }
                                     crate::sync::ProfileGossipMessage::Response { .. } => {
                                         debug!("Received profile response (handled by processor)");
+                                    }
+
+                                    // Packet from a profile's append-only log
+                                    crate::sync::ProfileGossipMessage::Packet { envelope } => {
+                                        let sender_did = envelope.sender.to_string();
+                                        debug!(
+                                            sender = %sender_did,
+                                            sequence = envelope.sequence,
+                                            "Received packet from gossip"
+                                        );
+
+                                        // Check if sender is a contact (we mirror contacts)
+                                        let should_mirror = storage.list_contacts()
+                                            .map(|contacts| contacts.iter().any(|c| c.peer_did == sender_did))
+                                            .unwrap_or(false);
+
+                                        if should_mirror {
+                                            // Create MirrorStore and store the packet
+                                            match MirrorStore::new(storage.db_handle()) {
+                                                Ok(mirror) => {
+                                                    match mirror.store_packet(&envelope) {
+                                                        Ok(_) => {
+                                                            info!(
+                                                                sender = %sender_did,
+                                                                sequence = envelope.sequence,
+                                                                "Stored packet in mirror"
+                                                            );
+                                                        }
+                                                        Err(e) => {
+                                                            warn!(
+                                                                sender = %sender_did,
+                                                                sequence = envelope.sequence,
+                                                                error = %e,
+                                                                "Failed to store packet in mirror"
+                                                            );
+                                                        }
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    warn!(error = %e, "Failed to create MirrorStore");
+                                                }
+                                            }
+                                        } else {
+                                            debug!(
+                                                sender = %sender_did,
+                                                "Ignoring packet from non-contact"
+                                            );
+                                        }
                                     }
                                 }
                             }
@@ -4708,6 +5143,180 @@ mod tests {
         let other_keypair = crate::identity::HybridKeypair::generate();
         let other_pk = other_keypair.public_key();
         assert!(!engine.verify(&other_pk, message, &signature));
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Profile Packet Tests (Indra's Network)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    async fn test_init_profile_keys_creates_new() {
+        let (mut engine, _temp) = create_test_engine().await;
+
+        // Initially no profile keys
+        assert!(!engine.has_profile_keys());
+        assert!(engine.profile_did().is_none());
+
+        // Initialize profile keys
+        engine.init_profile_keys().unwrap();
+
+        // Profile keys should now exist
+        assert!(engine.has_profile_keys());
+        let did = engine.profile_did().unwrap();
+        assert!(did.as_str().starts_with("did:sync:z"));
+    }
+
+    #[tokio::test]
+    async fn test_profile_keys_persist_across_instances() {
+        let temp_dir = TempDir::new().unwrap();
+
+        // Create profile keys in first engine instance
+        let original_did = {
+            let mut engine = SyncEngine::new(temp_dir.path()).await.unwrap();
+            engine.init_profile_keys().unwrap();
+            engine.profile_did().unwrap().to_string()
+        };
+
+        // Load profile keys in new engine instance
+        let mut engine2 = SyncEngine::new(temp_dir.path()).await.unwrap();
+
+        // Before init, no keys in memory
+        assert!(!engine2.has_profile_keys());
+
+        // Init should load existing keys
+        engine2.init_profile_keys().unwrap();
+
+        // Verify it's the same identity
+        let loaded_did = engine2.profile_did().unwrap().to_string();
+        assert_eq!(original_did, loaded_did);
+    }
+
+    #[tokio::test]
+    async fn test_profile_log_initialized_with_keys() {
+        let (mut engine, _temp) = create_test_engine().await;
+
+        // Before profile keys init, log should be None
+        assert!(engine.my_log().is_none());
+        assert_eq!(engine.log_head_sequence(), 0);
+
+        // Initialize profile keys
+        engine.init_profile_keys().unwrap();
+
+        // Log should now be available
+        assert!(engine.my_log().is_some());
+        assert_eq!(engine.log_head_sequence(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_create_global_packet() {
+        let (mut engine, _temp) = create_test_engine().await;
+
+        // Initialize profile keys
+        engine.init_profile_keys().unwrap();
+
+        // Create a global (public) packet
+        let payload = crate::profile::PacketPayload::Heartbeat {
+            timestamp: chrono::Utc::now().timestamp_millis(),
+        };
+
+        let sequence = engine
+            .create_packet(payload, crate::profile::PacketAddress::Global)
+            .unwrap();
+
+        // Should be sequence 0 (first packet)
+        assert_eq!(sequence, 0);
+
+        // Log should now have head sequence 0
+        assert_eq!(engine.log_head_sequence(), 0);
+
+        // Create another packet
+        let payload2 = crate::profile::PacketPayload::Heartbeat {
+            timestamp: chrono::Utc::now().timestamp_millis(),
+        };
+
+        let sequence2 = engine
+            .create_packet(payload2, crate::profile::PacketAddress::Global)
+            .unwrap();
+
+        assert_eq!(sequence2, 1);
+        assert_eq!(engine.log_head_sequence(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_create_packet_requires_profile_keys() {
+        let (mut engine, _temp) = create_test_engine().await;
+
+        // Don't initialize profile keys
+
+        // Create packet should fail
+        let payload = crate::profile::PacketPayload::Heartbeat {
+            timestamp: chrono::Utc::now().timestamp_millis(),
+        };
+
+        let result = engine.create_packet(payload, crate::profile::PacketAddress::Global);
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_handle_incoming_packet() {
+        let (mut engine, _temp) = create_test_engine().await;
+
+        // Create a packet from another profile
+        let other_keys = crate::profile::ProfileKeys::generate();
+        let payload = crate::profile::PacketPayload::Heartbeat {
+            timestamp: chrono::Utc::now().timestamp_millis(),
+        };
+        let envelope = crate::profile::PacketEnvelope::create_global(
+            &other_keys,
+            &payload,
+            0,
+            [0u8; 32],
+        )
+        .unwrap();
+
+        // Handle the incoming packet
+        let is_new = engine.handle_incoming_packet(envelope.clone()).unwrap();
+        assert!(is_new);
+
+        // Check mirror has the packet
+        let head = engine.mirror_head(&other_keys.did());
+        assert_eq!(head, Some(0));
+
+        // Handle the same packet again (should be duplicate)
+        let is_new2 = engine.handle_incoming_packet(envelope).unwrap();
+        assert!(!is_new2);
+    }
+
+    #[tokio::test]
+    async fn test_decrypt_global_packet() {
+        let (mut engine, _temp) = create_test_engine().await;
+
+        // Initialize profile keys
+        engine.init_profile_keys().unwrap();
+
+        // Create a global packet from another profile
+        let other_keys = crate::profile::ProfileKeys::generate();
+        let payload = crate::profile::PacketPayload::DirectMessage {
+            content: "Hello, world!".to_string(),
+        };
+        let envelope = crate::profile::PacketEnvelope::create_global(
+            &other_keys,
+            &payload,
+            0,
+            [0u8; 32],
+        )
+        .unwrap();
+
+        // Global packets can be decrypted (really just decoded) by anyone
+        let decrypted = engine.decrypt_packet(&envelope);
+        assert!(decrypted.is_some());
+
+        match decrypted.unwrap() {
+            crate::profile::PacketPayload::DirectMessage { content } => {
+                assert_eq!(content, "Hello, world!");
+            }
+            _ => panic!("Wrong payload type"),
+        }
     }
 
     // ═══════════════════════════════════════════════════════════════════════

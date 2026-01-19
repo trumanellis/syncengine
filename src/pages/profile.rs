@@ -98,10 +98,9 @@ pub fn Profile() -> Element {
 
     rsx! {
         div { class: "profile-page",
-            // Sacred Navigation Console
+            // Navigation Header
             NavHeader {
                 current: NavLocation::Profile,
-                status: None,
             }
 
             // Main content

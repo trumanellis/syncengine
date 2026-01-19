@@ -330,6 +330,7 @@ mod tests {
                 avatar_blob_id: None,
                 bio: String::new(),
             },
+            signed_profile: None,
             node_addr: NodeAddrBytes::new([0u8; 32]),
             state,
             created_at: chrono::Utc::now().timestamp(),

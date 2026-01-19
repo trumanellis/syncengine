@@ -307,7 +307,7 @@ impl ContactProtocolHandler {
                             display_name: accepter_signed_profile.profile.display_name.clone(),
                             subtitle: accepter_signed_profile.profile.subtitle.clone(),
                             avatar_blob_id: accepter_signed_profile.profile.avatar_blob_id.clone(),
-                            bio: ProfileSnapshot::truncate_bio(&accepter_signed_profile.profile.bio),
+                            bio: accepter_signed_profile.profile.bio.clone(),
                         };
 
                         // Create ContactInfo and save to contacts table
@@ -400,6 +400,7 @@ impl ContactProtocolHandler {
                                 // IMPORTANT: We must keep the sender alive or the topic closes!
                                 let (sender, receiver) = topic.split();
                                 let storage_clone = storage.clone();
+                                let event_tx_clone = event_tx.clone();
                                 let peer_did_for_listener = accepter_did.clone();
 
                                 tokio::spawn(async move {
@@ -457,6 +458,10 @@ impl ContactProtocolHandler {
                                                             name = %signed_profile.profile.display_name,
                                                             "Updated contact profile from contact topic (handler)"
                                                         );
+                                                        // Notify UI of profile update
+                                                        let _ = event_tx_clone.send(ContactEvent::ProfileUpdated {
+                                                            did: signer_did.clone(),
+                                                        });
                                                     }
                                                 }
                                             }

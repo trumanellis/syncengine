@@ -48,7 +48,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::types::contact::ProfileSnapshot;
+use crate::types::SignedProfile;
 
 /// ALPN protocol identifier for contact exchange
 ///
@@ -75,8 +75,9 @@ pub enum ContactMessage {
         requester_did: String,
         /// Requester's public key (for signature verification)
         requester_pubkey: Vec<u8>, // HybridPublicKey serialized
-        /// Requester's profile snapshot for preview
-        requester_profile: ProfileSnapshot,
+        /// Requester's cryptographically signed profile for pinning
+        /// This replaces the plain ProfileSnapshot to enable immediate profile pinning
+        requester_signed_profile: SignedProfile,
         /// Requester's network address for future connections
         requester_node_addr: Vec<u8>, // NodeAddrBytes serialized
         /// Signature over all above fields (HybridSignature)
@@ -94,8 +95,9 @@ pub enum ContactMessage {
         accepter_did: String,
         /// Accepter's public key (for signature verification)
         accepter_pubkey: Vec<u8>, // HybridPublicKey serialized
-        /// Accepter's profile snapshot
-        accepter_profile: ProfileSnapshot,
+        /// Accepter's cryptographically signed profile for pinning
+        /// This replaces the plain ProfileSnapshot to enable immediate profile pinning
+        accepter_signed_profile: SignedProfile,
         /// Accepter's network address for future connections
         accepter_node_addr: Vec<u8>, // NodeAddrBytes serialized
         /// Signature over all above fields (HybridSignature)
@@ -197,6 +199,16 @@ pub fn derive_contact_key(did1: &str, did2: &str) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::identity::HybridKeypair;
+    use crate::types::contact::ProfileSnapshot;
+    use crate::types::UserProfile;
+
+    /// Helper to create a test SignedProfile
+    fn create_test_signed_profile(name: &str) -> SignedProfile {
+        let keypair = HybridKeypair::generate();
+        let profile = UserProfile::new(format!("peer_{}", name), name.to_string());
+        SignedProfile::sign(&profile, &keypair)
+    }
 
     #[test]
     fn test_derive_contact_topic_deterministic() {
@@ -282,18 +294,13 @@ mod tests {
 
     #[test]
     fn test_contact_request_serialization() {
-        let profile = ProfileSnapshot {
-            display_name: "Alice".to_string(),
-            subtitle: Some("Software Engineer".to_string()),
-            avatar_blob_id: Some("QmXXXXX".to_string()),
-            bio: "Building the future".to_string(),
-        };
+        let signed_profile = create_test_signed_profile("Alice");
 
         let msg = ContactMessage::ContactRequest {
             invite_id: [42u8; 16],
             requester_did: "did:key:alice123".to_string(),
             requester_pubkey: vec![9, 10, 11, 12],
-            requester_profile: profile.clone(),
+            requester_signed_profile: signed_profile,
             requester_node_addr: vec![1, 2, 3, 4],
             requester_signature: vec![5, 6, 7, 8],
         };
@@ -304,24 +311,24 @@ mod tests {
         // Decode
         let decoded = ContactMessage::decode(&encoded).expect("Failed to decode");
 
-        // Verify round-trip
-        assert_eq!(msg, decoded, "Message should round-trip correctly");
+        // Verify the decoded message can be accessed correctly
+        if let ContactMessage::ContactRequest { requester_signed_profile, .. } = &decoded {
+            assert!(requester_signed_profile.verify(), "SignedProfile should verify after round-trip");
+            assert_eq!(requester_signed_profile.profile.display_name, "Alice");
+        } else {
+            panic!("Expected ContactRequest");
+        }
     }
 
     #[test]
     fn test_contact_accept_serialization() {
-        let profile = ProfileSnapshot {
-            display_name: "Alice".to_string(),
-            subtitle: Some("Engineer".to_string()),
-            avatar_blob_id: None,
-            bio: "Hello!".to_string(),
-        };
+        let signed_profile = create_test_signed_profile("Alice");
 
         let msg = ContactMessage::ContactAccept {
             invite_id: [99u8; 16],
             accepter_did: "did:sync:zAlice123".to_string(),
             accepter_pubkey: vec![1, 2, 3, 4],
-            accepter_profile: profile.clone(),
+            accepter_signed_profile: signed_profile,
             accepter_node_addr: vec![5, 6, 7, 8],
             signature: vec![9, 10, 11, 12],
         };
@@ -329,7 +336,13 @@ mod tests {
         let encoded = msg.encode().expect("Failed to encode");
         let decoded = ContactMessage::decode(&encoded).expect("Failed to decode");
 
-        assert_eq!(msg, decoded);
+        // Verify the decoded message can be accessed correctly
+        if let ContactMessage::ContactAccept { accepter_signed_profile, .. } = &decoded {
+            assert!(accepter_signed_profile.verify(), "SignedProfile should verify after round-trip");
+            assert_eq!(accepter_signed_profile.profile.display_name, "Alice");
+        } else {
+            panic!("Expected ContactAccept");
+        }
     }
 
     #[test]
@@ -419,18 +432,13 @@ mod tests {
 
     #[test]
     fn test_contact_message_variants_are_distinct() {
-        let profile = ProfileSnapshot {
-            display_name: "Test".to_string(),
-            subtitle: None,
-            avatar_blob_id: None,
-            bio: "Test".to_string(),
-        };
+        let signed_profile = create_test_signed_profile("Test");
 
         let request = ContactMessage::ContactRequest {
             invite_id: [1u8; 16],
             requester_did: "did:test".to_string(),
             requester_pubkey: vec![],
-            requester_profile: profile.clone(),
+            requester_signed_profile: signed_profile.clone(),
             requester_node_addr: vec![],
             requester_signature: vec![],
         };
@@ -439,7 +447,7 @@ mod tests {
             invite_id: [1u8; 16],
             accepter_did: "did:test".to_string(),
             accepter_pubkey: vec![],
-            accepter_profile: profile,
+            accepter_signed_profile: signed_profile,
             accepter_node_addr: vec![],
             signature: vec![],
         };

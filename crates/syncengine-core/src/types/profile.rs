@@ -148,6 +148,18 @@ pub struct SignedProfile {
     pub public_key: HybridPublicKey,
 }
 
+impl PartialEq for SignedProfile {
+    fn eq(&self, other: &Self) -> bool {
+        // Compare profiles directly (UserProfile implements PartialEq)
+        // and compare signature/public_key by their serialized bytes
+        self.profile == other.profile
+            && self.signature.to_bytes() == other.signature.to_bytes()
+            && self.public_key.to_bytes() == other.public_key.to_bytes()
+    }
+}
+
+impl Eq for SignedProfile {}
+
 impl SignedProfile {
     /// Sign a profile with the given keypair.
     ///

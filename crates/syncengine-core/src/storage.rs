@@ -43,6 +43,8 @@ const IDENTITY_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("ident
 const REALM_KEYS_TABLE: TableDefinition<&str, &[u8]> = TableDefinition::new("realm_keys");
 const ENDPOINT_SECRET_KEY_TABLE: TableDefinition<&str, &[u8]> =
     TableDefinition::new("endpoint_secret_key");
+const PROFILE_KEYS_TABLE: TableDefinition<&str, &[u8]> =
+    TableDefinition::new("profile_keys");
 
 /// Storage layer using redb for ACID-compliant persistence
 #[derive(Clone)]
@@ -97,6 +99,7 @@ impl Storage {
             let _ = write_txn.open_table(UNIFIED_PEERS_TABLE)?;
             let _ = write_txn.open_table(PEER_DID_INDEX)?;
             let _ = write_txn.open_table(MIGRATION_FLAGS_TABLE)?;
+            let _ = write_txn.open_table(PROFILE_KEYS_TABLE)?;
         }
         write_txn.commit()?;
 
@@ -292,6 +295,56 @@ impl Storage {
         let table = read_txn.open_table(IDENTITY_TABLE)?;
 
         Ok(table.get(Self::IDENTITY_KEY)?.is_some())
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Profile Keys Operations (Indra's Network)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Profile keys storage key (one profile per node)
+    const PROFILE_KEYS_KEY: &'static str = "profile_keys";
+
+    /// Save the node's profile keys to storage.
+    ///
+    /// Profile keys include:
+    /// - Signing keys (hybrid ML-DSA-65 + Ed25519) - derived from identity
+    /// - Key exchange keys (X25519 + ML-KEM-768) for sealed boxes
+    pub fn save_profile_keys(&self, keys: &crate::profile::ProfileKeys) -> Result<(), SyncError> {
+        let db = self.db.read();
+        let write_txn = db.begin_write()?;
+        {
+            let mut table = write_txn.open_table(PROFILE_KEYS_TABLE)?;
+            let data = keys.to_bytes();
+            table.insert(Self::PROFILE_KEYS_KEY, data.as_slice())?;
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
+
+    /// Load the node's profile keys from storage.
+    ///
+    /// Returns `None` if no profile keys have been created yet.
+    pub fn load_profile_keys(&self) -> Result<Option<crate::profile::ProfileKeys>, SyncError> {
+        let db = self.db.read();
+        let read_txn = db.begin_read()?;
+        let table = read_txn.open_table(PROFILE_KEYS_TABLE)?;
+
+        match table.get(Self::PROFILE_KEYS_KEY)? {
+            Some(v) => {
+                let keys = crate::profile::ProfileKeys::from_bytes(v.value())?;
+                Ok(Some(keys))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Check if profile keys exist in storage.
+    pub fn has_profile_keys(&self) -> Result<bool, SyncError> {
+        let db = self.db.read();
+        let read_txn = db.begin_read()?;
+        let table = read_txn.open_table(PROFILE_KEYS_TABLE)?;
+
+        Ok(table.get(Self::PROFILE_KEYS_KEY)?.is_some())
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -544,6 +597,56 @@ mod tests {
             let storage = Storage::new(&db_path).unwrap();
             let loaded = storage.load_identity().unwrap().unwrap();
             assert_eq!(loaded.public_key(), public_key);
+        }
+    }
+
+    #[test]
+    fn test_save_and_load_profile_keys() {
+        use crate::profile::ProfileKeys;
+        let (storage, _temp) = create_test_storage();
+
+        // Initially no profile keys
+        assert!(!storage.has_profile_keys().unwrap());
+        assert!(storage.load_profile_keys().unwrap().is_none());
+
+        // Generate and save profile keys
+        let keys = ProfileKeys::generate();
+        let did = keys.did();
+        storage.save_profile_keys(&keys).unwrap();
+
+        // Verify profile keys exist
+        assert!(storage.has_profile_keys().unwrap());
+
+        // Load profile keys and verify DID matches
+        let loaded = storage.load_profile_keys().unwrap().unwrap();
+        assert_eq!(loaded.did(), did);
+
+        // Verify public keys match
+        let original_pub = keys.public_bundle();
+        let loaded_pub = loaded.public_bundle();
+        assert_eq!(original_pub.did(), loaded_pub.did());
+    }
+
+    #[test]
+    fn test_profile_keys_persist_across_instances() {
+        use crate::profile::ProfileKeys;
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.redb");
+
+        // Save profile keys in first storage instance
+        let did = {
+            let storage = Storage::new(&db_path).unwrap();
+            let keys = ProfileKeys::generate();
+            let d = keys.did();
+            storage.save_profile_keys(&keys).unwrap();
+            d
+        };
+
+        // Load profile keys in second storage instance
+        {
+            let storage = Storage::new(&db_path).unwrap();
+            let loaded = storage.load_profile_keys().unwrap().unwrap();
+            assert_eq!(loaded.did(), did);
         }
     }
 

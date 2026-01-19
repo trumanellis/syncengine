@@ -248,8 +248,12 @@ pub struct PendingContact {
     pub invite_id: [u8; 16],
     /// DID of the other peer
     pub peer_did: String,
-    /// Profile information from invite
+    /// Profile information from invite (for display)
     pub profile: ProfileSnapshot,
+    /// Full signed profile from contact protocol (for pinning)
+    /// Only present when using the new protocol with SignedProfile exchange
+    #[serde(default)]
+    pub signed_profile: Option<crate::types::SignedProfile>,
     /// Network address for connection
     pub node_addr: NodeAddrBytes,
     /// Current state in acceptance workflow
@@ -415,6 +419,7 @@ mod tests {
                 avatar_blob_id: None,
                 bio: String::new(),
             },
+            signed_profile: None,
             node_addr: NodeAddrBytes::new([0u8; 32]),
             state: ContactState::OutgoingPending,
             created_at: chrono::Utc::now().timestamp(),
