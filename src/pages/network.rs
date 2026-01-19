@@ -1,9 +1,10 @@
-//! Network Page - Profiles You Mirror
+//! Network Page - Contacts You Mirror
 //!
-//! Displays the profiles you are mirroring for P2P redundancy.
+//! Displays your contacts' profiles for P2P redundancy.
+//! Now uses the unified Peer table as the single source of truth.
 
 use dioxus::prelude::*;
-use syncengine_core::ProfilePin;
+use syncengine_core::Peer;
 
 use crate::components::images::AsyncImage;
 use crate::components::{NavHeader, NavLocation};
@@ -19,9 +20,9 @@ fn profile_default_uri() -> String {
 }
 
 /// Format timestamp as relative time string.
-fn format_relative_time(timestamp: i64) -> String {
-    let now = chrono::Utc::now().timestamp();
-    let elapsed = (now - timestamp).max(0);
+fn format_relative_time(timestamp: u64) -> String {
+    let now = chrono::Utc::now().timestamp() as u64;
+    let elapsed = now.saturating_sub(timestamp);
 
     if elapsed < 60 {
         "Just now".to_string()
@@ -34,17 +35,18 @@ fn format_relative_time(timestamp: i64) -> String {
     }
 }
 
-/// Network page - Profiles You Mirror
+/// Network page - Contacts You Mirror
 #[component]
 pub fn Network() -> Element {
     let engine = use_engine();
     let engine_ready = use_engine_ready();
 
-    // State for mirrored profiles only
-    let mut pins: Signal<Vec<ProfilePin>> = use_signal(Vec::new);
+    // State for contacts (using unified Peer table)
+    let mut contacts: Signal<Vec<Peer>> = use_signal(Vec::new);
     let mut loading = use_signal(|| true);
+    let mut syncing = use_signal(|| false);
 
-    // Load mirrored profiles when engine becomes ready
+    // Load contacts when engine becomes ready
     use_effect(move || {
         if engine_ready() {
             spawn(async move {
@@ -52,14 +54,9 @@ pub fn Network() -> Element {
                 let guard = shared.read().await;
 
                 if let Some(ref eng) = *guard {
-                    // Get pins (profiles we mirror)
-                    if let Ok(pin_list) = eng.list_pinned_profiles() {
-                        // Filter out our own profile
-                        let others: Vec<_> = pin_list
-                            .into_iter()
-                            .filter(|p| !p.is_own())
-                            .collect();
-                        pins.set(others);
+                    // Use unified Peer table - single source of truth
+                    if let Ok(contact_list) = eng.list_peer_contacts() {
+                        contacts.set(contact_list);
                     }
 
                     loading.set(false);
@@ -68,36 +65,73 @@ pub fn Network() -> Element {
         }
     });
 
-    let pin_count = pins().len();
+    // Handler for manual sync button
+    let on_sync_click = move |_: ()| {
+        if syncing() {
+            return; // Prevent double-clicks
+        }
+
+        syncing.set(true);
+
+        spawn(async move {
+            let shared = engine();
+            let mut guard = shared.write().await;
+
+            if let Some(ref mut eng) = *guard {
+                match eng.manual_sync().await {
+                    Ok(contacts_count) => {
+                        tracing::info!("Manual sync completed: {} contacts", contacts_count);
+
+                        // Refresh the contacts list after sync
+                        if let Ok(contact_list) = eng.list_peer_contacts() {
+                            contacts.set(contact_list);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("Manual sync failed: {:?}", e);
+                    }
+                }
+            }
+
+            syncing.set(false);
+        });
+    };
+
+    let contact_count = contacts().len();
+    let status_text = format!("{} mirrored", contact_count);
+    let action_text = if syncing() { "Syncing..." } else { "Sync" };
 
     rsx! {
         div { class: "network-page",
-            // Sacred Navigation Console
+            // Compact Navigation Header with Sync action
             NavHeader {
                 current: NavLocation::Network,
-                status: Some(format!("{} profiles mirrored", pin_count)),
+                status: Some(status_text),
+                action_text: Some(action_text.to_string()),
+                action_loading: syncing(),
+                on_action: on_sync_click,
             }
 
             if loading() {
                 div { class: "loading-state",
                     div { class: "loading-orb" }
-                    p { "Loading mirrored profiles..." }
+                    p { "Loading contacts..." }
                 }
             } else {
                 div { class: "network-content",
                     // Profiles You Mirror
                     section { class: "network-section mirrored-profiles-section",
                         h2 { class: "section-title", "Profiles You Mirror" }
-                        p { class: "section-subtitle", "Full profiles of peers you're carrying in the network" }
+                        p { class: "section-subtitle", "Full profiles of contacts you're carrying in the network" }
 
-                        if pins().is_empty() {
+                        if contacts().is_empty() {
                             div { class: "empty-state",
                                 p { "You are not mirroring any profiles yet. Add contacts to automatically mirror their profiles." }
                             }
                         } else {
                             div { class: "mirrored-profiles-grid",
-                                for pin in pins() {
-                                    YourPinCard { pin: PinDisplayData::from(&pin) }
+                                for contact in contacts() {
+                                    ContactProfileCard { peer: contact }
                                 }
                             }
                         }
@@ -112,49 +146,9 @@ pub fn Network() -> Element {
 // Subcomponents
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Full profile data extracted from ProfilePin for display
-/// (avoids PartialEq issues with SignedProfile while exposing all fields)
-#[derive(Clone, PartialEq)]
-struct PinDisplayData {
-    did: String,
-    display_name: String,
-    subtitle: Option<String>,
-    bio: String,
-    avatar_blob_id: Option<String>,
-    profile_link: Option<String>,
-    relationship: String,
-    pinned_at: i64,
-    last_updated: i64,
-}
-
-impl From<&ProfilePin> for PinDisplayData {
-    fn from(pin: &ProfilePin) -> Self {
-        let relationship = match &pin.relationship {
-            syncengine_core::PinRelationship::Contact => "Contact".to_string(),
-            syncengine_core::PinRelationship::RealmMember { realm_id } => {
-                format!("Realm: {}", &realm_id.to_string()[..8])
-            }
-            syncengine_core::PinRelationship::Manual => "Manual".to_string(),
-            syncengine_core::PinRelationship::Own => "Self".to_string(),
-        };
-        let profile = &pin.signed_profile.profile;
-        Self {
-            did: pin.did.clone(),
-            display_name: profile.display_name.clone(),
-            subtitle: profile.subtitle.clone(),
-            bio: profile.bio.clone(),
-            avatar_blob_id: profile.avatar_blob_id.clone(),
-            profile_link: profile.profile_link.clone(),
-            relationship,
-            pinned_at: pin.pinned_at,
-            last_updated: pin.last_updated,
-        }
-    }
-}
-
 #[derive(Props, Clone, PartialEq)]
-struct YourPinCardProps {
-    pin: PinDisplayData,
+struct ContactProfileCardProps {
+    peer: Peer,
 }
 
 /// Truncate bio text to a maximum length, adding ellipsis if needed
@@ -172,23 +166,19 @@ fn truncate_bio(bio: &str, max_chars: usize) -> String {
     }
 }
 
-/// Full profile card for mirrored peers - shows complete profile information
+/// Full profile card for contacts - shows complete profile information
 #[component]
-fn YourPinCard(props: YourPinCardProps) -> Element {
-    let engine = use_engine();
+fn ContactProfileCard(props: ContactProfileCardProps) -> Element {
     let mut expanded = use_signal(|| false);
 
-    let display_name = props.pin.display_name.clone();
-    let subtitle = props.pin.subtitle.clone();
-    let bio = props.pin.bio.clone();
-    let avatar_blob_id = props.pin.avatar_blob_id.clone();
-    let profile_link = props.pin.profile_link.clone();
-    let relationship = props.pin.relationship.clone();
-    let pinned_since = format_relative_time(props.pin.pinned_at);
-    let last_mirrored = format_relative_time(props.pin.last_updated);
-    let did_for_unpin = props.pin.did.clone();
-    let did_display = {
-        let did = &props.pin.did;
+    let display_name = props.peer.display_name();
+    let profile = props.peer.profile.as_ref();
+    let subtitle = profile.and_then(|p| p.subtitle.clone());
+    let bio = profile.map(|p| p.bio.clone()).unwrap_or_default();
+    let avatar_blob_id = profile.and_then(|p| p.avatar_blob_id.clone());
+    let last_seen = format_relative_time(props.peer.last_seen);
+
+    let did_display = if let Some(ref did) = props.peer.did {
         if did.starts_with("did:sync:") {
             let suffix = &did[9..];
             if suffix.len() > 16 {
@@ -201,11 +191,20 @@ fn YourPinCard(props: YourPinCardProps) -> Element {
         } else {
             did.clone()
         }
+    } else {
+        format!("peer_{}", hex::encode(&props.peer.endpoint_id[..4]))
     };
 
     // Determine if bio should show expand option
     let bio_preview = truncate_bio(&bio, 150);
     let has_more_bio = bio.len() > 150;
+
+    // Status indicator
+    let status_class = match props.peer.status {
+        syncengine_core::PeerStatus::Online => "status-online",
+        syncengine_core::PeerStatus::Offline => "status-offline",
+        syncengine_core::PeerStatus::Unknown => "status-unknown",
+    };
 
     rsx! {
         div { class: "network-card mirrored-profile-card",
@@ -234,13 +233,12 @@ fn YourPinCard(props: YourPinCardProps) -> Element {
                     if let Some(ref sub) = subtitle {
                         p { class: "mirrored-subtitle", "{sub}" }
                     }
-                    if let Some(ref link) = profile_link {
-                        span { class: "mirrored-link", "sync.local/{link}" }
-                    }
                 }
 
-                // Relationship badge
-                span { class: "mirrored-relationship-badge", "{relationship}" }
+                // Status badge
+                span { class: "mirrored-relationship-badge {status_class}",
+                    "{props.peer.status}"
+                }
             }
 
             // DID (truncated)
@@ -254,60 +252,29 @@ fn YourPinCard(props: YourPinCardProps) -> Element {
                 div { class: "mirrored-bio",
                     if expanded() {
                         p { class: "bio-text bio-full", "{bio}" }
+                        if has_more_bio {
+                            button {
+                                class: "bio-toggle",
+                                onclick: move |_| expanded.set(false),
+                                "Show less"
+                            }
+                        }
                     } else {
                         p { class: "bio-text bio-preview", "{bio_preview}" }
-                    }
-                    if has_more_bio {
-                        button {
-                            class: "bio-expand-btn",
-                            onclick: move |_| expanded.set(!expanded()),
-                            if expanded() { "Show less" } else { "Show more" }
+                        if has_more_bio {
+                            button {
+                                class: "bio-toggle",
+                                onclick: move |_| expanded.set(true),
+                                "Show more"
+                            }
                         }
                     }
                 }
-            } else {
-                div { class: "mirrored-bio mirrored-bio-empty",
-                    p { class: "bio-placeholder", "No bio provided" }
-                }
             }
 
-            // Mirror timestamps
-            div { class: "mirrored-timestamps",
-                div { class: "timestamp-item",
-                    span { class: "timestamp-label", "Mirroring since: " }
-                    span { class: "timestamp-value", "{pinned_since}" }
-                }
-                div { class: "timestamp-item",
-                    span { class: "timestamp-label", "Last synced: " }
-                    span { class: "timestamp-value timestamp-mirrored", "{last_mirrored}" }
-                }
-            }
-
-            // Actions
-            div { class: "mirrored-actions",
-                button {
-                    class: "unpin-btn",
-                    title: "Stop mirroring this profile",
-                    onclick: move |_| {
-                        let did = did_for_unpin.clone();
-                        spawn(async move {
-                            let shared = engine();
-                            let guard = shared.read().await;
-                            if let Some(ref eng) = *guard {
-                                match eng.unpin_profile(&did) {
-                                    Ok(_) => {
-                                        tracing::info!("Unpinned profile: {}", did);
-                                        // TODO: Refresh the page
-                                    }
-                                    Err(e) => {
-                                        tracing::error!("Failed to unpin profile: {:?}", e);
-                                    }
-                                }
-                            }
-                        });
-                    },
-                    "Stop Mirroring"
-                }
+            // Footer with metadata
+            div { class: "mirrored-footer",
+                span { class: "mirrored-meta", "Last seen: {last_seen}" }
             }
         }
     }
