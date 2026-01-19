@@ -1,11 +1,11 @@
 //! Profile Card Component
 //!
-//! Golden ratio card displaying user profile with avatar, bio, and quests.
+//! Golden ratio card displaying user profile with avatar and connection info.
 
 use dioxus::prelude::*;
 use syncengine_core::types::UserProfile;
 
-use super::{CardGallery, CardHeader, CardOrientation, GoldenCard, MarkdownEditor, MarkdownRenderer};
+use super::{CardGallery, CardHeader, CardOrientation, GoldenCard};
 use super::card_gallery::GalleryItem;
 use crate::components::images::{AsyncImage, ImageOrientation, ImageUpload};
 use crate::components::profile::QRSignature;
@@ -19,6 +19,22 @@ fn profile_default_uri() -> String {
     format!("data:image/png;base64,{}", base64)
 }
 
+/// Truncate DID for display, preserving the prefix
+fn truncate_did(did: &str) -> String {
+    if did.starts_with("did:sync:") {
+        let suffix = &did[9..];
+        if suffix.len() > 12 {
+            format!("did:sync:{}…", &suffix[..12])
+        } else {
+            did.to_string()
+        }
+    } else if did.len() > 20 {
+        format!("{}…", &did[..20])
+    } else {
+        did.to_string()
+    }
+}
+
 /// Profile card with editable fields and QR code overlay
 ///
 /// # Examples
@@ -29,6 +45,9 @@ fn profile_default_uri() -> String {
 ///         profile: user_profile,
 ///         editable: true,
 ///         show_qr: true,
+///         did: Some("did:sync:abc123...".to_string()),
+///         status: Some("online".to_string()),
+///         last_seen: Some("Just now".to_string()),
 ///         on_update: move |updated| {
 ///             // Save updated profile
 ///         },
@@ -45,6 +64,18 @@ pub fn ProfileCard(
     /// Show QR code overlay on avatar
     #[props(default = false)]
     show_qr: bool,
+    /// Compact mode for smaller cards (reduces font sizes)
+    #[props(default = false)]
+    compact: bool,
+    /// DID to display (truncated automatically)
+    #[props(default = None)]
+    did: Option<String>,
+    /// Connection status (e.g., "online", "offline", "unknown")
+    #[props(default = None)]
+    status: Option<String>,
+    /// Formatted last seen time (e.g., "Just now", "5m ago")
+    #[props(default = None)]
+    last_seen: Option<String>,
     /// Callback when profile is updated
     #[props(default = None)]
     on_update: Option<EventHandler<UserProfile>>,
@@ -81,13 +112,27 @@ pub fn ProfileCard(
         editing.set(false);
     };
 
-    rsx! {
-        GoldenCard {
-            orientation: CardOrientation::Landscape,
-            interactive: !editing(),
+    // Determine card classes based on compact mode
+    let card_class = if compact { "profile-card profile-card--compact" } else { "profile-card" };
+    let content_class = if compact { "card-content card-content--compact" } else { "card-content" };
 
-            // Left: Avatar image area (38.2%)
-            div { class: "card-image-area",
+    // Format status class for styling
+    let status_class = status.as_ref().map(|s| {
+        match s.as_str() {
+            "online" => "status-indicator status-online",
+            "offline" => "status-indicator status-offline",
+            _ => "status-indicator status-unknown",
+        }
+    });
+
+    rsx! {
+        div { class: "{card_class}",
+            GoldenCard {
+                orientation: CardOrientation::Landscape,
+                interactive: !editing(),
+
+                // Left: Avatar image area (38.2%)
+                div { class: "card-image-area",
                 // Avatar image
                 if let Some(blob_id) = &draft().avatar_blob_id {
                     AsyncImage {
@@ -129,7 +174,7 @@ pub fn ProfileCard(
             }
 
             // Right: Content area (61.8%)
-            div { class: "card-content",
+            div { class: "{content_class}",
                 // Header: Name, subtitle, link
                 if editing() {
                     // Editable header
@@ -163,11 +208,44 @@ pub fn ProfileCard(
                         }
                     }
                 } else {
-                    // Display mode
+                    // Display mode - name only in header
                     CardHeader {
                         title: profile.display_name.clone(),
-                        subtitle: profile.subtitle.clone(),
+                        subtitle: None,
                         link: profile.profile_link.as_ref().map(|l| format!("sync.local/{}", l)),
+                    }
+                }
+
+                // Tagline (subtitle) - shown after name, before connection info
+                if let Some(ref tagline) = profile.subtitle {
+                    p { class: "card-tagline", "{tagline}" }
+                }
+
+                // Connection info (DID, status, last seen) - only shown when provided
+                if did.is_some() || status.is_some() || last_seen.is_some() {
+                    div { class: "card-connection-info",
+                        // DID
+                        if let Some(ref did_str) = did {
+                            div { class: "connection-did",
+                                span { class: "did-label", "DID: " }
+                                span { class: "did-value", "{truncate_did(did_str)}" }
+                            }
+                        }
+
+                        // Status and last seen row
+                        div { class: "connection-status-row",
+                            // Status indicator
+                            if let Some(ref status_str) = status {
+                                if let Some(ref class_str) = status_class {
+                                    span { class: "{class_str}", "{status_str}" }
+                                }
+                            }
+
+                            // Last seen
+                            if let Some(ref seen) = last_seen {
+                                span { class: "last-seen", "Last seen: {seen}" }
+                            }
+                        }
                     }
                 }
 
@@ -182,39 +260,6 @@ pub fn ProfileCard(
                                 label: Some(quest_id.clone()),
                             }
                         }).collect::<Vec<_>>(),
-                    }
-                }
-
-                // Bio (markdown)
-                div { class: "card-markdown-section",
-                    if editing() {
-                        {
-                            let bio_signal = use_memo(move || draft().bio.clone());
-                            rsx! {
-                                MarkdownEditor {
-                                    content: bio_signal,
-                                    on_change: move |new_bio| draft.write().bio = new_bio,
-                                }
-                            }
-                        }
-                    } else {
-                        if !profile.bio.is_empty() {
-                            {
-                                // Fix: Read from display_profile signal for proper reactivity
-                                let bio_signal = use_memo(move || display_profile().bio.clone());
-                                rsx! {
-                                    MarkdownRenderer {
-                                        content: bio_signal,
-                                        collapsible: false,
-                                        collapsed: false,
-                                    }
-                                }
-                            }
-                        } else {
-                            div { class: "card-empty-state",
-                                "No bio yet..."
-                            }
-                        }
                     }
                 }
 
@@ -241,6 +286,7 @@ pub fn ProfileCard(
                         }
                     }
                 }
+            }
             }
         }
     }

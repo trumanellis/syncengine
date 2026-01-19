@@ -1,25 +1,16 @@
-//! Network Page - Contacts You Mirror
+//! Network Page
 //!
-//! Displays your contacts' profiles for P2P redundancy.
-//! Now uses the unified Peer table as the single source of truth.
+//! Displays your contacts' profiles.
+//! Uses the unified Peer table as the single source of truth.
 
 use dioxus::prelude::*;
-use syncengine_core::Peer;
+use syncengine_core::{ContactEvent, Peer, UserProfile};
 
-use crate::components::images::AsyncImage;
+use crate::components::cards::ProfileCard;
 use crate::components::{NavHeader, NavLocation};
 use crate::context::{use_engine, use_engine_ready};
 
-// Embed default profile image as base64 data URI
-const PROFILE_DEFAULT_BYTES: &[u8] = include_bytes!("../../assets/profile-default.png");
-
-fn profile_default_uri() -> String {
-    use base64::Engine;
-    let base64 = base64::engine::general_purpose::STANDARD.encode(PROFILE_DEFAULT_BYTES);
-    format!("data:image/png;base64,{}", base64)
-}
-
-/// Format timestamp as relative time string.
+/// Format timestamp as relative time string
 fn format_relative_time(timestamp: u64) -> String {
     let now = chrono::Utc::now().timestamp() as u64;
     let elapsed = now.saturating_sub(timestamp);
@@ -35,7 +26,24 @@ fn format_relative_time(timestamp: u64) -> String {
     }
 }
 
-/// Network page - Contacts You Mirror
+/// Convert a Peer to UserProfile for display in ProfileCard
+fn peer_to_user_profile(peer: &Peer) -> UserProfile {
+    let profile = peer.profile.as_ref();
+
+    UserProfile {
+        peer_id: hex::encode(&peer.endpoint_id),
+        display_name: peer.display_name(),
+        subtitle: profile.and_then(|p| p.subtitle.clone()),
+        profile_link: None, // Contacts don't have profile links
+        avatar_blob_id: profile.and_then(|p| p.avatar_blob_id.clone()),
+        bio: profile.map(|p| p.bio.clone()).unwrap_or_default(),
+        top_quests: vec![], // TODO: load from contact's profile
+        created_at: 0,
+        updated_at: peer.last_seen as i64,
+    }
+}
+
+/// Network page - displays contacts.
 #[component]
 pub fn Network() -> Element {
     let engine = use_engine();
@@ -49,6 +57,7 @@ pub fn Network() -> Element {
     // Load contacts when engine becomes ready
     use_effect(move || {
         if engine_ready() {
+            // Initial load
             spawn(async move {
                 let shared = engine();
                 let guard = shared.read().await;
@@ -60,6 +69,43 @@ pub fn Network() -> Element {
                     }
 
                     loading.set(false);
+                }
+            });
+
+            // Subscribe to contact events for real-time profile updates
+            spawn(async move {
+                let shared = engine();
+                let mut guard = shared.write().await;
+
+                if let Some(ref mut eng) = *guard {
+                    // Subscribe to contact events
+                    match eng.subscribe_contact_events().await {
+                        Ok(mut event_rx) => {
+                            // Release the lock before the event loop
+                            drop(guard);
+
+                            tracing::debug!("Network page subscribed to contact events");
+
+                            // Listen for profile updates
+                            while let Ok(event) = event_rx.recv().await {
+                                if let ContactEvent::ProfileUpdated { did } = event {
+                                    tracing::debug!(did = %did, "Profile updated event received, refreshing contacts");
+
+                                    // Refresh contacts list
+                                    let shared = engine();
+                                    let guard = shared.read().await;
+                                    if let Some(ref eng) = *guard {
+                                        if let Ok(contact_list) = eng.list_peer_contacts() {
+                                            contacts.set(contact_list);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, "Failed to subscribe to contact events");
+                        }
+                    }
                 }
             });
         }
@@ -119,11 +165,8 @@ pub fn Network() -> Element {
                 }
             } else {
                 div { class: "network-content",
-                    // Profiles You Mirror
+                    // Mirrored profiles grid
                     section { class: "network-section mirrored-profiles-section",
-                        h2 { class: "section-title", "Profiles You Mirror" }
-                        p { class: "section-subtitle", "Full profiles of contacts you're carrying in the network" }
-
                         if contacts().is_empty() {
                             div { class: "empty-state",
                                 p { "You are not mirroring any profiles yet. Add contacts to automatically mirror their profiles." }
@@ -131,150 +174,20 @@ pub fn Network() -> Element {
                         } else {
                             div { class: "mirrored-profiles-grid",
                                 for contact in contacts() {
-                                    ContactProfileCard { peer: contact }
+                                    ProfileCard {
+                                        profile: peer_to_user_profile(&contact),
+                                        editable: false,
+                                        show_qr: false,
+                                        compact: true,
+                                        did: contact.did.clone(),
+                                        status: Some(contact.status.to_string()),
+                                        last_seen: Some(format_relative_time(contact.last_seen)),
+                                    }
                                 }
                             }
                         }
                     }
                 }
-            }
-        }
-    }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// Subcomponents
-// ═══════════════════════════════════════════════════════════════════════════════
-
-#[derive(Props, Clone, PartialEq)]
-struct ContactProfileCardProps {
-    peer: Peer,
-}
-
-/// Truncate bio text to a maximum length, adding ellipsis if needed
-fn truncate_bio(bio: &str, max_chars: usize) -> String {
-    if bio.len() <= max_chars {
-        bio.to_string()
-    } else {
-        // Find a good break point (space or newline)
-        let truncated = &bio[..max_chars];
-        if let Some(last_space) = truncated.rfind(|c: char| c.is_whitespace()) {
-            format!("{}…", &truncated[..last_space])
-        } else {
-            format!("{}…", truncated)
-        }
-    }
-}
-
-/// Full profile card for contacts - shows complete profile information
-#[component]
-fn ContactProfileCard(props: ContactProfileCardProps) -> Element {
-    let mut expanded = use_signal(|| false);
-
-    let display_name = props.peer.display_name();
-    let profile = props.peer.profile.as_ref();
-    let subtitle = profile.and_then(|p| p.subtitle.clone());
-    let bio = profile.map(|p| p.bio.clone()).unwrap_or_default();
-    let avatar_blob_id = profile.and_then(|p| p.avatar_blob_id.clone());
-    let last_seen = format_relative_time(props.peer.last_seen);
-
-    let did_display = if let Some(ref did) = props.peer.did {
-        if did.starts_with("did:sync:") {
-            let suffix = &did[9..];
-            if suffix.len() > 16 {
-                format!("did:sync:{}…", &suffix[..16])
-            } else {
-                did.clone()
-            }
-        } else if did.len() > 24 {
-            format!("{}…", &did[..24])
-        } else {
-            did.clone()
-        }
-    } else {
-        format!("peer_{}", hex::encode(&props.peer.endpoint_id[..4]))
-    };
-
-    // Determine if bio should show expand option
-    let bio_preview = truncate_bio(&bio, 150);
-    let has_more_bio = bio.len() > 150;
-
-    // Status indicator
-    let status_class = match props.peer.status {
-        syncengine_core::PeerStatus::Online => "status-online",
-        syncengine_core::PeerStatus::Offline => "status-offline",
-        syncengine_core::PeerStatus::Unknown => "status-unknown",
-    };
-
-    rsx! {
-        div { class: "network-card mirrored-profile-card",
-            // Profile header with avatar
-            div { class: "mirrored-profile-header",
-                // Avatar
-                div { class: "mirrored-avatar",
-                    if let Some(ref blob_id) = avatar_blob_id {
-                        AsyncImage {
-                            blob_id: blob_id.clone(),
-                            alt: display_name.clone(),
-                            class: Some("mirrored-avatar-img".to_string()),
-                        }
-                    } else {
-                        img {
-                            class: "mirrored-avatar-img mirrored-avatar-default",
-                            src: "{profile_default_uri()}",
-                            alt: "Profile",
-                        }
-                    }
-                }
-
-                // Name and subtitle
-                div { class: "mirrored-identity",
-                    h3 { class: "mirrored-name", "{display_name}" }
-                    if let Some(ref sub) = subtitle {
-                        p { class: "mirrored-subtitle", "{sub}" }
-                    }
-                }
-
-                // Status badge
-                span { class: "mirrored-relationship-badge {status_class}",
-                    "{props.peer.status}"
-                }
-            }
-
-            // DID (truncated)
-            div { class: "mirrored-did",
-                span { class: "did-label", "DID: " }
-                span { class: "did-value", "{did_display}" }
-            }
-
-            // Bio section
-            if !bio.is_empty() {
-                div { class: "mirrored-bio",
-                    if expanded() {
-                        p { class: "bio-text bio-full", "{bio}" }
-                        if has_more_bio {
-                            button {
-                                class: "bio-toggle",
-                                onclick: move |_| expanded.set(false),
-                                "Show less"
-                            }
-                        }
-                    } else {
-                        p { class: "bio-text bio-preview", "{bio_preview}" }
-                        if has_more_bio {
-                            button {
-                                class: "bio-toggle",
-                                onclick: move |_| expanded.set(true),
-                                "Show more"
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Footer with metadata
-            div { class: "mirrored-footer",
-                span { class: "mirrored-meta", "Last seen: {last_seen}" }
             }
         }
     }

@@ -45,7 +45,7 @@ BELOW HEADER: Action Bar
 ║                                                                                    ║
 ║                                                                                    ║
 ║    ∴                                                                               ║
-║  ·   ·         The Network                                                        ║
+║  ·   ·         Your Network                                                        ║
 ║    ·           ───────────                                                        ║
 ║ (triangle      (gold serif, glowing)                                              ║
 ║  of dots)                                                                         ║
@@ -297,7 +297,7 @@ Green dot pulses to show active network state
 ║    </div>                                                      ║
 ║                                                                ║
 ║    <nav class="nav-links" aria-label="Main navigation">       ║
-║      <Link to="/network" title="Navigate to The Network">     ║
+║      <Link to="/network" title="Navigate to Your Network">     ║
 ║        <span aria-hidden="true">∴</span>                      ║
 ║        <span>Network</span>                                    ║
 ║      </Link>                                                   ║

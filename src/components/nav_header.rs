@@ -20,7 +20,7 @@ impl NavLocation {
     pub fn sacred_name(&self) -> &'static str {
         match self {
             NavLocation::Field => "The Field",
-            NavLocation::Network => "The Network",
+            NavLocation::Network => "Your Network",
             NavLocation::Profile => "Identity",
         }
     }
@@ -51,17 +51,26 @@ pub struct NavHeaderProps {
     /// Optional status indicator (e.g., "field resonating", "3 connections")
     #[props(default = None)]
     pub status: Option<String>,
+    /// Optional action button text (renders a button in the header)
+    #[props(default = None)]
+    pub action_text: Option<String>,
+    /// Whether the action is currently in progress (shows loading state)
+    #[props(default = false)]
+    pub action_loading: bool,
+    /// Callback when action button is clicked
+    #[props(default = None)]
+    pub on_action: Option<EventHandler<()>>,
 }
 
 /// Sacred Navigation Console component
 ///
 /// A unified header that appears across all main pages (Field, Network, Profile).
 /// Features:
-/// - Sacred geometry divider lines
+/// - Compact, single-line layout
 /// - Current location with glowing sigil
 /// - Navigation to other sections
 /// - Optional status indicator
-/// - Mystical terminal aesthetic
+/// - Optional action button
 #[component]
 pub fn NavHeader(props: NavHeaderProps) -> Element {
     let locations = [
@@ -71,15 +80,12 @@ pub fn NavHeader(props: NavHeaderProps) -> Element {
     ];
 
     rsx! {
-        header { class: "nav-header",
-            // Sacred geometry border accent (top line)
-            div { class: "nav-border-accent" }
-
+        header { class: "nav-header compact",
             div { class: "nav-inner",
                 // Left: Current location with sigil
                 div { class: "nav-current-location",
-                    span { class: "nav-sigil pulsing", "{props.current.sigil()}" }
-                    h1 { class: "nav-location-name", "{props.current.sacred_name()}" }
+                    span { class: "nav-sigil", "{props.current.sigil()}" }
+                    span { class: "nav-location-name", "{props.current.sacred_name()}" }
                 }
 
                 // Center: Status indicator (if provided)
@@ -87,6 +93,21 @@ pub fn NavHeader(props: NavHeaderProps) -> Element {
                     div { class: "nav-status",
                         span { class: "nav-status-dot" }
                         span { class: "nav-status-text", "{status_text}" }
+                    }
+                }
+
+                // Action button (if provided)
+                if let Some(action_text) = &props.action_text {
+                    button {
+                        class: if props.action_loading { "nav-action-btn loading" } else { "nav-action-btn" },
+                        disabled: props.action_loading,
+                        onclick: move |_| {
+                            if let Some(handler) = &props.on_action {
+                                handler.call(());
+                            }
+                        },
+                        span { class: "action-icon", if props.action_loading { "⟳" } else { "↻" } }
+                        span { class: "action-text", "{action_text}" }
                     }
                 }
 
@@ -99,15 +120,11 @@ pub fn NavHeader(props: NavHeaderProps) -> Element {
                                 class: "nav-link",
                                 title: format!("Navigate to {}", location.sacred_name()),
                                 span { class: "nav-link-sigil", "{location.sigil()}" }
-                                span { class: "nav-link-text", "{location.sacred_name()}" }
                             }
                         }
                     }
                 }
             }
-
-            // Sacred geometry border accent (bottom line with notches)
-            div { class: "nav-border-accent-bottom" }
         }
     }
 }
