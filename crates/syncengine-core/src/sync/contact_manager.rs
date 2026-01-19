@@ -35,7 +35,7 @@ use crate::identity::{Did, HybridKeypair, HybridPublicKey};
 use crate::invite::NodeAddrBytes;
 use crate::storage::Storage;
 use crate::sync::contact_protocol::{ContactMessage, CONTACT_ALPN};
-use crate::sync::{GossipSync, TopicHandle};
+use crate::sync::{GossipSync, TopicSender};
 use crate::types::contact::{
     ContactInfo, ContactState, ContactStatus, HybridContactInvite, PeerContactInvite,
     PendingContact, ProfileSnapshot,
@@ -85,8 +85,10 @@ pub struct ContactManager {
     storage: Arc<Storage>,
     /// Event broadcast channel for UI updates
     event_tx: broadcast::Sender<ContactEvent>,
-    /// Active 1:1 gossip topics (contact_topic -> handle)
-    active_topics: Arc<RwLock<HashMap<[u8; 32], TopicHandle>>>,
+    /// Active 1:1 gossip topics (contact_topic -> sender)
+    /// We use TopicSender instead of TopicHandle because the receiver is consumed
+    /// by the contact topic listener for processing incoming profile announcements.
+    active_topics: Arc<RwLock<HashMap<[u8; 32], crate::sync::TopicSender>>>,
 }
 
 impl ContactManager {
@@ -699,12 +701,18 @@ impl ContactManager {
         let bootstrap_peer = iroh::PublicKey::from_bytes(&contact.peer_endpoint_id)
             .map_err(|e| SyncError::Identity(format!("Invalid peer endpoint ID: {}", e)))?;
 
+        // CRITICAL: Add the peer's full address to static discovery BEFORE subscribing.
+        // Without this, iroh-gossip cannot find the peer using just the PublicKey,
+        // and the subscription fails with "topic closed".
+        let peer_endpoint_addr = contact.node_addr.to_endpoint_addr()?;
+        self.gossip_sync.add_peer_addr(peer_endpoint_addr);
+
         match self
             .gossip_sync
             .subscribe_split(peer_profile_topic, vec![bootstrap_peer])
             .await
         {
-            Ok((_sender, receiver)) => {
+            Ok((sender, receiver)) => {
                 info!(
                     peer_did = %contact.peer_did,
                     ?peer_profile_topic,
@@ -712,9 +720,11 @@ impl ContactManager {
                 );
 
                 // Spawn listener to process profile updates from this contact's topic
+                // Pass the sender so it stays alive - dropping it would close the topic!
                 Self::spawn_profile_topic_listener(
                     self.storage.clone(),
                     contact.peer_did.clone(),
+                    sender,
                     receiver,
                 );
             }
@@ -747,20 +757,34 @@ impl ContactManager {
     /// This listener processes profile updates (Announce messages) from the contact
     /// and updates the local Peer record with the new profile information.
     ///
+    /// **Important:** The `sender` parameter MUST be kept alive for the entire lifetime
+    /// of the listener. If the sender is dropped, the gossip topic will close and no
+    /// messages will be received. This is a common cause of "topic closed" errors.
+    ///
     /// # Arguments
     ///
     /// * `storage` - Storage for updating Peer profiles
     /// * `peer_did` - The DID of the contact whose profile topic we're listening to
+    /// * `sender` - The TopicSender from subscribe_split() - MUST be kept alive!
     /// * `receiver` - The TopicReceiver from subscribe_split()
     fn spawn_profile_topic_listener(
         storage: Arc<Storage>,
         peer_did: String,
+        sender: crate::sync::TopicSender,
         mut receiver: crate::sync::TopicReceiver,
     ) {
         tokio::spawn(async move {
             use crate::sync::TopicEvent;
-
+            // CRITICAL: Keep the sender alive for the entire lifetime of the listener.
+            // Dropping the sender closes the gossip topic, causing the receiver to immediately
+            // return None and the listener to exit. This is THE root cause of profile updates
+            // not propagating after app restart.
+            let _keep_alive = sender;
             info!(peer_did = %peer_did, "Profile topic listener started for contact");
+
+            // Note: We don't wait for joined() here because the gossip mesh may not form
+            // immediately. Instead, we start listening and let the receiver handle reconnection.
+            // The gossip protocol will eventually establish connectivity if the peer is online.
 
             while let Some(event) = receiver.recv_event().await {
                 if let TopicEvent::Message(msg) = event {
@@ -852,26 +876,143 @@ impl ContactManager {
     /// Subscribe to a 1:1 contact gossip topic
     ///
     /// Creates a direct communication channel with this contact.
+    /// Also spawns a listener for incoming profile announcements on this topic.
     async fn subscribe_contact_topic(&self, contact: &ContactInfo) -> SyncResult<()> {
         let topic_id = TopicId::from_bytes(contact.contact_topic);
 
-        // Subscribe with no bootstrap peers (direct connection only)
-        // The peer will connect when they also subscribe to the same topic
-        let handle = self.gossip_sync.subscribe(topic_id, vec![]).await?;
+        // Get bootstrap peer from contact's endpoint ID
+        // CRITICAL: Gossip requires at least one bootstrap peer to form a mesh!
+        // Without this, both peers create separate "swarms of one" and never connect.
+        let bootstrap_peer = iroh::PublicKey::from_bytes(&contact.peer_endpoint_id)
+            .map_err(|e| SyncError::Network(format!("Invalid peer endpoint: {}", e)))?;
 
-        // Store handle for later use
+        // Add peer address to static discovery for reachability
+        if let Ok(addr) = contact.node_addr.to_endpoint_addr() {
+            self.gossip_sync.add_peer_addr(addr);
+        }
+
+        // Subscribe WITH the contact as a bootstrap peer
+        let (sender, receiver) = self.gossip_sync.subscribe_split(topic_id, vec![bootstrap_peer]).await?;
+
+        // Store sender for broadcasting profile announcements to this contact
         self.active_topics
             .write()
             .await
-            .insert(contact.contact_topic, handle);
+            .insert(contact.contact_topic, sender);
+
+        // Spawn listener for incoming messages (including profile announcements)
+        Self::spawn_contact_topic_listener(
+            self.storage.clone(),
+            contact.peer_did.clone(),
+            receiver,
+        );
 
         info!(
             peer_did = %contact.peer_did,
             topic_id = ?topic_id,
-            "Subscribed to contact gossip topic"
+            "Subscribed to contact gossip topic with profile listener"
         );
 
         Ok(())
+    }
+
+    /// Spawn a background listener for messages on a 1:1 contact topic.
+    ///
+    /// This listener processes profile announcements (ProfileGossipMessage::Announce)
+    /// from the contact and updates the local Peer record with new profile information.
+    ///
+    /// Unlike per-peer profile topics, contact topics have proper bi-directional
+    /// mesh formation from the contact exchange, so messages flow reliably.
+    fn spawn_contact_topic_listener(
+        storage: Arc<Storage>,
+        peer_did: String,
+        mut receiver: crate::sync::TopicReceiver,
+    ) {
+        tokio::spawn(async move {
+            use crate::sync::TopicEvent;
+
+            debug!(peer_did = %peer_did, "Contact topic listener started");
+
+            while let Some(event) = receiver.recv_event().await {
+                if let TopicEvent::Message(msg) = event {
+                    // Try to parse as profile gossip message
+                    match crate::sync::ProfileGossipMessage::from_bytes(&msg.content) {
+                        Ok(crate::sync::ProfileGossipMessage::Announce {
+                            signed_profile, ..
+                        }) => {
+                            // Verify the signature
+                            if !signed_profile.verify() {
+                                warn!(peer_did = %peer_did, "Invalid signature on profile announcement");
+                                continue;
+                            }
+
+                            let signer_did = signed_profile.did().to_string();
+
+                            // Only process announcements from the expected peer
+                            if signer_did != peer_did {
+                                debug!(
+                                    expected = %peer_did,
+                                    actual = %signer_did,
+                                    "Received profile from unexpected signer on contact topic"
+                                );
+                                continue;
+                            }
+
+                            // Update the Peer.profile in storage
+                            match storage.load_peer_by_did(&signer_did) {
+                                Ok(Some(mut peer)) => {
+                                    peer.profile = Some(crate::types::ProfileSnapshot {
+                                        display_name: signed_profile.profile.display_name.clone(),
+                                        subtitle: signed_profile.profile.subtitle.clone(),
+                                        avatar_blob_id: signed_profile.profile.avatar_blob_id.clone(),
+                                        bio: crate::types::ProfileSnapshot::truncate_bio(
+                                            &signed_profile.profile.bio,
+                                        ),
+                                    });
+
+                                    if let Err(e) = storage.save_peer(&peer) {
+                                        warn!(
+                                            did = %signer_did,
+                                            error = %e,
+                                            "Failed to update peer profile from contact topic"
+                                        );
+                                    } else {
+                                        info!(
+                                            did = %signer_did,
+                                            name = %signed_profile.profile.display_name,
+                                            "Updated contact profile from contact topic"
+                                        );
+                                    }
+                                }
+                                Ok(None) => {
+                                    debug!(
+                                        did = %signer_did,
+                                        "Received profile for unknown peer (not in storage)"
+                                    );
+                                }
+                                Err(e) => {
+                                    warn!(
+                                        did = %signer_did,
+                                        error = %e,
+                                        "Failed to load peer from storage"
+                                    );
+                                }
+                            }
+                        }
+                        Ok(_) => {
+                            // Ignore Request/Response messages
+                        }
+                        Err(_) => {
+                            // Not a profile message - might be other contact protocol messages
+                            // (future: could add other message types here)
+                        }
+                    }
+                }
+                // NeighborUp/NeighborDown events could be used for presence detection
+            }
+
+            debug!(peer_did = %peer_did, "Contact topic listener stopped");
+        });
     }
 
     /// Derive deterministic 1:1 contact topic from two DIDs
@@ -917,11 +1058,53 @@ impl ContactManager {
         self.event_tx.subscribe()
     }
 
+    /// Broadcast a profile announcement to all contacts via their 1:1 contact topics.
+    ///
+    /// This is the primary mechanism for profile propagation. Contact topics have
+    /// proper bi-directional mesh formation from the contact exchange, so messages
+    /// flow reliably between contacts.
+    ///
+    /// # Arguments
+    ///
+    /// * `message_bytes` - The serialized ProfileGossipMessage::Announce to broadcast
+    ///
+    /// # Returns
+    ///
+    /// The number of contacts the message was successfully broadcast to.
+    pub async fn broadcast_profile_to_contacts(&self, message_bytes: &[u8]) -> usize {
+        let active_topics = self.active_topics.read().await;
+        let mut success_count = 0;
+
+        for (topic_bytes, sender) in active_topics.iter() {
+            match sender.broadcast(message_bytes.to_vec()).await {
+                Ok(()) => {
+                    debug!(
+                        topic = ?TopicId::from_bytes(*topic_bytes),
+                        "Broadcast profile to contact topic"
+                    );
+                    success_count += 1;
+                }
+                Err(e) => {
+                    warn!(
+                        topic = ?TopicId::from_bytes(*topic_bytes),
+                        error = %e,
+                        "Failed to broadcast profile to contact topic"
+                    );
+                }
+            }
+        }
+
+        success_count
+    }
+
     /// Auto-reconnect to all contacts on startup
     ///
     /// Loads all contacts from storage and attempts to reconnect,
-    /// prioritizing favorites first.
+    /// prioritizing favorites first. Also re-subscribes to each contact's
+    /// per-peer profile topic to receive profile updates after app restart.
     pub async fn reconnect_contacts(&self) -> SyncResult<()> {
+        use crate::sync::derive_profile_topic;
+
         let mut contacts = self.storage.list_contacts()?;
 
         // Sort by is_favorite (favorites first)
@@ -933,15 +1116,67 @@ impl ContactManager {
         );
 
         for contact in contacts {
+            // 1. Subscribe to the 1:1 contact topic (for direct messaging)
             match self.subscribe_contact_topic(&contact).await {
                 Ok(_) => {
-                    debug!(peer_did = %contact.peer_did, "Reconnected to contact");
+                    debug!(peer_did = %contact.peer_did, "Reconnected to contact topic");
                 }
                 Err(e) => {
                     warn!(
                         peer_did = %contact.peer_did,
                         error = ?e,
-                        "Failed to reconnect to contact"
+                        "Failed to reconnect to contact topic"
+                    );
+                }
+            }
+
+            // 2. Subscribe to the contact's per-peer profile topic (for profile updates)
+            // This is critical for receiving display name/avatar changes after app restart
+            let peer_profile_topic = derive_profile_topic(&contact.peer_did);
+
+            // CRITICAL: Add the peer's full address to static discovery BEFORE subscribing.
+            // Without this, iroh-gossip cannot find the peer using just the PublicKey.
+            if let Ok(peer_endpoint_addr) = contact.node_addr.to_endpoint_addr() {
+                self.gossip_sync.add_peer_addr(peer_endpoint_addr);
+            }
+
+            match iroh::PublicKey::from_bytes(&contact.peer_endpoint_id) {
+                Ok(bootstrap_peer) => {
+                    match self
+                        .gossip_sync
+                        .subscribe_split(peer_profile_topic, vec![bootstrap_peer])
+                        .await
+                    {
+                        Ok((sender, receiver)) => {
+                            info!(
+                                peer_did = %contact.peer_did,
+                                ?peer_profile_topic,
+                                "Subscribed to contact's profile topic on reconnect"
+                            );
+                            // Spawn listener to process profile updates from this contact
+                            // Pass the sender so it stays alive - dropping it would close the topic!
+                            Self::spawn_profile_topic_listener(
+                                self.storage.clone(),
+                                contact.peer_did.clone(),
+                                sender,
+                                receiver,
+                            );
+                        }
+                        Err(e) => {
+                            // Non-fatal: we can still receive updates via global topic
+                            warn!(
+                                peer_did = %contact.peer_did,
+                                error = %e,
+                                "Failed to subscribe to contact's profile topic on reconnect (non-fatal)"
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        peer_did = %contact.peer_did,
+                        error = %e,
+                        "Invalid peer endpoint ID, skipping profile topic subscription"
                     );
                 }
             }

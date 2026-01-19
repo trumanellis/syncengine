@@ -132,6 +132,22 @@ impl TopicReceiver {
         self.receiver.is_joined()
     }
 
+    /// Wait until we are connected to at least one peer on this topic.
+    ///
+    /// This is important for ensuring the gossip mesh is formed before
+    /// starting to receive messages. Without waiting, the receiver loop
+    /// may exit immediately because there are no connected peers.
+    ///
+    /// # Returns
+    ///
+    /// Ok(()) when connected to at least one peer, or Err if the connection fails.
+    pub async fn joined(&mut self) -> SyncResult<()> {
+        self.receiver
+            .joined()
+            .await
+            .map_err(|e| SyncError::Gossip(format!("Failed to join topic swarm: {}", e)))
+    }
+
     /// Get the topic ID
     pub fn topic_id(&self) -> TopicId {
         self.topic_id
@@ -369,7 +385,13 @@ impl GossipSync {
         let mut router_builder = Router::builder(endpoint.clone()).accept(GOSSIP_ALPN, gossip.clone());
 
         if let Some((storage, event_tx, local_did)) = contact_handler_deps {
-            let contact_handler = ContactProtocolHandler::new(storage, event_tx, gossip.clone(), local_did);
+            let contact_handler = ContactProtocolHandler::new(
+                storage,
+                event_tx,
+                gossip.clone(),
+                static_provider.clone(),
+                local_did,
+            );
             router_builder = router_builder.accept(CONTACT_ALPN, contact_handler);
             info!("Contact protocol handler registered");
         }

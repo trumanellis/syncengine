@@ -43,7 +43,7 @@ use crate::realm::RealmDoc;
 use crate::storage::Storage;
 use crate::sync::{
     ContactEvent, ContactManager, GossipSync, NetworkDebugInfo, SyncEnvelope, SyncEvent,
-    SyncMessage, SyncStatus, TopicEvent, TopicSender,
+    SyncMessage, SyncStatus, TopicEvent, TopicReceiver, TopicSender,
 };
 use crate::types::contact::{ContactInfo, HybridContactInvite, PeerContactInvite, PendingContact, ProfileSnapshot};
 use crate::types::{RealmId, RealmInfo, Task, TaskId};
@@ -175,6 +175,11 @@ pub struct SyncEngine {
     /// Used to broadcast profile announcements to contacts.
     /// Initialized by start_profile_sync(), used by announce_profile() and related methods.
     profile_gossip_sender: Option<TopicSender>,
+    /// Persistent receiver for our own profile topic.
+    /// MUST be kept alive to maintain the gossip subscription - dropping it closes the topic.
+    /// When contacts subscribe to our profile topic, they join as peers to this subscription.
+    #[allow(dead_code)] // Held to keep subscription alive, not read
+    profile_gossip_receiver: Option<TopicReceiver>,
 }
 
 impl SyncEngine {
@@ -226,6 +231,7 @@ impl SyncEngine {
             sync_rx,
             sync_tx,
             profile_gossip_sender: None,
+            profile_gossip_receiver: None,
         };
 
         // Initialize the Private realm if it doesn't exist
@@ -1557,12 +1563,21 @@ impl SyncEngine {
         // 1. Ensure gossip is initialized (starts listening for incoming connections)
         self.ensure_gossip().await?;
 
-        // 2. Generate random jitter (0-30 seconds) to avoid thundering herd
-        let jitter_ms: u64 = rand::rng().random_range(0..30_000);
-        info!(jitter_ms, "Applying startup jitter to avoid simultaneous wake-up problem");
+        // 2. Initialize profile sync (sets profile_gossip_sender so announce_profile works)
+        // This must be called before announce_profile() or profile broadcasts will fail
+        if self.identity.is_some() {
+            if let Err(e) = self.start_profile_sync(vec![]).await {
+                warn!(error = %e, "Failed to start profile sync (non-fatal)");
+            }
+        }
+
+        // 3. Generate random jitter (0-2 seconds) to avoid thundering herd
+        // Kept short to not delay app responsiveness noticeably
+        let jitter_ms: u64 = rand::rng().random_range(0..2_000);
+        debug!(jitter_ms, "Applying startup jitter");
         tokio::time::sleep(std::time::Duration::from_millis(jitter_ms)).await;
 
-        // 3. Announce presence on global profile topic (if we have a profile)
+        // 4. Announce presence on global profile topic (if we have a profile)
         // This uses announce_profile() which broadcasts to the global topic
         if self.identity.is_some() {
             match self.announce_profile(None).await {
@@ -1576,7 +1591,22 @@ impl SyncEngine {
             debug!("No identity initialized, skipping presence announcement");
         }
 
-        // 4. Get all peers and sort by priority (contacts first, then by last_seen)
+        // 5. Reconnect to contact profile topics (to receive their updates after restart)
+        // Use ensure_contact_manager to initialize if needed (it's lazy-loaded)
+        if self.identity.is_some() {
+            match self.ensure_contact_manager().await {
+                Ok(manager) => {
+                    if let Err(e) = manager.reconnect_contacts().await {
+                        warn!(error = %e, "Failed to reconnect contacts (non-fatal)");
+                    }
+                }
+                Err(e) => {
+                    warn!(error = %e, "Failed to initialize contact manager at startup (non-fatal)");
+                }
+            }
+        }
+
+        // 6. Get all peers and sort by priority (contacts first, then by last_seen)
         let mut all_peers = self.storage.list_peers()?;
         all_peers.sort_by(|a, b| {
             // Contacts first
@@ -1690,6 +1720,62 @@ impl SyncEngine {
         );
 
         Ok(result)
+    }
+
+    /// Manually trigger a sync to refresh peer information and broadcast profile changes.
+    ///
+    /// This is a user-initiated sync that:
+    /// 1. Broadcasts our current profile to all contacts (announces changes)
+    /// 2. Reconnects to contact profile topics (to receive their updates)
+    ///
+    /// Unlike `startup_sync()`, this does not include jitter delays or extensive
+    /// reconnection attempts - it's designed for immediate user feedback.
+    ///
+    /// # Returns
+    ///
+    /// Returns the number of contacts reconnected to.
+    ///
+    /// # Errors
+    ///
+    /// Returns error if profile announcement fails (non-fatal errors are logged).
+    pub async fn manual_sync(&mut self) -> Result<usize, SyncError> {
+        info!("Manual sync triggered by user");
+
+        // Count contacts from storage (regardless of reconnection success)
+        let contacts_count = self.storage.list_contacts().map(|c| c.len()).unwrap_or(0);
+
+        // 1. Broadcast our current profile to announce any changes
+        if self.identity.is_some() {
+            match self.announce_profile(None).await {
+                Ok(()) => {
+                    info!("Profile broadcast successful");
+                }
+                Err(e) => {
+                    // Log but don't fail - we can still reconnect to contacts
+                    warn!(error = %e, "Failed to broadcast profile during manual sync");
+                }
+            }
+        }
+
+        // 2. Reconnect to contact profile topics to receive their updates
+        // Use ensure_contact_manager to initialize if needed (it's lazy-loaded)
+        if self.identity.is_some() {
+            match self.ensure_contact_manager().await {
+                Ok(manager) => {
+                    if let Err(e) = manager.reconnect_contacts().await {
+                        warn!(error = %e, "Failed to reconnect contacts during manual sync");
+                    } else {
+                        info!(contacts = contacts_count, "Reconnected to contact topics");
+                    }
+                }
+                Err(e) => {
+                    warn!(error = %e, "Failed to initialize contact manager for sync");
+                }
+            }
+        }
+
+        info!(contacts_count, "Manual sync complete");
+        Ok(contacts_count)
     }
 
     /// Start syncing a realm with peers via gossip
@@ -3395,23 +3481,28 @@ impl SyncEngine {
         // Ensure we have a signed profile
         let signed = self.sign_and_pin_own_profile()?;
 
-        // Use the PERSISTENT sender from start_profile_sync() instead of creating a new subscription.
-        // A new subscription has no connected peers yet, so broadcasts would go nowhere.
-        let sender = self.profile_gossip_sender.as_ref().ok_or_else(|| {
-            SyncError::Network(
-                "Profile sync not initialized. Call start_profile_sync() first.".to_string(),
-            )
-        })?;
-
-        // Create and send announcement
-        let announcement = crate::sync::ProfileGossipMessage::announce(signed, avatar_ticket);
+        // Create the announcement message
+        let announcement = crate::sync::ProfileGossipMessage::announce(signed.clone(), avatar_ticket.clone());
         let bytes = announcement.to_bytes()?;
 
-        sender.broadcast(bytes).await.map_err(|e| {
-            SyncError::Network(format!("Failed to broadcast profile announcement: {}", e))
-        })?;
+        // 1. Broadcast on our own per-peer profile topic (for backwards compatibility)
+        if let Some(sender) = self.profile_gossip_sender.as_ref() {
+            if let Err(e) = sender.broadcast(bytes.clone()).await {
+                warn!(error = %e, "Failed to broadcast on per-peer profile topic (non-fatal)");
+            } else {
+                debug!("Profile announcement broadcast on per-peer topic");
+            }
+        }
 
-        info!("Profile announcement broadcast via persistent sender");
+        // 2. Broadcast on all 1:1 contact topics (the WORKING channel!)
+        // This is the primary mechanism for profile propagation since contact topics
+        // have proper bi-directional mesh formation from the contact exchange.
+        if let Some(ref manager) = self.contact_manager {
+            let contacts_updated = manager.broadcast_profile_to_contacts(&bytes).await;
+            info!(contacts_updated, "Profile announcement broadcast on contact topics");
+        }
+
+        info!("Profile announcement broadcast complete");
         Ok(())
     }
 
@@ -3474,6 +3565,14 @@ impl SyncEngine {
         &mut self,
         bootstrap_peers: Vec<iroh::PublicKey>,
     ) -> Result<(), SyncError> {
+        // Check if already initialized - don't replace existing subscription!
+        // Replacing the subscription would drop the old receiver, closing the topic
+        // and preventing contacts from joining.
+        if self.profile_gossip_sender.is_some() {
+            debug!("Profile sync already initialized, skipping");
+            return Ok(());
+        }
+
         // Get our DID for processing messages directed at us
         let our_did = self
             .did()
@@ -3486,11 +3585,15 @@ impl SyncEngine {
         // Subscribe to our OWN profile topic (for broadcasting)
         // Contacts subscribe to this topic via finalize_contact() to receive our updates
         let own_topic_id = crate::sync::derive_profile_topic(&our_did);
-        let (sender, _own_receiver) = gossip.subscribe_split(own_topic_id, vec![]).await?;
+        let (sender, own_receiver) = gossip.subscribe_split(own_topic_id, vec![]).await?;
 
         // Store sender for reuse by announce_profile() and other profile broadcast methods.
         // This allows all profile announcements to use the same persistent subscription.
         self.profile_gossip_sender = Some(sender.clone());
+
+        // CRITICAL: Store receiver to keep the subscription alive!
+        // Dropping the receiver would close the gossip topic, preventing contacts from joining.
+        self.profile_gossip_receiver = Some(own_receiver);
 
         info!(
             did = %our_did,
@@ -3501,7 +3604,7 @@ impl SyncEngine {
         // Also subscribe to the global topic for backwards compatibility
         // This can be removed once all nodes are using per-peer topics
         let global_topic_id = crate::sync::global_profile_topic();
-        let (_global_sender, mut receiver) = gossip.subscribe_split(global_topic_id, bootstrap_peers).await?;
+        let (global_sender, mut receiver) = gossip.subscribe_split(global_topic_id, bootstrap_peers).await?;
 
         // Clone dependencies for the background task
         let storage = self.storage.clone();
@@ -3511,6 +3614,10 @@ impl SyncEngine {
         // Spawn background task to process incoming profile messages
         tokio::spawn(async move {
             use crate::sync::TopicEvent;
+
+            // CRITICAL: Keep the sender alive for the entire lifetime of the listener.
+            // Dropping the sender may close the gossip topic on some iroh-gossip versions.
+            let _keep_alive = global_sender;
 
             info!("Profile sync listener started with P2P blob download support");
 
