@@ -350,8 +350,11 @@ pub fn Profile() -> Element {
                                     } else {
                                         let bio_to_edit = p.bio.clone();
                                         if !p.bio.is_empty() {
-                                            let bio_content = p.bio.clone();
-                                            let bio_signal = use_memo(move || bio_content.clone());
+                                            // Fix: Read from signal inside memo for proper reactivity
+                                            // (capturing `p.bio` as a String would freeze the value)
+                                            let bio_signal = use_memo(move || {
+                                                profile().map(|p| p.bio.clone()).unwrap_or_default()
+                                            });
                                             rsx! {
                                                 div {
                                                     class: "hero-bio editable",

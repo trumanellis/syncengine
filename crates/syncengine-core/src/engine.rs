@@ -1577,22 +1577,10 @@ impl SyncEngine {
         debug!(jitter_ms, "Applying startup jitter");
         tokio::time::sleep(std::time::Duration::from_millis(jitter_ms)).await;
 
-        // 4. Announce presence on global profile topic (if we have a profile)
-        // This uses announce_profile() which broadcasts to the global topic
-        if self.identity.is_some() {
-            match self.announce_profile(None).await {
-                Ok(()) => info!("Presence announced on global profile topic"),
-                Err(e) => {
-                    // Non-fatal - we can still connect to peers without announcing
-                    warn!(error = %e, "Failed to announce presence (non-fatal)");
-                }
-            }
-        } else {
-            debug!("No identity initialized, skipping presence announcement");
-        }
-
-        // 5. Reconnect to contact profile topics (to receive their updates after restart)
-        // Use ensure_contact_manager to initialize if needed (it's lazy-loaded)
+        // 4. Initialize contact manager and reconnect to contact profile topics FIRST
+        // This must happen BEFORE announce_profile() so that:
+        // a) We're subscribed to receive profile updates from contacts
+        // b) contact_manager exists so announce_profile() can broadcast to contact topics
         if self.identity.is_some() {
             match self.ensure_contact_manager().await {
                 Ok(manager) => {
@@ -1604,6 +1592,20 @@ impl SyncEngine {
                     warn!(error = %e, "Failed to initialize contact manager at startup (non-fatal)");
                 }
             }
+        }
+
+        // 5. Announce presence on global profile topic AND contact topics (if we have a profile)
+        // This now works correctly because contact_manager was initialized above
+        if self.identity.is_some() {
+            match self.announce_profile(None).await {
+                Ok(()) => info!("Presence announced on profile and contact topics"),
+                Err(e) => {
+                    // Non-fatal - we can still connect to peers without announcing
+                    warn!(error = %e, "Failed to announce presence (non-fatal)");
+                }
+            }
+        } else {
+            debug!("No identity initialized, skipping presence announcement");
         }
 
         // 6. Get all peers and sort by priority (contacts first, then by last_seen)

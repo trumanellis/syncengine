@@ -819,9 +819,7 @@ impl ContactManager {
                                         display_name: signed_profile.profile.display_name.clone(),
                                         subtitle: signed_profile.profile.subtitle.clone(),
                                         avatar_blob_id: signed_profile.profile.avatar_blob_id.clone(),
-                                        bio: crate::types::ProfileSnapshot::truncate_bio(
-                                            &signed_profile.profile.bio,
-                                        ),
+                                        bio: signed_profile.profile.bio.clone(),
                                     });
 
                                     if let Err(e) = storage.save_peer(&peer) {
@@ -965,9 +963,7 @@ impl ContactManager {
                                         display_name: signed_profile.profile.display_name.clone(),
                                         subtitle: signed_profile.profile.subtitle.clone(),
                                         avatar_blob_id: signed_profile.profile.avatar_blob_id.clone(),
-                                        bio: crate::types::ProfileSnapshot::truncate_bio(
-                                            &signed_profile.profile.bio,
-                                        ),
+                                        bio: signed_profile.profile.bio.clone(),
                                     });
 
                                     if let Err(e) = storage.save_peer(&peer) {

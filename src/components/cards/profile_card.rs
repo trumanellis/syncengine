@@ -54,6 +54,14 @@ pub fn ProfileCard(
     let mut editing = use_signal(move || should_start_editing);
     let mut draft = use_signal(|| profile.clone());
 
+    // Track profile prop as a signal for reactive memos (display mode)
+    let mut display_profile = use_signal(|| profile.clone());
+
+    // Sync display_profile when prop changes (detected via updated_at timestamp)
+    if display_profile().updated_at != profile.updated_at {
+        display_profile.set(profile.clone());
+    }
+
     // Clone profile for closures
     let profile_for_cancel = profile.clone();
 
@@ -192,7 +200,8 @@ pub fn ProfileCard(
                     } else {
                         if !profile.bio.is_empty() {
                             {
-                                let bio_signal = use_memo(move || profile.bio.clone());
+                                // Fix: Read from display_profile signal for proper reactivity
+                                let bio_signal = use_memo(move || display_profile().bio.clone());
                                 rsx! {
                                     MarkdownRenderer {
                                         content: bio_signal,
