@@ -452,10 +452,12 @@ impl ContactManager {
         };
 
         // Save as pending (OutgoingPending)
+        // Note: signed_profile is None for outgoing requests - we'll get it from the accept response
         let pending = PendingContact {
             invite_id: invite.invite_id,
             peer_did: invite.inviter_did.clone(),
             profile: minimal_profile,
+            signed_profile: None,
             node_addr: invite.node_addr.clone(),
             state: ContactState::OutgoingPending,
             created_at: chrono::Utc::now().timestamp(),
@@ -616,7 +618,11 @@ impl ContactManager {
     /// Finalize a mutually accepted contact
     ///
     /// Derives shared keys, subscribes to contact topic, saves to contacts table.
+    /// Also subscribes to their profile topic and pins their profile for P2P redundancy.
     async fn finalize_contact(&self, pending: &PendingContact) -> SyncResult<()> {
+        use crate::sync::derive_profile_topic;
+        use crate::types::{PinRelationship, ProfilePin};
+
         // Derive 1:1 contact topic and encryption key from DIDs
         let contact_topic = Self::derive_contact_topic(self.did.as_ref(), &pending.peer_did);
         let contact_key = Self::derive_contact_key(self.did.as_ref(), &pending.peer_did);
@@ -661,6 +667,20 @@ impl ContactManager {
         };
         self.storage.save_peer(&unified_peer)?;
 
+        // Pin their profile if we have SignedProfile from the contact exchange
+        if let Some(signed_profile) = &pending.signed_profile {
+            let pin = ProfilePin::new(
+                pending.peer_did.clone(),
+                signed_profile.clone(),
+                PinRelationship::Contact,
+            );
+            if let Err(e) = self.storage.save_pinned_profile(&pin) {
+                warn!(did = %pending.peer_did, error = %e, "Failed to pin contact's profile");
+            } else {
+                info!(did = %pending.peer_did, "Pinned contact's profile from contact exchange");
+            }
+        }
+
         // Delete pending
         self.storage.delete_pending(&pending.invite_id)?;
 
@@ -670,8 +690,43 @@ impl ContactManager {
             "Finalized contact and saved to database (unified peer system)"
         );
 
-        // Subscribe to contact topic
+        // Subscribe to contact topic (for 1:1 messaging)
         self.subscribe_contact_topic(&contact).await?;
+
+        // Subscribe to their profile topic (for profile updates)
+        // Use subscribe_split to get a receiver we can process in a background task
+        let peer_profile_topic = derive_profile_topic(&contact.peer_did);
+        let bootstrap_peer = iroh::PublicKey::from_bytes(&contact.peer_endpoint_id)
+            .map_err(|e| SyncError::Identity(format!("Invalid peer endpoint ID: {}", e)))?;
+
+        match self
+            .gossip_sync
+            .subscribe_split(peer_profile_topic, vec![bootstrap_peer])
+            .await
+        {
+            Ok((_sender, receiver)) => {
+                info!(
+                    peer_did = %contact.peer_did,
+                    ?peer_profile_topic,
+                    "Subscribed to contact's profile topic for updates"
+                );
+
+                // Spawn listener to process profile updates from this contact's topic
+                Self::spawn_profile_topic_listener(
+                    self.storage.clone(),
+                    contact.peer_did.clone(),
+                    receiver,
+                );
+            }
+            Err(e) => {
+                // Non-fatal: we can still receive updates via global topic
+                warn!(
+                    peer_did = %contact.peer_did,
+                    error = %e,
+                    "Failed to subscribe to contact's profile topic (non-fatal)"
+                );
+            }
+        }
 
         // Emit event
         let _ = self.event_tx.send(ContactEvent::ContactAccepted {
@@ -685,6 +740,113 @@ impl ContactManager {
         });
 
         Ok(())
+    }
+
+    /// Spawn a background listener for a contact's per-peer profile topic.
+    ///
+    /// This listener processes profile updates (Announce messages) from the contact
+    /// and updates the local Peer record with the new profile information.
+    ///
+    /// # Arguments
+    ///
+    /// * `storage` - Storage for updating Peer profiles
+    /// * `peer_did` - The DID of the contact whose profile topic we're listening to
+    /// * `receiver` - The TopicReceiver from subscribe_split()
+    fn spawn_profile_topic_listener(
+        storage: Arc<Storage>,
+        peer_did: String,
+        mut receiver: crate::sync::TopicReceiver,
+    ) {
+        tokio::spawn(async move {
+            use crate::sync::TopicEvent;
+
+            info!(peer_did = %peer_did, "Profile topic listener started for contact");
+
+            while let Some(event) = receiver.recv_event().await {
+                if let TopicEvent::Message(msg) = event {
+                    // Try to parse as profile gossip message
+                    match crate::sync::ProfileGossipMessage::from_bytes(&msg.content) {
+                        Ok(crate::sync::ProfileGossipMessage::Announce {
+                            signed_profile, ..
+                        }) => {
+                            // Verify the signature
+                            if !signed_profile.verify() {
+                                warn!(peer_did = %peer_did, "Invalid signature on profile announcement");
+                                continue;
+                            }
+
+                            let signer_did = signed_profile.did().to_string();
+
+                            // Only process announcements from the expected peer
+                            // (the contact whose topic we subscribed to)
+                            if signer_did != peer_did {
+                                debug!(
+                                    expected = %peer_did,
+                                    actual = %signer_did,
+                                    "Received profile from unexpected signer on per-peer topic"
+                                );
+                                continue;
+                            }
+
+                            // Update the Peer.profile in storage
+                            match storage.load_peer_by_did(&signer_did) {
+                                Ok(Some(mut peer)) => {
+                                    peer.profile = Some(crate::types::ProfileSnapshot {
+                                        display_name: signed_profile.profile.display_name.clone(),
+                                        subtitle: signed_profile.profile.subtitle.clone(),
+                                        avatar_blob_id: signed_profile.profile.avatar_blob_id.clone(),
+                                        bio: crate::types::ProfileSnapshot::truncate_bio(
+                                            &signed_profile.profile.bio,
+                                        ),
+                                    });
+
+                                    if let Err(e) = storage.save_peer(&peer) {
+                                        warn!(
+                                            did = %signer_did,
+                                            error = %e,
+                                            "Failed to update peer profile from per-peer topic"
+                                        );
+                                    } else {
+                                        info!(
+                                            did = %signer_did,
+                                            name = %signed_profile.profile.display_name,
+                                            "Updated contact profile from per-peer topic"
+                                        );
+                                    }
+                                }
+                                Ok(None) => {
+                                    debug!(
+                                        did = %signer_did,
+                                        "Received profile for unknown peer (not in storage)"
+                                    );
+                                }
+                                Err(e) => {
+                                    warn!(
+                                        did = %signer_did,
+                                        error = %e,
+                                        "Failed to load peer from storage"
+                                    );
+                                }
+                            }
+                        }
+                        Ok(_) => {
+                            // Ignore Request/Response messages on per-peer topics
+                            // These are only relevant on the global topic
+                        }
+                        Err(e) => {
+                            debug!(
+                                peer_did = %peer_did,
+                                error = %e,
+                                "Failed to parse message on profile topic"
+                            );
+                        }
+                    }
+                }
+                // Ignore NeighborUp/NeighborDown events for per-peer profile topics
+            }
+
+            info!(peer_did = %peer_did, "Profile topic listener stopped for contact");
+        });
     }
 
     /// Subscribe to a 1:1 contact gossip topic
@@ -942,9 +1104,11 @@ impl ContactManager {
     async fn send_contact_message(
         &self,
         node_addr: &NodeAddrBytes,
-        our_profile: ProfileSnapshot,
+        _our_profile: ProfileSnapshot, // Legacy parameter, now using SignedProfile
         invite_id: [u8; 16],
     ) -> SyncResult<()> {
+        use crate::types::{SignedProfile, UserProfile};
+
         // Convert NodeAddrBytes to EndpointAddr
         let endpoint_addr = node_addr.to_endpoint_addr()?;
 
@@ -955,14 +1119,26 @@ impl ContactManager {
 
         let requester_pubkey = self.keypair.public_key().to_bytes();
 
-        // Create and sign the request
+        // Load our full profile and sign it
+        let user_profile = match self.storage.load_profile(&self.did.to_string()) {
+            Ok(Some(profile)) => profile,
+            _ => {
+                // Fallback: create minimal profile
+                let short_did = self.did.to_string().chars().take(16).collect::<String>();
+                warn!(did = %self.did, "No profile found for contact request, using fallback");
+                UserProfile::new(self.did.to_string(), format!("{}...", short_did))
+            }
+        };
+        let signed_profile = SignedProfile::sign(&user_profile, &self.keypair);
+
+        // Create and sign the request message
         let mut data_to_sign = Vec::new();
         data_to_sign.extend_from_slice(&invite_id);
         data_to_sign.extend_from_slice(self.did.as_ref().as_bytes());
         data_to_sign.extend_from_slice(&requester_pubkey);
 
-        let profile_bytes = postcard::to_allocvec(&our_profile)
-            .map_err(|e| SyncError::Serialization(format!("Failed to serialize profile: {}", e)))?;
+        let profile_bytes = postcard::to_allocvec(&signed_profile)
+            .map_err(|e| SyncError::Serialization(format!("Failed to serialize signed profile: {}", e)))?;
         data_to_sign.extend_from_slice(&profile_bytes);
         data_to_sign.extend_from_slice(&our_node_addr_bytes);
 
@@ -973,7 +1149,7 @@ impl ContactManager {
             invite_id,
             requester_did: self.did.to_string(),
             requester_pubkey,
-            requester_profile: our_profile,
+            requester_signed_profile: signed_profile,
             requester_node_addr: our_node_addr_bytes,
             requester_signature,
         };
@@ -1031,11 +1207,14 @@ impl ContactManager {
     ///
     /// This replaces the old ContactResponse + ContactAccepted flow with a single message.
     /// Keys are derived locally by both parties, not transmitted.
+    /// Now sends SignedProfile for immediate profile pinning by the recipient.
     async fn send_contact_accept(
         &self,
         node_addr: &NodeAddrBytes,
         invite_id: [u8; 16],
     ) -> SyncResult<()> {
+        use crate::types::{SignedProfile, UserProfile};
+
         // Convert NodeAddrBytes to EndpointAddr
         let endpoint_addr = node_addr.to_endpoint_addr()?;
 
@@ -1043,27 +1222,31 @@ impl ContactManager {
         let accepter_did = self.did.to_string();
         let accepter_pubkey = self.keypair.public_key().to_bytes();
 
-        // TODO: Load our full profile from storage
-        let accepter_profile = ProfileSnapshot {
-            display_name: "Anonymous User".to_string(),
-            subtitle: None,
-            avatar_blob_id: None,
-            bio: String::new(),
+        // Load our full profile and sign it
+        let user_profile = match self.storage.load_profile(&self.did.to_string()) {
+            Ok(Some(profile)) => profile,
+            _ => {
+                // Fallback: create minimal profile
+                let short_did = self.did.to_string().chars().take(16).collect::<String>();
+                warn!(did = %self.did, "No profile found for contact accept, using fallback");
+                UserProfile::new(self.did.to_string(), format!("{}...", short_did))
+            }
         };
+        let signed_profile = SignedProfile::sign(&user_profile, &self.keypair);
 
         // Serialize our node address
         let our_node_addr = NodeAddrBytes::from_endpoint_addr(&self.gossip_sync.endpoint_addr());
         let accepter_node_addr = postcard::to_allocvec(&our_node_addr)
             .map_err(|e| SyncError::Serialization(format!("Failed to serialize node address: {}", e)))?;
 
-        // Build data to sign: invite_id + did + pubkey + profile + node_addr
+        // Build data to sign: invite_id + did + pubkey + signed_profile + node_addr
         let mut data_to_sign = Vec::new();
         data_to_sign.extend_from_slice(&invite_id);
         data_to_sign.extend_from_slice(accepter_did.as_bytes());
         data_to_sign.extend_from_slice(&accepter_pubkey);
 
-        let profile_bytes = postcard::to_allocvec(&accepter_profile)
-            .map_err(|e| SyncError::Serialization(format!("Failed to serialize profile: {}", e)))?;
+        let profile_bytes = postcard::to_allocvec(&signed_profile)
+            .map_err(|e| SyncError::Serialization(format!("Failed to serialize signed profile: {}", e)))?;
         data_to_sign.extend_from_slice(&profile_bytes);
         data_to_sign.extend_from_slice(&accepter_node_addr);
 
@@ -1075,7 +1258,7 @@ impl ContactManager {
             invite_id,
             accepter_did,
             accepter_pubkey,
-            accepter_profile,
+            accepter_signed_profile: signed_profile,
             accepter_node_addr,
             signature,
         };
@@ -1356,6 +1539,7 @@ mod tests {
             invite_id: fake_invite.invite_id,
             peer_did: fake_invite.inviter_did.clone(),
             profile: fake_invite.profile_snapshot.clone(),
+            signed_profile: None,
             node_addr: fake_invite.node_addr.clone(),
             state: ContactState::OutgoingPending,
             created_at: chrono::Utc::now().timestamp(),
@@ -1385,6 +1569,7 @@ mod tests {
             invite_id,
             peer_did: "did:sync:test".to_string(),
             profile: create_test_profile("Charlie"),
+            signed_profile: None,
             node_addr: NodeAddrBytes::new([0u8; 32]),
             state: ContactState::IncomingPending,
             created_at: chrono::Utc::now().timestamp(),
@@ -1444,6 +1629,7 @@ mod tests {
             invite_id,
             peer_did: "did:sync:test".to_string(),
             profile: create_test_profile("Dave"),
+            signed_profile: None,
             node_addr: NodeAddrBytes::new([0u8; 32]),
             state: ContactState::IncomingPending,
             created_at: chrono::Utc::now().timestamp(),

@@ -1,16 +1,22 @@
-//! Network Page - Field Topology
+//! Network Page - Profiles You Mirror
 //!
-//! Displays the P2P network state with unified peer list:
-//! - Connections: All known peers (contacts and discovered) in one list
-//! - Souls Carrying Your Light: Peers who are pinning your profile
-//! - Souls You Carry: Profiles YOU are pinning for others
+//! Displays the profiles you are mirroring for P2P redundancy.
 
 use dioxus::prelude::*;
-use syncengine_core::{NetworkStats, Peer, PeerStatus, PinnerInfo, ProfilePin};
+use syncengine_core::ProfilePin;
 
-use crate::app::Route;
+use crate::components::images::AsyncImage;
 use crate::components::{NavHeader, NavLocation};
 use crate::context::{use_engine, use_engine_ready};
+
+// Embed default profile image as base64 data URI
+const PROFILE_DEFAULT_BYTES: &[u8] = include_bytes!("../../assets/profile-default.png");
+
+fn profile_default_uri() -> String {
+    use base64::Engine;
+    let base64 = base64::engine::general_purpose::STANDARD.encode(PROFILE_DEFAULT_BYTES);
+    format!("data:image/png;base64,{}", base64)
+}
 
 /// Format timestamp as relative time string.
 fn format_relative_time(timestamp: i64) -> String {
@@ -28,25 +34,17 @@ fn format_relative_time(timestamp: i64) -> String {
     }
 }
 
-/// Format timestamp for Unix timestamps (u64)
-fn format_relative_time_u64(timestamp: u64) -> String {
-    format_relative_time(timestamp as i64)
-}
-
-/// Network page - Field Topology layout
+/// Network page - Profiles You Mirror
 #[component]
 pub fn Network() -> Element {
     let engine = use_engine();
     let engine_ready = use_engine_ready();
 
-    // State for network data - using unified Peer type
-    let mut stats: Signal<NetworkStats> = use_signal(NetworkStats::default);
-    let mut peers: Signal<Vec<Peer>> = use_signal(Vec::new);
-    let mut pinners: Signal<Vec<PinnerInfo>> = use_signal(Vec::new);
+    // State for mirrored profiles only
     let mut pins: Signal<Vec<ProfilePin>> = use_signal(Vec::new);
     let mut loading = use_signal(|| true);
 
-    // Load network data when engine becomes ready
+    // Load mirrored profiles when engine becomes ready
     use_effect(move || {
         if engine_ready() {
             spawn(async move {
@@ -54,22 +52,9 @@ pub fn Network() -> Element {
                 let guard = shared.read().await;
 
                 if let Some(ref eng) = *guard {
-                    // Get network stats
-                    stats.set(eng.network_stats());
-
-                    // Get unified peer list (contacts + discovered in one call)
-                    if let Ok(peer_list) = eng.list_peers() {
-                        peers.set(peer_list);
-                    }
-
-                    // Get pinners (who pins us)
-                    if let Ok(pinner_list) = eng.list_profile_pinners() {
-                        pinners.set(pinner_list);
-                    }
-
-                    // Get pins (what we pin)
+                    // Get pins (profiles we mirror)
                     if let Ok(pin_list) = eng.list_pinned_profiles() {
-                        // Filter out our own profile from the "Souls You Carry" list
+                        // Filter out our own profile
                         let others: Vec<_> = pin_list
                             .into_iter()
                             .filter(|p| !p.is_own())
@@ -83,124 +68,34 @@ pub fn Network() -> Element {
         }
     });
 
-    // Calculate stats from unified peers
-    let peer_list = peers();
-    let total_people = peer_list.len();
-    let online_count = peer_list.iter().filter(|p| p.status == PeerStatus::Online).count();
-    let contact_count = peer_list.iter().filter(|p| p.is_contact()).count();
+    let pin_count = pins().len();
 
     rsx! {
         div { class: "network-page",
             // Sacred Navigation Console
             NavHeader {
                 current: NavLocation::Network,
-                status: if online_count > 0 {
-                    Some(format!("{} online · {} total", online_count, total_people))
-                } else {
-                    Some(format!("{} connections", total_people))
-                },
+                status: Some(format!("{} profiles mirrored", pin_count)),
             }
 
             if loading() {
                 div { class: "loading-state",
                     div { class: "loading-orb" }
-                    p { "Loading network data..." }
+                    p { "Loading mirrored profiles..." }
                 }
             } else {
                 div { class: "network-content",
-                    // Stats Cards
-                    section { class: "network-stats",
-                        StatCard {
-                            label: "People",
-                            value: total_people,
-                            sublabel: format!("{} online", online_count),
-                        }
-                        StatCard {
-                            label: "Contacts",
-                            value: contact_count,
-                            sublabel: "verified".to_string(),
-                        }
-                        StatCard {
-                            label: "Pinning You",
-                            value: stats().pinners_count,
-                            sublabel: "people".to_string(),
-                        }
-                        StatCard {
-                            label: "You Pin",
-                            value: stats().pinning_count,
-                            sublabel: "profiles".to_string(),
-                        }
-                    }
-
-                    // Unified Connections Section
-                    section { class: "network-section",
-                        h2 { class: "section-title", "Connections" }
-                        p { class: "section-subtitle", "All known network participants" }
-
-                        if peers().is_empty() {
-                            div { class: "empty-state",
-                                p { "No connections yet. Share your invite code or join a realm to discover peers." }
-                            }
-                        } else {
-                            div { class: "peer-list",
-                                // Sort: contacts first, then by online status, then by last seen
-                                {
-                                    let mut sorted_peers: Vec<_> = peers().clone();
-                                    sorted_peers.sort_by(|a, b| {
-                                        // Contacts first
-                                        let contact_order = b.is_contact().cmp(&a.is_contact());
-                                        if contact_order != std::cmp::Ordering::Equal {
-                                            return contact_order;
-                                        }
-                                        // Then online first
-                                        let status_a = matches!(a.status, PeerStatus::Online);
-                                        let status_b = matches!(b.status, PeerStatus::Online);
-                                        let online_order = status_b.cmp(&status_a);
-                                        if online_order != std::cmp::Ordering::Equal {
-                                            return online_order;
-                                        }
-                                        // Then by most recently seen
-                                        b.last_seen.cmp(&a.last_seen)
-                                    });
-                                    rsx! {
-                                        for peer in sorted_peers {
-                                            UnifiedPeerCard { peer: UnifiedPeerDisplayData::from(&peer) }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // Who Pins You Section
-                    section { class: "network-section",
-                        h2 { class: "section-title", "Who Pins Your Profile" }
-                        p { class: "section-subtitle", "Peers caching your profile for P2P redundancy" }
-
-                        if pinners().is_empty() {
-                            div { class: "empty-state",
-                                p { "No one is pinning your profile yet. Once you connect with others, they may pin your profile." }
-                            }
-                        } else {
-                            div { class: "pinner-list",
-                                for pinner in pinners() {
-                                    PinnerCard { pinner: pinner }
-                                }
-                            }
-                        }
-                    }
-
-                    // What You Pin Section
-                    section { class: "network-section",
-                        h2 { class: "section-title", "Profiles You Pin" }
-                        p { class: "section-subtitle", "Profiles you are caching for others" }
+                    // Profiles You Mirror
+                    section { class: "network-section mirrored-profiles-section",
+                        h2 { class: "section-title", "Profiles You Mirror" }
+                        p { class: "section-subtitle", "Full profiles of peers you're carrying in the network" }
 
                         if pins().is_empty() {
                             div { class: "empty-state",
-                                p { "You are not pinning any profiles yet. Add contacts to automatically pin their profiles." }
+                                p { "You are not mirroring any profiles yet. Add contacts to automatically mirror their profiles." }
                             }
                         } else {
-                            div { class: "pin-list",
+                            div { class: "mirrored-profiles-grid",
                                 for pin in pins() {
                                     YourPinCard { pin: PinDisplayData::from(&pin) }
                                 }
@@ -217,210 +112,19 @@ pub fn Network() -> Element {
 // Subcomponents
 // ═══════════════════════════════════════════════════════════════════════════════
 
-#[derive(Props, Clone, PartialEq)]
-struct StatCardProps {
-    label: String,
-    value: usize,
-    sublabel: String,
-}
-
-#[component]
-fn StatCard(props: StatCardProps) -> Element {
-    rsx! {
-        div { class: "stat-card",
-            div { class: "stat-value", "{props.value}" }
-            div { class: "stat-label", "{props.label}" }
-            div { class: "stat-sublabel", "{props.sublabel}" }
-        }
-    }
-}
-
-/// Extracted peer data for display (unified contacts + discovered)
-#[derive(Clone, PartialEq)]
-struct UnifiedPeerDisplayData {
-    display_name: String,
-    peer_id_short: String,
-    did_short: Option<String>,
-    is_contact: bool,
-    is_favorite: bool,
-    is_online: bool,
-    last_seen: u64,
-    shared_realms_count: usize,
-    success_rate: Option<u32>,
-}
-
-impl From<&Peer> for UnifiedPeerDisplayData {
-    fn from(peer: &Peer) -> Self {
-        // Get display name: profile name > nickname > truncated endpoint
-        let display_name = peer.display_name();
-
-        // Format peer ID (first 4 bytes as hex)
-        let peer_id_short = format!("{}", hex::encode(&peer.endpoint_id[..4]));
-
-        // Format DID if available
-        let did_short = peer.did.as_ref().map(|did| {
-            if did.starts_with("did:sync:") {
-                let suffix = &did[9..];
-                if suffix.len() > 8 {
-                    format!("{}...", &suffix[..8])
-                } else {
-                    suffix.to_string()
-                }
-            } else if did.len() > 12 {
-                format!("{}...", &did[..12])
-            } else {
-                did.clone()
-            }
-        });
-
-        // Calculate success rate
-        let success_rate = if peer.connection_attempts > 0 {
-            Some((peer.success_rate() * 100.0) as u32)
-        } else {
-            None
-        };
-
-        Self {
-            display_name,
-            peer_id_short,
-            did_short,
-            is_contact: peer.is_contact(),
-            is_favorite: peer.is_favorite(),
-            is_online: peer.status == PeerStatus::Online,
-            last_seen: peer.last_seen,
-            shared_realms_count: peer.shared_realms.len(),
-            success_rate,
-        }
-    }
-}
-
-#[derive(Props, Clone, PartialEq)]
-struct UnifiedPeerCardProps {
-    peer: UnifiedPeerDisplayData,
-}
-
-#[component]
-fn UnifiedPeerCard(props: UnifiedPeerCardProps) -> Element {
-    let status_class = if props.peer.is_online { "status-online" } else { "status-offline" };
-    let status_label = if props.peer.is_online { "online" } else { "offline" };
-
-    // Type label (Contact vs Discovered)
-    let type_label = if props.peer.is_contact { "Contact" } else { "Discovered" };
-    let type_class = if props.peer.is_contact { "type-contact" } else { "type-discovered" };
-
-    // Format last seen
-    let last_seen = if props.peer.is_online {
-        "Now".to_string()
-    } else {
-        format_relative_time_u64(props.peer.last_seen)
-    };
-
-    // Format success rate
-    let success_rate = props.peer.success_rate
-        .map(|r| format!("{}%", r))
-        .unwrap_or_else(|| "--".to_string());
-
-    rsx! {
-        div { class: "network-card unified-peer-card",
-            div { class: "card-header",
-                span { class: "status-dot {status_class}" }
-                span { class: "card-name", "{props.peer.display_name}" }
-                if props.peer.is_favorite {
-                    span { class: "favorite-badge", "★" }
-                }
-                span { class: "card-type {type_class}", "{type_label}" }
-                span { class: "card-status", "{status_label}" }
-            }
-
-            div { class: "card-details",
-                if let Some(ref did) = props.peer.did_short {
-                    span { class: "detail-item",
-                        span { class: "detail-label", "DID: " }
-                        span { class: "detail-value did-value", "{did}" }
-                    }
-                } else {
-                    span { class: "detail-item",
-                        span { class: "detail-label", "ID: " }
-                        span { class: "detail-value", "{props.peer.peer_id_short}" }
-                    }
-                }
-                if props.peer.shared_realms_count > 0 {
-                    span { class: "detail-item",
-                        span { class: "detail-label", "Realms: " }
-                        span { class: "detail-value", "{props.peer.shared_realms_count}" }
-                    }
-                }
-                span { class: "detail-item",
-                    span { class: "detail-label", "Success: " }
-                    span { class: "detail-value", "{success_rate}" }
-                }
-                span { class: "detail-item",
-                    span { class: "detail-label", "Seen: " }
-                    span { class: "detail-value", "{last_seen}" }
-                }
-            }
-        }
-    }
-}
-
-#[derive(Props, Clone, PartialEq)]
-struct PinnerCardProps {
-    pinner: PinnerInfo,
-}
-
-#[component]
-fn PinnerCard(props: PinnerCardProps) -> Element {
-    // Format DID (first 16 chars after prefix)
-    let display_name = props.pinner.display_name.clone().unwrap_or_else(|| {
-        let did = &props.pinner.pinner_did;
-        if did.starts_with("did:sync:") {
-            let suffix = &did[9..];
-            if suffix.len() > 12 {
-                format!("{}...", &suffix[..12])
-            } else {
-                suffix.to_string()
-            }
-        } else if did.len() > 16 {
-            format!("{}...", &did[..16])
-        } else {
-            did.clone()
-        }
-    });
-
-    // Format relationship
-    let relationship = match props.pinner.relationship.as_str() {
-        "contact" => "Contact",
-        r if r.starts_with("realm_member") => "Realm Member",
-        "manual" => "Manual",
-        _ => "Unknown",
-    };
-
-    let pinned_since = format_relative_time(props.pinner.pinned_at);
-
-    rsx! {
-        div { class: "network-card pinner-card",
-            div { class: "card-header",
-                span { class: "card-name", "{display_name}" }
-                span { class: "card-relationship", "{relationship}" }
-            }
-
-            div { class: "card-details",
-                span { class: "detail-item",
-                    span { class: "detail-label", "Since: " }
-                    span { class: "detail-value", "{pinned_since}" }
-                }
-            }
-        }
-    }
-}
-
-/// Extracted pin data for display (avoids PartialEq issues with SignedProfile)
+/// Full profile data extracted from ProfilePin for display
+/// (avoids PartialEq issues with SignedProfile while exposing all fields)
 #[derive(Clone, PartialEq)]
 struct PinDisplayData {
     did: String,
     display_name: String,
+    subtitle: Option<String>,
+    bio: String,
+    avatar_blob_id: Option<String>,
+    profile_link: Option<String>,
     relationship: String,
     pinned_at: i64,
+    last_updated: i64,
 }
 
 impl From<&ProfilePin> for PinDisplayData {
@@ -433,11 +137,17 @@ impl From<&ProfilePin> for PinDisplayData {
             syncengine_core::PinRelationship::Manual => "Manual".to_string(),
             syncengine_core::PinRelationship::Own => "Self".to_string(),
         };
+        let profile = &pin.signed_profile.profile;
         Self {
             did: pin.did.clone(),
-            display_name: pin.signed_profile.profile.display_name.clone(),
+            display_name: profile.display_name.clone(),
+            subtitle: profile.subtitle.clone(),
+            bio: profile.bio.clone(),
+            avatar_blob_id: profile.avatar_blob_id.clone(),
+            profile_link: profile.profile_link.clone(),
             relationship,
             pinned_at: pin.pinned_at,
+            last_updated: pin.last_updated,
         }
     }
 }
@@ -447,31 +157,137 @@ struct YourPinCardProps {
     pin: PinDisplayData,
 }
 
+/// Truncate bio text to a maximum length, adding ellipsis if needed
+fn truncate_bio(bio: &str, max_chars: usize) -> String {
+    if bio.len() <= max_chars {
+        bio.to_string()
+    } else {
+        // Find a good break point (space or newline)
+        let truncated = &bio[..max_chars];
+        if let Some(last_space) = truncated.rfind(|c: char| c.is_whitespace()) {
+            format!("{}…", &truncated[..last_space])
+        } else {
+            format!("{}…", truncated)
+        }
+    }
+}
+
+/// Full profile card for mirrored peers - shows complete profile information
 #[component]
 fn YourPinCard(props: YourPinCardProps) -> Element {
     let engine = use_engine();
+    let mut expanded = use_signal(|| false);
 
     let display_name = props.pin.display_name.clone();
+    let subtitle = props.pin.subtitle.clone();
+    let bio = props.pin.bio.clone();
+    let avatar_blob_id = props.pin.avatar_blob_id.clone();
+    let profile_link = props.pin.profile_link.clone();
     let relationship = props.pin.relationship.clone();
     let pinned_since = format_relative_time(props.pin.pinned_at);
+    let last_mirrored = format_relative_time(props.pin.last_updated);
     let did_for_unpin = props.pin.did.clone();
+    let did_display = {
+        let did = &props.pin.did;
+        if did.starts_with("did:sync:") {
+            let suffix = &did[9..];
+            if suffix.len() > 16 {
+                format!("did:sync:{}…", &suffix[..16])
+            } else {
+                did.clone()
+            }
+        } else if did.len() > 24 {
+            format!("{}…", &did[..24])
+        } else {
+            did.clone()
+        }
+    };
+
+    // Determine if bio should show expand option
+    let bio_preview = truncate_bio(&bio, 150);
+    let has_more_bio = bio.len() > 150;
 
     rsx! {
-        div { class: "network-card your-pin-card",
-            div { class: "card-header",
-                span { class: "card-name", "{display_name}" }
-                span { class: "card-relationship", "{relationship}" }
-            }
-
-            div { class: "card-details",
-                span { class: "detail-item",
-                    span { class: "detail-label", "Pinned: " }
-                    span { class: "detail-value", "{pinned_since}" }
+        div { class: "network-card mirrored-profile-card",
+            // Profile header with avatar
+            div { class: "mirrored-profile-header",
+                // Avatar
+                div { class: "mirrored-avatar",
+                    if let Some(ref blob_id) = avatar_blob_id {
+                        AsyncImage {
+                            blob_id: blob_id.clone(),
+                            alt: display_name.clone(),
+                            class: Some("mirrored-avatar-img".to_string()),
+                        }
+                    } else {
+                        img {
+                            class: "mirrored-avatar-img mirrored-avatar-default",
+                            src: "{profile_default_uri()}",
+                            alt: "Profile",
+                        }
+                    }
                 }
 
+                // Name and subtitle
+                div { class: "mirrored-identity",
+                    h3 { class: "mirrored-name", "{display_name}" }
+                    if let Some(ref sub) = subtitle {
+                        p { class: "mirrored-subtitle", "{sub}" }
+                    }
+                    if let Some(ref link) = profile_link {
+                        span { class: "mirrored-link", "sync.local/{link}" }
+                    }
+                }
+
+                // Relationship badge
+                span { class: "mirrored-relationship-badge", "{relationship}" }
+            }
+
+            // DID (truncated)
+            div { class: "mirrored-did",
+                span { class: "did-label", "DID: " }
+                span { class: "did-value", "{did_display}" }
+            }
+
+            // Bio section
+            if !bio.is_empty() {
+                div { class: "mirrored-bio",
+                    if expanded() {
+                        p { class: "bio-text bio-full", "{bio}" }
+                    } else {
+                        p { class: "bio-text bio-preview", "{bio_preview}" }
+                    }
+                    if has_more_bio {
+                        button {
+                            class: "bio-expand-btn",
+                            onclick: move |_| expanded.set(!expanded()),
+                            if expanded() { "Show less" } else { "Show more" }
+                        }
+                    }
+                }
+            } else {
+                div { class: "mirrored-bio mirrored-bio-empty",
+                    p { class: "bio-placeholder", "No bio provided" }
+                }
+            }
+
+            // Mirror timestamps
+            div { class: "mirrored-timestamps",
+                div { class: "timestamp-item",
+                    span { class: "timestamp-label", "Mirroring since: " }
+                    span { class: "timestamp-value", "{pinned_since}" }
+                }
+                div { class: "timestamp-item",
+                    span { class: "timestamp-label", "Last synced: " }
+                    span { class: "timestamp-value timestamp-mirrored", "{last_mirrored}" }
+                }
+            }
+
+            // Actions
+            div { class: "mirrored-actions",
                 button {
                     class: "unpin-btn",
-                    title: "Stop pinning this profile",
+                    title: "Stop mirroring this profile",
                     onclick: move |_| {
                         let did = did_for_unpin.clone();
                         spawn(async move {
@@ -490,7 +306,7 @@ fn YourPinCard(props: YourPinCardProps) -> Element {
                             }
                         });
                     },
-                    "Unpin"
+                    "Stop Mirroring"
                 }
             }
         }
