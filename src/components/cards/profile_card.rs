@@ -214,11 +214,16 @@ pub fn ProfileCard(
                         subtitle: None,
                         link: profile.profile_link.as_ref().map(|l| format!("sync.local/{}", l)),
                     }
-                }
 
-                // Tagline (subtitle) - shown after name, before connection info
-                if let Some(ref tagline) = profile.subtitle {
-                    p { class: "card-tagline", "{tagline}" }
+                    // Tagline (subtitle) - shown after name, above the divider
+                    if let Some(ref tagline) = profile.subtitle {
+                        if !tagline.is_empty() {
+                            p { class: "card-tagline", "{tagline}" }
+                        }
+                    }
+
+                    // Divider line between tagline and connection info
+                    div { class: "card-divider" }
                 }
 
                 // Connection info (DID, status, last seen) - only shown when provided

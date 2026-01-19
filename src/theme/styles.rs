@@ -3005,13 +3005,27 @@ body {
 }
 
 /* === Profile Card Connection Info === */
+/* === Card Divider === */
+.card-divider {
+  height: 1px;
+  background: linear-gradient(90deg,
+    transparent 0%,
+    rgba(124, 184, 124, 0.3) 20%,
+    rgba(124, 184, 124, 0.3) 80%,
+    transparent 100%
+  );
+  margin: 0.5rem 0;
+}
+
+.profile-card--compact .card-divider {
+  margin: 0.35rem 0;
+}
+
 .card-connection-info {
   display: flex;
   flex-direction: column;
   gap: 0.25rem;
-  padding: 0.5rem 0;
-  margin-bottom: 0.5rem;
-  border-bottom: 1px solid rgba(124, 184, 124, 0.15);
+  padding: 0.25rem 0;
   font-family: var(--font-mono);
   font-size: 0.75rem;
 }
@@ -3102,8 +3116,7 @@ body {
 
 .profile-card--compact .card-connection-info {
   font-size: 0.65rem;
-  padding: 0.35rem 0;
-  margin-bottom: 0.35rem;
+  padding: 0.15rem 0;
 }
 
 .profile-card--compact .did-value {
