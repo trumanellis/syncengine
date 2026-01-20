@@ -211,6 +211,10 @@ pub struct SyncEngine {
     /// Manages subscriptions to profile and realm packet topics.
     #[allow(dead_code)] // Will be used when packet sync is implemented
     profile_topic_tracker: ProfileTopicTracker,
+
+    /// Flag indicating whether networking was explicitly started via `start_networking()`.
+    /// Used to prevent auto-sync in `open_realm` when the user intends to work offline.
+    networking_requested: bool,
 }
 
 impl SyncEngine {
@@ -272,6 +276,7 @@ impl SyncEngine {
             profile_log: None, // Initialized when profile_keys are initialized
             mirror_store: Some(mirror_store),
             profile_topic_tracker: ProfileTopicTracker::new(),
+            networking_requested: false,
         };
 
         // Initialize the Private realm if it doesn't exist
@@ -1003,10 +1008,11 @@ impl SyncEngine {
 
         debug!(%realm_id, "Realm opened");
 
-        // AUTO-START SYNC: If this is a shared realm, start P2P sync automatically
-        // This ensures sync resumes after app restart for shared realms
+        // AUTO-START SYNC: If this is a shared realm AND networking was explicitly requested,
+        // start P2P sync automatically. This ensures sync resumes after app restart for shared
+        // realms, but only when the user intends to be online.
         // Note: We call start_sync_internal to avoid circular recursion with start_sync
-        if info.is_shared {
+        if info.is_shared && self.networking_requested {
             info!(
                 %realm_id,
                 bootstrap_peers = info.bootstrap_peers.len(),
@@ -1020,6 +1026,11 @@ impl SyncEngine {
                 );
                 // Don't fail the open_realm call - the realm is still usable locally
             }
+        } else if info.is_shared && !self.networking_requested {
+            debug!(
+                %realm_id,
+                "Shared realm opened in offline mode - sync will start when networking is enabled"
+            );
         }
 
         Ok(())
