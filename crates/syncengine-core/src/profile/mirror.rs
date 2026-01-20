@@ -23,6 +23,7 @@ use crate::identity::Did;
 use parking_lot::RwLock;
 use redb::{Database, ReadableTable, TableDefinition};
 use std::sync::Arc;
+use tracing::{debug, info};
 
 use super::keys::ProfilePublicKeys;
 use super::packet::PacketEnvelope;
@@ -82,6 +83,16 @@ impl MirrorStore {
         let sequence = envelope.sequence;
         let key = format_packet_key(did_str, sequence);
         let new_hash = envelope.hash();
+
+        // DIAGNOSTIC: Info level with DID bytes for key comparison debugging
+        info!(
+            sender_did = %did_str,
+            sender_did_len = did_str.len(),
+            sender_did_bytes = ?did_str.as_bytes(),
+            sequence = sequence,
+            storage_key = %key,
+            "MirrorStore: STORING packet with key"
+        );
 
         // Serialize envelope
         let bytes = envelope.encode()?;
@@ -186,16 +197,87 @@ impl MirrorStore {
 
     /// Get all packets since a given sequence (exclusive).
     pub fn get_since(&self, did: &Did, from: u64) -> Result<Vec<PacketEnvelope>, SyncError> {
+        let did_str = did.as_str();
+        // DIAGNOSTIC: Info level with DID bytes for key comparison debugging
+        info!(
+            query_did = %did_str,
+            query_did_len = did_str.len(),
+            query_did_bytes = ?did_str.as_bytes(),
+            from_sequence = from,
+            "MirrorStore: QUERYING packets for DID"
+        );
+
         let head = match self.get_head(did)? {
-            Some(h) => h,
-            None => return Ok(Vec::new()),
+            Some(h) => {
+                info!(
+                    query_did = %did_str,
+                    head_sequence = h,
+                    "MirrorStore: FOUND head sequence {} for DID",
+                    h
+                );
+                h
+            }
+            None => {
+                info!(
+                    query_did = %did_str,
+                    "MirrorStore: NO HEAD found for DID (no packets stored for this sender)"
+                );
+                return Ok(Vec::new());
+            }
         };
 
         if from >= head {
+            debug!(
+                query_did = %did_str,
+                from_sequence = from,
+                head_sequence = head,
+                "MirrorStore: from >= head, returning empty"
+            );
             return Ok(Vec::new());
         }
 
-        self.get_range(did, from + 1, head)
+        let packets = self.get_range(did, from + 1, head)?;
+        debug!(
+            query_did = %did_str,
+            from_sequence = from + 1,
+            to_sequence = head,
+            packets_found = packets.len(),
+            "MirrorStore: get_range completed"
+        );
+        Ok(packets)
+    }
+
+    /// Get ALL packets for a DID (inclusive of sequence 0).
+    ///
+    /// This is different from `get_since(did, 0)` which excludes sequence 0.
+    /// Use this when you want all packets including the very first one.
+    pub fn get_all(&self, did: &Did) -> Result<Vec<PacketEnvelope>, SyncError> {
+        let did_str = did.as_str();
+        debug!(
+            query_did = %did_str,
+            "MirrorStore: get_all - fetching ALL packets including sequence 0"
+        );
+
+        match self.get_head(did)? {
+            Some(head) => {
+                let packets = self.get_range(did, 0, head)?;
+                debug!(
+                    query_did = %did_str,
+                    from_sequence = 0,
+                    to_sequence = head,
+                    packets_found = packets.len(),
+                    "MirrorStore: get_all completed"
+                );
+                Ok(packets)
+            }
+            None => {
+                debug!(
+                    query_did = %did_str,
+                    "MirrorStore: get_all - no head found, returning empty"
+                );
+                Ok(Vec::new())
+            }
+        }
     }
 
     /// Delete packets before a given sequence (for garbage collection).
