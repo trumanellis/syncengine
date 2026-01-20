@@ -3031,10 +3031,8 @@ impl SyncEngine {
             "Processing incoming envelope"
         );
 
-        // Create verification function
-        // For now, we accept all valid signatures since we don't have a DID registry
-        // In the future, this would lookup the sender's public key from their DID
-        let verify_fn = Self::make_verify_fn();
+        // Create verification function that looks up sender's public key from pinned profiles
+        let verify_fn = Self::make_verify_fn(&self.storage);
 
         // Open the envelope (verify signature + decrypt)
         match envelope.open(&state.realm_key, verify_fn) {
@@ -3236,20 +3234,42 @@ impl SyncEngine {
 
     /// Create a verification function for envelope signatures
     ///
-    /// Currently accepts all valid signature formats since we don't have
-    /// a DID registry to lookup public keys. In the future, this would
-    /// verify signatures against the sender's registered public key.
-    fn make_verify_fn() -> impl Fn(&str, &[u8], &[u8]) -> bool {
-        |_sender: &str, _data: &[u8], sig: &[u8]| -> bool {
-            // For now, we accept any non-empty signature
-            // This is a placeholder until we implement proper DID-based verification
-            // with a registry that maps DIDs to public keys
-            //
-            // A proper implementation would:
-            // 1. Parse the sender DID to extract the public key
-            // 2. Verify the signature using that public key
-            // 3. Check that the DID is a member of the realm
-            !sig.is_empty()
+    /// Verifies hybrid Ed25519 + ML-DSA-65 signatures against the sender's
+    /// public key from their pinned profile. Unknown senders (those without
+    /// a pinned profile) are rejected.
+    fn make_verify_fn(storage: &Storage) -> impl Fn(&str, &[u8], &[u8]) -> bool + '_ {
+        move |sender_did: &str, data: &[u8], sig_bytes: &[u8]| -> bool {
+            use crate::identity::HybridSignature;
+            use tracing::{debug, warn};
+
+            // 1. Deserialize the signature from bytes
+            let signature = match HybridSignature::from_bytes(sig_bytes) {
+                Ok(sig) => sig,
+                Err(e) => {
+                    warn!(sender = %sender_did, error = ?e, "Failed to parse signature");
+                    return false;
+                }
+            };
+
+            // 2. Look up sender's public key from pinned profiles
+            let public_key = match storage.load_pinned_profile(sender_did) {
+                Ok(Some(pin)) => pin.signed_profile.public_key,
+                Ok(None) => {
+                    debug!(sender = %sender_did, "Unknown sender - no pinned profile");
+                    return false;
+                }
+                Err(e) => {
+                    warn!(sender = %sender_did, error = ?e, "Failed to load pinned profile");
+                    return false;
+                }
+            };
+
+            // 3. Verify BOTH Ed25519 and ML-DSA-65 signatures
+            let valid = public_key.verify(data, &signature);
+            if !valid {
+                warn!(sender = %sender_did, "Signature verification failed");
+            }
+            valid
         }
     }
 
@@ -5929,6 +5949,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_handle_incoming_valid_envelope() {
+        use crate::identity::HybridKeypair;
+        use crate::types::{PinRelationship, SignedProfile, UserProfile};
+
         let (mut engine, _temp) = create_test_engine().await;
 
         // Initialize identity
@@ -5940,16 +5963,25 @@ mod tests {
         // Get the realm key to create a valid envelope
         let realm_key = engine.storage.load_realm_key(&realm_id).unwrap().unwrap();
 
-        // Create a valid envelope
+        // Create a peer keypair and pin their profile (simulating a known contact)
+        let peer_keypair = HybridKeypair::generate();
+        let peer_profile = UserProfile::new("peer_sender".to_string(), "Peer Sender".to_string());
+        let signed_profile = SignedProfile::sign(&peer_profile, &peer_keypair);
+        let sender_did = signed_profile.did().to_string();
+
+        // Pin the peer's profile so they're recognized
+        engine
+            .pin_profile(signed_profile, PinRelationship::Contact)
+            .unwrap();
+
+        // Create a valid envelope from the peer
         let message = SyncMessage::Announce {
             realm_id: realm_id.clone(),
             heads: vec![vec![1, 2, 3]],
             sender_addr: None,
         };
 
-        let keypair = engine.identity.as_ref().unwrap();
-        let sender_did = crate::identity::Did::from_public_key(&keypair.public_key()).to_string();
-        let sign_fn = |data: &[u8]| keypair.sign(data).to_bytes();
+        let sign_fn = |data: &[u8]| peer_keypair.sign(data).to_bytes();
 
         let envelope = SyncEnvelope::seal(&message, &sender_did, &realm_key, sign_fn).unwrap();
         let envelope_bytes = envelope.to_bytes().unwrap();
@@ -6402,6 +6434,7 @@ mod tests {
     /// 4. Bob should see Alice's task (after sync propagates)
     #[tokio::test]
     async fn test_two_engines_sync_tasks_via_invite() {
+        use crate::types::{PinRelationship, SignedProfile, UserProfile};
         use std::time::Duration;
 
         let _ = tracing_subscriber::fmt::try_init();
@@ -6415,6 +6448,27 @@ mod tests {
         let temp_dir_bob = TempDir::new().unwrap();
         let mut bob = SyncEngine::new(temp_dir_bob.path()).await.unwrap();
         bob.init_identity().unwrap(); // Required for signing sync messages
+
+        // CRITICAL: Exchange and pin profiles so signature verification works.
+        // In production, this happens via contact exchange. For tests, we do it manually.
+        {
+            // Create signed profiles for both engines
+            let alice_keypair = alice.identity.as_ref().unwrap();
+            let alice_profile = UserProfile::new("alice_peer".to_string(), "Alice".to_string());
+            let alice_signed = SignedProfile::sign(&alice_profile, alice_keypair);
+
+            let bob_keypair = bob.identity.as_ref().unwrap();
+            let bob_profile = UserProfile::new("bob_peer".to_string(), "Bob".to_string());
+            let bob_signed = SignedProfile::sign(&bob_profile, bob_keypair);
+
+            // Pin each other's profiles (Alice knows Bob, Bob knows Alice)
+            alice
+                .pin_profile(bob_signed.clone(), PinRelationship::Contact)
+                .unwrap();
+            bob.pin_profile(alice_signed.clone(), PinRelationship::Contact)
+                .unwrap();
+            debug!("Exchanged and pinned profiles between Alice and Bob");
+        }
 
         // CRITICAL: Start networking on BOTH engines and exchange addresses BEFORE
         // subscribing to any gossip topics. This matches the pattern used in the
@@ -6776,8 +6830,10 @@ mod tests {
     /// - After restart, creator can use saved peers to reconnect
     #[tokio::test]
     async fn test_creator_learns_and_persists_peer_from_announce() {
+        use crate::identity::HybridKeypair;
         use crate::invite::NodeAddrBytes;
         use crate::sync::{SyncEnvelope, SyncMessage};
+        use crate::types::{PinRelationship, SignedProfile, UserProfile};
 
         let temp_dir = TempDir::new().unwrap();
         let data_dir = temp_dir.path();
@@ -6815,6 +6871,15 @@ mod tests {
             state.realm_key = realm_key;
         }
 
+        // Create a joiner's keypair and pin their profile (required for signature verification)
+        let joiner_keypair = HybridKeypair::generate();
+        let joiner_profile = UserProfile::new("joiner_peer".to_string(), "Joiner".to_string());
+        let joiner_signed = SignedProfile::sign(&joiner_profile, &joiner_keypair);
+        let joiner_did = joiner_signed.did().to_string();
+        engine
+            .pin_profile(joiner_signed.clone(), PinRelationship::Contact)
+            .unwrap();
+
         // Simulate receiving an Announce from a joiner with their address
         let joiner_addr = NodeAddrBytes {
             node_id: [99u8; 32], // Different node
@@ -6828,13 +6893,10 @@ mod tests {
             sender_addr: Some(joiner_addr.clone()),
         };
 
-        // Create signed envelopes in separate scopes to avoid borrow conflicts
+        // Create signed envelope from the joiner
         let envelope_bytes = {
-            let identity = engine.identity.as_ref().unwrap();
-            let sender_did =
-                crate::identity::Did::from_public_key(&identity.public_key()).to_string();
-            let sign_fn = |data: &[u8]| identity.sign(data).to_bytes().to_vec();
-            let envelope = SyncEnvelope::seal(&announce, &sender_did, &realm_key, sign_fn)
+            let sign_fn = |data: &[u8]| joiner_keypair.sign(data).to_bytes().to_vec();
+            let envelope = SyncEnvelope::seal(&announce, &joiner_did, &realm_key, sign_fn)
                 .expect("Should create envelope");
             envelope.to_bytes().expect("Should serialize")
         };
@@ -6869,11 +6931,8 @@ mod tests {
 
         // Verify idempotency - processing the same announce again shouldn't duplicate
         let envelope_bytes2 = {
-            let identity = engine.identity.as_ref().unwrap();
-            let sender_did =
-                crate::identity::Did::from_public_key(&identity.public_key()).to_string();
-            let sign_fn = |data: &[u8]| identity.sign(data).to_bytes().to_vec();
-            let envelope = SyncEnvelope::seal(&announce, &sender_did, &realm_key, sign_fn)
+            let sign_fn = |data: &[u8]| joiner_keypair.sign(data).to_bytes().to_vec();
+            let envelope = SyncEnvelope::seal(&announce, &joiner_did, &realm_key, sign_fn)
                 .expect("Should create envelope");
             envelope.to_bytes().expect("Should serialize")
         };
@@ -7046,6 +7105,7 @@ mod tests {
     /// This tests Automerge's CRDT merge behavior for offline changes.
     #[tokio::test]
     async fn test_offline_changes_sync_after_restart() {
+        use crate::types::{PinRelationship, SignedProfile, UserProfile};
         use std::time::Duration;
 
         let _ = tracing_subscriber::fmt::try_init();
@@ -7063,6 +7123,24 @@ mod tests {
 
             let mut bob = SyncEngine::new(&bob_path).await.unwrap();
             bob.init_identity().unwrap();
+
+            // CRITICAL: Exchange and pin profiles so signature verification works across restarts
+            {
+                let alice_keypair = alice.identity.as_ref().unwrap();
+                let alice_profile = UserProfile::new("alice_offline".to_string(), "Alice".to_string());
+                let alice_signed = SignedProfile::sign(&alice_profile, alice_keypair);
+
+                let bob_keypair = bob.identity.as_ref().unwrap();
+                let bob_profile = UserProfile::new("bob_offline".to_string(), "Bob".to_string());
+                let bob_signed = SignedProfile::sign(&bob_profile, bob_keypair);
+
+                alice
+                    .pin_profile(bob_signed.clone(), PinRelationship::Contact)
+                    .unwrap();
+                bob.pin_profile(alice_signed.clone(), PinRelationship::Contact)
+                    .unwrap();
+                debug!("Exchanged and pinned profiles between Alice and Bob");
+            }
 
             // Start networking
             alice.start_networking().await.unwrap();
@@ -8117,5 +8195,175 @@ mod tests {
         let convo2 = engine.get_conversation(contact2).unwrap();
         assert_eq!(convo2.len(), 1, "Contact 2 should have exactly 1 message");
         assert_eq!(convo2.messages()[0].content, "Hello Contact 2");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Signature Verification Tests (make_verify_fn)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    async fn test_verify_fn_known_sender_valid_signature() {
+        use crate::identity::HybridKeypair;
+        use crate::types::{PinRelationship, SignedProfile, UserProfile};
+
+        let (engine, _temp) = create_test_engine().await;
+
+        // Create a contact's keypair and profile
+        let contact_keypair = HybridKeypair::generate();
+        let contact_profile = UserProfile::new("peer_alice".to_string(), "Alice".to_string());
+        let signed_profile = SignedProfile::sign(&contact_profile, &contact_keypair);
+        let contact_did = signed_profile.did().to_string();
+
+        // Pin the profile so they're a known contact
+        engine
+            .pin_profile(signed_profile.clone(), PinRelationship::Contact)
+            .unwrap();
+
+        // Sign some test data
+        let test_data = b"Hello, world!";
+        let signature = contact_keypair.sign(test_data);
+        let sig_bytes = signature.to_bytes();
+
+        // Create verify function and test
+        let verify_fn = SyncEngine::make_verify_fn(&engine.storage);
+        assert!(
+            verify_fn(&contact_did, test_data, &sig_bytes),
+            "Valid signature from known sender should verify"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_verify_fn_unknown_sender_returns_false() {
+        use crate::identity::HybridKeypair;
+        use crate::types::{SignedProfile, UserProfile};
+
+        let (engine, _temp) = create_test_engine().await;
+
+        // Create a stranger's keypair (NOT pinned)
+        let stranger_keypair = HybridKeypair::generate();
+        let stranger_profile = UserProfile::new("peer_stranger".to_string(), "Stranger".to_string());
+        let signed_profile = SignedProfile::sign(&stranger_profile, &stranger_keypair);
+        let stranger_did = signed_profile.did().to_string();
+
+        // Sign some test data
+        let test_data = b"Hello from stranger";
+        let signature = stranger_keypair.sign(test_data);
+        let sig_bytes = signature.to_bytes();
+
+        // Create verify function and test - should fail because sender is unknown
+        let verify_fn = SyncEngine::make_verify_fn(&engine.storage);
+        assert!(
+            !verify_fn(&stranger_did, test_data, &sig_bytes),
+            "Signature from unknown sender should be rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_verify_fn_wrong_signature_returns_false() {
+        use crate::identity::HybridKeypair;
+        use crate::types::{PinRelationship, SignedProfile, UserProfile};
+
+        let (engine, _temp) = create_test_engine().await;
+
+        // Create a contact's keypair and profile
+        let contact_keypair = HybridKeypair::generate();
+        let contact_profile = UserProfile::new("peer_bob".to_string(), "Bob".to_string());
+        let signed_profile = SignedProfile::sign(&contact_profile, &contact_keypair);
+        let contact_did = signed_profile.did().to_string();
+
+        // Pin the profile
+        engine
+            .pin_profile(signed_profile.clone(), PinRelationship::Contact)
+            .unwrap();
+
+        // Create a different keypair and sign with it (attacker trying to impersonate)
+        let attacker_keypair = HybridKeypair::generate();
+        let test_data = b"Forged message from attacker";
+        let forged_signature = attacker_keypair.sign(test_data);
+        let sig_bytes = forged_signature.to_bytes();
+
+        // Create verify function and test - should fail because signature doesn't match
+        let verify_fn = SyncEngine::make_verify_fn(&engine.storage);
+        assert!(
+            !verify_fn(&contact_did, test_data, &sig_bytes),
+            "Forged signature should be rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_verify_fn_tampered_message_returns_false() {
+        use crate::identity::HybridKeypair;
+        use crate::types::{PinRelationship, SignedProfile, UserProfile};
+
+        let (engine, _temp) = create_test_engine().await;
+
+        // Create a contact's keypair and profile
+        let contact_keypair = HybridKeypair::generate();
+        let contact_profile = UserProfile::new("peer_carol".to_string(), "Carol".to_string());
+        let signed_profile = SignedProfile::sign(&contact_profile, &contact_keypair);
+        let contact_did = signed_profile.did().to_string();
+
+        // Pin the profile
+        engine
+            .pin_profile(signed_profile.clone(), PinRelationship::Contact)
+            .unwrap();
+
+        // Sign original data
+        let original_data = b"Original message";
+        let signature = contact_keypair.sign(original_data);
+        let sig_bytes = signature.to_bytes();
+
+        // Try to verify with tampered data
+        let tampered_data = b"Tampered message";
+
+        // Create verify function and test - should fail because data was tampered
+        let verify_fn = SyncEngine::make_verify_fn(&engine.storage);
+        assert!(
+            !verify_fn(&contact_did, tampered_data, &sig_bytes),
+            "Signature should fail for tampered message"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_verify_fn_malformed_signature_returns_false() {
+        use crate::identity::HybridKeypair;
+        use crate::types::{PinRelationship, SignedProfile, UserProfile};
+
+        let (engine, _temp) = create_test_engine().await;
+
+        // Create a contact's keypair and profile
+        let contact_keypair = HybridKeypair::generate();
+        let contact_profile = UserProfile::new("peer_dave".to_string(), "Dave".to_string());
+        let signed_profile = SignedProfile::sign(&contact_profile, &contact_keypair);
+        let contact_did = signed_profile.did().to_string();
+
+        // Pin the profile
+        engine
+            .pin_profile(signed_profile.clone(), PinRelationship::Contact)
+            .unwrap();
+
+        let test_data = b"Test message";
+
+        // Test with various malformed signatures
+        let verify_fn = SyncEngine::make_verify_fn(&engine.storage);
+
+        // Empty signature
+        assert!(
+            !verify_fn(&contact_did, test_data, &[]),
+            "Empty signature should be rejected"
+        );
+
+        // Signature too short (less than 68 bytes needed for Ed25519 + length)
+        assert!(
+            !verify_fn(&contact_did, test_data, &[0u8; 50]),
+            "Too-short signature should be rejected"
+        );
+
+        // Random garbage bytes (invalid signature format)
+        let garbage: Vec<u8> = (0..400).map(|i| (i % 256) as u8).collect();
+        assert!(
+            !verify_fn(&contact_did, test_data, &garbage),
+            "Garbage signature should be rejected"
+        );
     }
 }
