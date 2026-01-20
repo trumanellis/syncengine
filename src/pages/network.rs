@@ -207,20 +207,30 @@ pub fn Network() -> Element {
                 let mut guard = shared.write().await;
 
                 if let Some(ref mut eng) = *guard {
-                    // Create a DirectMessage packet (global for now - encryption later)
+                    // Create a DirectMessage packet addressed to the specific contact
+                    // This routes the packet via the 1:1 contact topic, not the global topic
                     let payload = syncengine_core::PacketPayload::DirectMessage { content };
-                    let address = syncengine_core::PacketAddress::Global;
+
+                    // Parse the DID and create an Individual address for direct routing
+                    let address = match syncengine_core::Did::parse(&did) {
+                        Ok(parsed_did) => syncengine_core::PacketAddress::Individual(parsed_did),
+                        Err(e) => {
+                            tracing::error!(error = %e, did = %did, "Invalid DID for message");
+                            compose_target.set(None);
+                            return;
+                        }
+                    };
 
                     match eng.create_and_broadcast_packet(payload, address).await {
                         Ok(seq) => {
                             tracing::info!(
                                 to = %did,
                                 sequence = seq,
-                                "Sent message"
+                                "Sent message via 1:1 contact topic"
                             );
                         }
                         Err(e) => {
-                            tracing::error!(error = %e, "Failed to send message");
+                            tracing::error!(error = %e, to = %did, "Failed to send message");
                         }
                     }
                 }

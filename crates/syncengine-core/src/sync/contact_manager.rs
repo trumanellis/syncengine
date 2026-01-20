@@ -1010,8 +1010,50 @@ impl ContactManager {
                                 }
                             }
                         }
+                        Ok(crate::sync::ProfileGossipMessage::Packet { envelope }) => {
+                            // Direct message packet received via 1:1 contact topic
+                            let sender_did = envelope.sender.to_string();
+
+                            // Only process packets from the expected peer (the contact)
+                            if sender_did == peer_did {
+                                // Store packet in MirrorStore
+                                match crate::profile::MirrorStore::new(storage.db_handle()) {
+                                    Ok(mirror) => {
+                                        match mirror.store_packet(&envelope) {
+                                            Ok(_) => {
+                                                info!(
+                                                    sender = %sender_did,
+                                                    seq = envelope.sequence,
+                                                    "Stored packet from contact via 1:1 topic"
+                                                );
+                                                // Notify UI of new message
+                                                let _ = event_tx.send(ContactEvent::ProfileUpdated {
+                                                    did: sender_did,
+                                                });
+                                            }
+                                            Err(e) => {
+                                                warn!(
+                                                    sender = %sender_did,
+                                                    error = %e,
+                                                    "Failed to store packet from contact topic"
+                                                );
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        warn!(error = %e, "Failed to create MirrorStore for contact topic");
+                                    }
+                                }
+                            } else {
+                                debug!(
+                                    expected = %peer_did,
+                                    actual = %sender_did,
+                                    "Received packet from unexpected sender on contact topic"
+                                );
+                            }
+                        }
                         Ok(_) => {
-                            // Ignore Request/Response messages
+                            // Ignore Request/Response messages on contact topics
                         }
                         Err(_) => {
                             // Not a profile message - might be other contact protocol messages
@@ -1106,6 +1148,54 @@ impl ContactManager {
         }
 
         success_count
+    }
+
+    /// Send a packet to a specific contact via their 1:1 contact topic.
+    ///
+    /// This is the correct way to send direct messages. The packet is broadcast
+    /// on the deterministic 1:1 topic that both peers share.
+    ///
+    /// # Arguments
+    ///
+    /// * `contact_did` - The DID of the contact to send to
+    /// * `packet_bytes` - The serialized ProfileGossipMessage::Packet to send
+    ///
+    /// # Returns
+    ///
+    /// Ok(()) if the packet was broadcast successfully.
+    pub async fn send_packet_to_contact(
+        &self,
+        contact_did: &str,
+        packet_bytes: &[u8],
+    ) -> SyncResult<()> {
+        // Look up contact to get their topic bytes
+        let contact = self
+            .storage
+            .load_contact(contact_did)?
+            .ok_or_else(|| SyncError::ContactNotFound(contact_did.to_string()))?;
+
+        // Find sender for this contact's topic
+        let active_topics = self.active_topics.read().await;
+        let sender = active_topics.get(&contact.contact_topic).ok_or_else(|| {
+            SyncError::Network(format!(
+                "Not subscribed to contact topic for {}. Contact may be offline or not yet connected.",
+                contact_did
+            ))
+        })?;
+
+        // Broadcast the packet on the 1:1 topic
+        sender
+            .broadcast(packet_bytes.to_vec())
+            .await
+            .map_err(|e| SyncError::Gossip(format!("Failed to send to contact {}: {}", contact_did, e)))?;
+
+        debug!(
+            contact_did = %contact_did,
+            topic = ?TopicId::from_bytes(contact.contact_topic),
+            "Sent packet to contact via 1:1 topic"
+        );
+
+        Ok(())
     }
 
     /// Auto-reconnect to all contacts on startup

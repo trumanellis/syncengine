@@ -664,13 +664,16 @@ impl SyncEngine {
 
     /// Broadcast a packet from our log to the gossip network.
     ///
-    /// This sends the packet to all connected peers on the profile gossip topic.
-    /// Packets are relayed even by peers who cannot decrypt them, enabling
-    /// offline delivery via mutual contacts.
+    /// Routes packets based on the address:
+    /// - `Individual(did)` → 1:1 contact topic (direct messaging)
+    /// - `List(dids)` → each recipient's 1:1 contact topic
+    /// - `Global` → global profile gossip topic
+    /// - `Group(realm_id)` → realm topic (not yet implemented)
     ///
     /// # Arguments
     ///
     /// * `sequence` - The sequence number of the packet to broadcast
+    /// * `address` - The addressing mode for routing
     ///
     /// # Errors
     ///
@@ -678,7 +681,12 @@ impl SyncEngine {
     /// - Profile log is not initialized
     /// - The packet with the given sequence doesn't exist
     /// - Gossip network is not started
-    pub async fn broadcast_packet(&self, sequence: u64) -> Result<(), SyncError> {
+    /// - Contact manager is not initialized (for Individual/List addresses)
+    pub async fn broadcast_packet(
+        &self,
+        sequence: u64,
+        address: &PacketAddress,
+    ) -> Result<(), SyncError> {
         // Get the packet from our log
         let log = self.profile_log.as_ref().ok_or_else(|| {
             SyncError::Identity("Profile log not initialized".to_string())
@@ -693,17 +701,80 @@ impl SyncEngine {
         let msg = crate::sync::ProfileGossipMessage::packet(envelope);
         let bytes = msg.to_bytes()?;
 
-        // Broadcast on the GLOBAL profile gossip topic so all peers receive it
-        // (The per-peer topic is only for profile announcements, not packets/messages)
-        if let Some(sender) = self.global_profile_gossip_sender.as_ref() {
-            sender.broadcast(bytes).await.map_err(|e| {
-                SyncError::Gossip(format!("Failed to broadcast packet: {}", e))
-            })?;
-            debug!(sequence, "Broadcast packet to global gossip topic");
-        } else {
-            return Err(SyncError::Gossip(
-                "Global profile gossip not started. Call start_profile_sync() first.".to_string()
-            ));
+        // Route based on address type
+        match address {
+            PacketAddress::Individual(did) => {
+                // Send via 1:1 contact topic
+                if let Some(ref contact_mgr) = self.contact_manager {
+                    contact_mgr
+                        .send_packet_to_contact(&did.to_string(), &bytes)
+                        .await?;
+                    debug!(sequence, to = %did, "Sent packet to contact via 1:1 topic");
+                } else {
+                    return Err(SyncError::Network(
+                        "Contact manager not initialized. Cannot send to individual contact."
+                            .to_string(),
+                    ));
+                }
+            }
+            PacketAddress::List(dids) => {
+                // Send to each contact in the list
+                if let Some(ref contact_mgr) = self.contact_manager {
+                    let mut errors = Vec::new();
+                    for did in dids {
+                        if let Err(e) = contact_mgr
+                            .send_packet_to_contact(&did.to_string(), &bytes)
+                            .await
+                        {
+                            warn!(to = %did, error = %e, "Failed to send packet to contact");
+                            errors.push(format!("{}: {}", did, e));
+                        } else {
+                            debug!(sequence, to = %did, "Sent packet to contact via 1:1 topic");
+                        }
+                    }
+                    if errors.len() == dids.len() {
+                        return Err(SyncError::Network(format!(
+                            "Failed to send to all recipients: {:?}",
+                            errors
+                        )));
+                    }
+                    // Partial success is acceptable
+                } else {
+                    return Err(SyncError::Network(
+                        "Contact manager not initialized. Cannot send to contacts.".to_string(),
+                    ));
+                }
+            }
+            PacketAddress::Global => {
+                // Broadcast on the GLOBAL profile gossip topic
+                if let Some(sender) = self.global_profile_gossip_sender.as_ref() {
+                    sender.broadcast(bytes).await.map_err(|e| {
+                        SyncError::Gossip(format!("Failed to broadcast packet: {}", e))
+                    })?;
+                    debug!(sequence, "Broadcast packet to global gossip topic");
+                } else {
+                    return Err(SyncError::Gossip(
+                        "Global profile gossip not started. Call start_profile_sync() first."
+                            .to_string(),
+                    ));
+                }
+            }
+            PacketAddress::Group(_realm_id) => {
+                // TODO: Broadcast to realm topic
+                // For now, fallback to global topic
+                warn!(sequence, "Group addressing not yet implemented, using global topic");
+                if let Some(sender) = self.global_profile_gossip_sender.as_ref() {
+                    sender.broadcast(bytes).await.map_err(|e| {
+                        SyncError::Gossip(format!("Failed to broadcast packet: {}", e))
+                    })?;
+                    debug!(sequence, "Broadcast packet to global gossip topic (group fallback)");
+                } else {
+                    return Err(SyncError::Gossip(
+                        "Global profile gossip not started. Call start_profile_sync() first."
+                            .to_string(),
+                    ));
+                }
+            }
         }
 
         Ok(())
@@ -717,7 +788,7 @@ impl SyncEngine {
     /// # Arguments
     ///
     /// * `payload` - The packet content
-    /// * `address` - Who can decrypt this packet
+    /// * `address` - Who can decrypt this packet and where to route the packet
     ///
     /// # Returns
     ///
@@ -728,10 +799,10 @@ impl SyncEngine {
         address: PacketAddress,
     ) -> Result<u64, SyncError> {
         // Create the packet (stores it in our log)
-        let seq = self.create_packet(payload, address)?;
+        let seq = self.create_packet(payload, address.clone())?;
 
-        // Broadcast it to the network
-        self.broadcast_packet(seq).await?;
+        // Broadcast it to the network via the appropriate topic based on address
+        self.broadcast_packet(seq, &address).await?;
 
         Ok(seq)
     }

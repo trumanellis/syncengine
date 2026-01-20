@@ -189,8 +189,9 @@ pub fn NavHeader(props: NavHeaderProps) -> Element {
                 // Right: Status orb with peer count
                 div { class: "nav-status-v2",
                     button {
+                        r#type: "button",
                         class: if syncing() { "status-orb-btn syncing" } else { "status-orb-btn" },
-                        onclick: move |_| show_dropdown.toggle(),
+                        onclick: move |_| show_dropdown.set(!show_dropdown()),
                         "aria-label": "Connection status - {online_count} peers online",
                         "aria-expanded": "{show_dropdown()}",
 
@@ -212,18 +213,26 @@ pub fn NavHeader(props: NavHeaderProps) -> Element {
                             path { d: "m6 9 6 6 6-6" }
                         }
                     }
-
-                    // Dropdown
-                    if show_dropdown() {
-                        PeerStatusDropdown {
-                            peers: peers(),
-                            syncing: syncing(),
-                            on_close: move |_| show_dropdown.set(false),
-                            on_sync: on_sync,
-                            on_message: on_message,
-                        }
-                    }
                 }
+            }
+        }
+
+        // Mobile navigation (hidden on desktop via CSS)
+        MobileNav {
+            current: props.current,
+            peer_count: peer_count,
+            syncing: syncing(),
+            on_status_click: move |_| show_dropdown.set(!show_dropdown()),
+        }
+
+        // Dropdown (rendered at root level so it works on both desktop and mobile)
+        if show_dropdown() {
+            PeerStatusDropdown {
+                peers: peers(),
+                syncing: syncing(),
+                on_close: move |_| show_dropdown.set(false),
+                on_sync: on_sync,
+                on_message: on_message,
             }
         }
 
@@ -235,14 +244,6 @@ pub fn NavHeader(props: NavHeaderProps) -> Element {
                 on_send: send_message,
                 on_close: move |_| compose_target.set(None),
             }
-        }
-
-        // Mobile navigation (hidden on desktop via CSS)
-        MobileNav {
-            current: props.current,
-            peer_count: peer_count,
-            syncing: syncing(),
-            on_status_click: move |_| show_dropdown.toggle(),
         }
     }
 }

@@ -6229,22 +6229,34 @@ body {
 .peer-dropdown-backdrop {
   position: fixed;
   inset: 0;
-  z-index: 99;
+  z-index: 999;
 }
 
 .peer-dropdown {
-  position: absolute;
-  top: calc(100% + var(--space-2));
-  right: 0;
-  z-index: 100;
+  position: fixed;
+  top: 60px;
+  right: var(--space-4);
+  z-index: 1000;
   width: 320px;
-  max-height: 400px;
+  max-width: calc(100vw - var(--space-8));
+  max-height: calc(100vh - 140px);
   background: var(--void-black);
   border: 1px solid var(--moss);
   border-radius: 8px;
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
   overflow: hidden;
   animation: fadeIn var(--transition-normal);
+}
+
+/* Mobile: position dropdown above the bottom nav */
+@media (max-width: 768px) {
+  .peer-dropdown {
+    top: auto;
+    bottom: 80px;
+    right: var(--space-4);
+    left: var(--space-4);
+    width: auto;
+  }
 }
 
 .peer-dropdown-header {
