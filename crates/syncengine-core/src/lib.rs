@@ -41,6 +41,7 @@
 //! ```
 
 pub mod blobs;
+pub mod chat;
 pub mod crypto;
 pub mod engine;
 pub mod error;
@@ -71,6 +72,9 @@ pub use sync::{
     SyncManager, SyncMessage, SyncStatus, TopicHandle, WireMessage, ENVELOPE_VERSION,
 };
 pub use types::*;
+
+// Chat module
+pub use chat::{ChatMessage, Conversation};
 
 // Profile packet layer (Indra's Network)
 pub use profile::{

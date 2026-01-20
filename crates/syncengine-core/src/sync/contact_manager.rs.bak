@@ -1,0 +1,1265 @@
+//! Contact Manager - P2P contact exchange orchestration
+//!
+//! Manages the complete lifecycle of peer contacts:
+//! - Generating and decoding contact invites
+//! - Sending and receiving contact requests
+//! - Mutual acceptance handshake
+//! - Auto-reconnection to accepted contacts
+//!
+//! ## Protocol Flow
+//!
+//! ```text
+//! ┌─────────────────────────────────────────────────────────────────┐
+//! │  Contact Exchange Protocol                                      │
+//! │                                                                  │
+//! │  1. Alice generates invite → "sync-contact:{base58}"            │
+//! │  2. Bob decodes invite → verifies signature, checks expiry      │
+//! │  3. Bob sends ContactRequest → saves as OutgoingPending         │
+//! │  4. Alice receives request → saves as IncomingPending           │
+//! │  5. Alice accepts → both finalize connection                    │
+//! │  6. Subscribe to 1:1 gossip topic                               │
+//! │  7. Save to contacts table with shared keys                     │
+//! └─────────────────────────────────────────────────────────────────┘
+//! ```
+
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use iroh_gossip::proto::TopicId;
+use tokio::sync::{broadcast, RwLock};
+use tokio::task::JoinHandle;
+use tracing::{debug, error, info, warn};
+
+use crate::error::SyncError;
+use crate::identity::{Did, HybridKeypair, HybridPublicKey};
+use crate::invite::NodeAddrBytes;
+use crate::storage::Storage;
+use crate::sync::contact_protocol::{ContactMessage, CONTACT_ALPN};
+use crate::sync::{GossipSync, TopicHandle};
+use crate::types::contact::{
+    ContactInfo, ContactState, ContactStatus, PeerContactInvite, PendingContact, ProfileSnapshot,
+};
+
+type SyncResult<T> = Result<T, SyncError>;
+
+/// Event emitted by ContactManager for UI notifications
+#[derive(Debug, Clone)]
+pub enum ContactEvent {
+    /// A new invite was generated
+    InviteGenerated { invite_code: String },
+    /// A contact request was received from another peer
+    ContactRequestReceived {
+        invite_id: [u8; 16],
+        from: ProfileSnapshot,
+    },
+    /// A contact request was successfully sent
+    ContactRequestSent { invite_id: [u8; 16], to: String },
+    /// A contact was mutually accepted and finalized
+    ContactAccepted { contact: ContactInfo },
+    /// A contact request was declined
+    ContactDeclined { invite_id: [u8; 16] },
+    /// A contact came online
+    ContactOnline { did: String },
+    /// A contact went offline
+    ContactOffline { did: String },
+    /// An error occurred during contact operations
+    ContactError { message: String },
+}
+
+/// Manages peer contact exchange and auto-reconnection
+///
+/// ContactManager orchestrates the full lifecycle of peer connections,
+/// from invite generation through mutual acceptance and ongoing synchronization.
+pub struct ContactManager {
+    /// Gossip sync instance for network communication
+    gossip_sync: Arc<GossipSync>,
+    /// Our hybrid keypair for signing invites and requests
+    keypair: Arc<HybridKeypair>,
+    /// Our DID (decentralized identifier)
+    did: Did,
+    /// Storage for contacts and pending requests
+    storage: Arc<Storage>,
+    /// Event broadcast channel for UI updates
+    event_tx: broadcast::Sender<ContactEvent>,
+    /// Active 1:1 gossip topics (contact_topic -> handle)
+    active_topics: Arc<RwLock<HashMap<[u8; 32], TopicHandle>>>,
+}
+
+impl ContactManager {
+    /// Create a new ContactManager
+    ///
+    /// # Arguments
+    ///
+    /// * `gossip_sync` - GossipSync instance for network communication
+    /// * `keypair` - Our hybrid keypair for signing
+    /// * `did` - Our DID
+    /// * `storage` - Storage for persistence
+    /// * `event_tx` - Event broadcast channel (shared with ContactProtocolHandler)
+    pub fn new(
+        gossip_sync: Arc<GossipSync>,
+        keypair: Arc<HybridKeypair>,
+        did: Did,
+        storage: Arc<Storage>,
+        event_tx: broadcast::Sender<ContactEvent>,
+    ) -> Self {
+        // Note: Incoming contact messages are handled by ContactProtocolHandler
+        // registered with the Router in GossipSync. No listener task needed here.
+
+        Self {
+            gossip_sync,
+            keypair,
+            did,
+            storage,
+            event_tx,
+            active_topics: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    /// Generate a contact invite for our profile
+    ///
+    /// Creates a signed invite that can be shared via QR code or text.
+    /// The invite expires after the specified number of hours (max 168 = 7 days).
+    ///
+    /// # Arguments
+    ///
+    /// * `profile` - Profile snapshot to include in invite
+    /// * `expiry_hours` - Hours until invite expires (capped at 168)
+    ///
+    /// # Returns
+    ///
+    /// A base58-encoded invite string with prefix "sync-contact:"
+    pub fn generate_invite(
+        &self,
+        profile: ProfileSnapshot,
+        expiry_hours: u8,
+    ) -> SyncResult<String> {
+        // Cap expiry at 7 days (168 hours)
+        let expiry_hours = expiry_hours.min(168);
+
+        // Generate unique invite ID
+        let invite_id = PeerContactInvite::generate_invite_id();
+
+        // Get current node address
+        let node_addr = NodeAddrBytes::from_endpoint_addr(&self.gossip_sync.endpoint_addr());
+
+        // Calculate timestamps
+        let now = chrono::Utc::now().timestamp();
+        let expires_at = now + (expiry_hours as i64 * 3600);
+
+        // Create unsigned invite
+        let mut invite = PeerContactInvite {
+            version: 1,
+            invite_id,
+            inviter_did: self.did.to_string(),
+            inviter_pubkey: self.keypair.public_key().to_bytes(),
+            profile_snapshot: profile,
+            node_addr,
+            created_at: now,
+            expires_at,
+            signature: vec![], // Filled after signing
+        };
+
+        // Sign the invite
+        let signature = self.sign_invite(&invite)?;
+        invite.signature = signature.to_bytes();
+
+        // Encode as base58 with prefix
+        let serialized =
+            postcard::to_allocvec(&invite).map_err(|e| SyncError::Serialization(e.to_string()))?;
+        let encoded = bs58::encode(&serialized).into_string();
+        let invite_code = format!("sync-contact:{}", encoded);
+
+        info!(
+            invite_id = ?invite_id,
+            expiry_hours,
+            "Generated contact invite"
+        );
+
+        // Emit event
+        let _ = self.event_tx.send(ContactEvent::InviteGenerated {
+            invite_code: invite_code.clone(),
+        });
+
+        Ok(invite_code)
+    }
+
+    /// Decode and validate a contact invite
+    ///
+    /// Verifies signature, checks expiry, and ensures invite hasn't been revoked.
+    ///
+    /// # Arguments
+    ///
+    /// * `invite_str` - Invite string with prefix "sync-contact:{base58}"
+    ///
+    /// # Returns
+    ///
+    /// Validated PeerContactInvite if all checks pass
+    pub fn decode_invite(&self, invite_str: &str) -> SyncResult<PeerContactInvite> {
+        // Check prefix
+        if !invite_str.starts_with("sync-contact:") {
+            return Err(SyncError::InvalidInvite(
+                "Invalid invite format (missing prefix)".to_string(),
+            ));
+        }
+
+        // Decode base58
+        let encoded = &invite_str[13..]; // Skip "sync-contact:"
+        let bytes = bs58::decode(encoded)
+            .into_vec()
+            .map_err(|e| SyncError::InvalidInvite(format!("Invalid base58: {}", e)))?;
+
+        // Deserialize
+        let invite: PeerContactInvite = postcard::from_bytes(&bytes)
+            .map_err(|e| SyncError::InvalidInvite(format!("Invalid invite data: {}", e)))?;
+
+        // Check version
+        if invite.version != 1 {
+            return Err(SyncError::InvalidInvite(format!(
+                "Unsupported invite version: {}",
+                invite.version
+            )));
+        }
+
+        // Check expiry
+        if invite.is_expired() {
+            return Err(SyncError::InvalidInvite("Invite has expired".to_string()));
+        }
+
+        // Check if revoked
+        if self.storage.is_invite_revoked(&invite.invite_id)? {
+            return Err(SyncError::InvalidInvite(
+                "Invite has been revoked".to_string(),
+            ));
+        }
+
+        // Verify signature
+        self.verify_invite_signature(&invite)?;
+
+        debug!(
+            invite_id = ?invite.invite_id,
+            inviter_did = %invite.inviter_did,
+            "Decoded and validated invite"
+        );
+
+        Ok(invite)
+    }
+
+    /// Send a contact request to an inviter
+    ///
+    /// Saves the invite as OutgoingPending and sends a contact request
+    /// via QUIC to the inviter's endpoint.
+    ///
+    /// # Arguments
+    ///
+    /// * `invite` - Validated PeerContactInvite from decode_invite()
+    /// * `our_profile` - Our profile to send in the request
+    pub async fn send_contact_request(
+        &self,
+        invite: PeerContactInvite,
+        our_profile: ProfileSnapshot,
+    ) -> SyncResult<()> {
+        // Save as pending (OutgoingPending)
+        let pending = PendingContact {
+            invite_id: invite.invite_id,
+            peer_did: invite.inviter_did.clone(),
+            profile: invite.profile_snapshot.clone(),
+            node_addr: invite.node_addr.clone(),
+            state: ContactState::OutgoingPending,
+            created_at: chrono::Utc::now().timestamp(),
+        };
+
+        self.storage.save_pending(&pending)?;
+
+        info!(
+            invite_id = ?invite.invite_id,
+            peer_did = %invite.inviter_did,
+            "Saved outgoing contact request"
+        );
+
+        // Emit event
+        let _ = self.event_tx.send(ContactEvent::ContactRequestSent {
+            invite_id: invite.invite_id,
+            to: invite.inviter_did.clone(),
+        });
+
+        // Connect to inviter's endpoint and send ContactRequest via QUIC
+        self.send_contact_message(&invite.node_addr, our_profile, invite.invite_id)
+            .await?;
+
+        Ok(())
+    }
+
+    /// Accept an incoming contact request
+    ///
+    /// Moves the pending contact to WaitingForMutual or MutuallyAccepted state,
+    /// sends acceptance message, and subscribes to contact gossip topic if mutual.
+    ///
+    /// # Arguments
+    ///
+    /// * `invite_id` - Invite ID of the pending contact to accept
+    pub async fn accept_contact_request(&self, invite_id: &[u8; 16]) -> SyncResult<()> {
+        // Load pending contact
+        let mut pending = self
+            .storage
+            .load_pending(invite_id)?
+            .ok_or_else(|| SyncError::ContactNotFound(hex::encode(invite_id)))?;
+
+        // Must be IncomingPending to accept
+        if pending.state != ContactState::IncomingPending {
+            return Err(SyncError::InvalidOperation(format!(
+                "Cannot accept contact in state: {}",
+                pending.state
+            )));
+        }
+
+        // Update state to WaitingForMutual
+        pending.state = ContactState::WaitingForMutual;
+        self.storage.save_pending(&pending)?;
+
+        info!(
+            invite_id = ?invite_id,
+            peer_did = %pending.peer_did,
+            "Accepted contact request, waiting for mutual acceptance"
+        );
+
+        // Send ContactResponse (accepted: true) via QUIC
+        self.send_contact_response(&pending.node_addr, *invite_id, true)
+            .await?;
+
+        // Derive shared keys
+        let contact_topic = Self::derive_contact_topic(self.did.as_ref(), &pending.peer_did);
+        let contact_key = Self::derive_contact_key(self.did.as_ref(), &pending.peer_did);
+
+        // Send ContactAccepted with shared keys
+        self.send_contact_accepted(&pending.node_addr, *invite_id, contact_topic, contact_key)
+            .await?;
+
+        // Finalize the contact (subscribe to topic, save to database)
+        self.finalize_contact(&pending).await?;
+
+        Ok(())
+    }
+
+    /// Decline an incoming contact request
+    ///
+    /// Sends a decline message and deletes the pending contact.
+    ///
+    /// # Arguments
+    ///
+    /// * `invite_id` - Invite ID of the pending contact to decline
+    pub async fn decline_contact_request(&self, invite_id: &[u8; 16]) -> SyncResult<()> {
+        // Load pending contact
+        let pending = self
+            .storage
+            .load_pending(invite_id)?
+            .ok_or_else(|| SyncError::ContactNotFound(hex::encode(invite_id)))?;
+
+        // Must be IncomingPending to decline
+        if pending.state != ContactState::IncomingPending {
+            return Err(SyncError::InvalidOperation(format!(
+                "Cannot decline contact in state: {}",
+                pending.state
+            )));
+        }
+
+        // Delete pending contact
+        self.storage.delete_pending(invite_id)?;
+
+        info!(
+            invite_id = ?invite_id,
+            peer_did = %pending.peer_did,
+            "Declined contact request"
+        );
+
+        // Send ContactResponse (accepted: false) via QUIC
+        if let Err(e) = self
+            .send_contact_response(&pending.node_addr, *invite_id, false)
+            .await
+        {
+            warn!(
+                error = ?e,
+                "Failed to send decline response, but pending was already deleted"
+            );
+        }
+
+        // Emit event
+        let _ = self.event_tx.send(ContactEvent::ContactDeclined {
+            invite_id: *invite_id,
+        });
+
+        Ok(())
+    }
+
+    /// Finalize a mutually accepted contact
+    ///
+    /// Derives shared keys, subscribes to contact topic, saves to contacts table.
+    async fn finalize_contact(&self, pending: &PendingContact) -> SyncResult<()> {
+        // Derive 1:1 contact topic and encryption key from DIDs
+        let contact_topic = Self::derive_contact_topic(self.did.as_ref(), &pending.peer_did);
+        let contact_key = Self::derive_contact_key(self.did.as_ref(), &pending.peer_did);
+
+        // Create ContactInfo
+        let contact = ContactInfo {
+            peer_did: pending.peer_did.clone(),
+            peer_endpoint_id: pending.node_addr.node_id,
+            profile: pending.profile.clone(),
+            node_addr: pending.node_addr.clone(),
+            contact_topic,
+            contact_key,
+            accepted_at: chrono::Utc::now().timestamp(),
+            last_seen: chrono::Utc::now().timestamp() as u64,
+            status: ContactStatus::Offline, // Will update to Online when gossip connects
+            is_favorite: false,
+        };
+
+        // Save to contacts table
+        self.storage.save_contact(&contact)?;
+
+        // Delete pending
+        self.storage.delete_pending(&pending.invite_id)?;
+
+        info!(
+            peer_did = %contact.peer_did,
+            contact_topic = ?contact_topic,
+            "Finalized contact and saved to database"
+        );
+
+        // Subscribe to contact topic
+        self.subscribe_contact_topic(&contact).await?;
+
+        // Emit event
+        let _ = self.event_tx.send(ContactEvent::ContactAccepted {
+            contact: contact.clone(),
+        });
+
+        Ok(())
+    }
+
+    /// Subscribe to a 1:1 contact gossip topic
+    ///
+    /// Creates a direct communication channel with this contact.
+    async fn subscribe_contact_topic(&self, contact: &ContactInfo) -> SyncResult<()> {
+        let topic_id = TopicId::from_bytes(contact.contact_topic);
+
+        // Subscribe with no bootstrap peers (direct connection only)
+        // The peer will connect when they also subscribe to the same topic
+        let handle = self.gossip_sync.subscribe(topic_id, vec![]).await?;
+
+        // Store handle for later use
+        self.active_topics
+            .write()
+            .await
+            .insert(contact.contact_topic, handle);
+
+        info!(
+            peer_did = %contact.peer_did,
+            topic_id = ?topic_id,
+            "Subscribed to contact gossip topic"
+        );
+
+        Ok(())
+    }
+
+    /// Derive deterministic 1:1 contact topic from two DIDs
+    ///
+    /// Uses BLAKE3 hash of sorted DIDs to ensure both peers derive the same topic.
+    pub fn derive_contact_topic(did1: &str, did2: &str) -> [u8; 32] {
+        // Sort DIDs lexicographically for deterministic order
+        let (a, b) = if did1 < did2 {
+            (did1, did2)
+        } else {
+            (did2, did1)
+        };
+
+        // BLAKE3("sync-contact-topic" || a || b)
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"sync-contact-topic");
+        hasher.update(a.as_bytes());
+        hasher.update(b.as_bytes());
+        *hasher.finalize().as_bytes()
+    }
+
+    /// Derive deterministic shared encryption key from two DIDs
+    ///
+    /// Uses BLAKE3 hash of sorted DIDs to ensure both peers derive the same key.
+    pub fn derive_contact_key(did1: &str, did2: &str) -> [u8; 32] {
+        let (a, b) = if did1 < did2 {
+            (did1, did2)
+        } else {
+            (did2, did1)
+        };
+
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"sync-contact-key");
+        hasher.update(a.as_bytes());
+        hasher.update(b.as_bytes());
+        *hasher.finalize().as_bytes()
+    }
+
+    /// Subscribe to contact events
+    ///
+    /// Returns a receiver for ContactEvent broadcasts.
+    pub fn subscribe_events(&self) -> broadcast::Receiver<ContactEvent> {
+        self.event_tx.subscribe()
+    }
+
+    /// Auto-reconnect to all contacts on startup
+    ///
+    /// Loads all contacts from storage and attempts to reconnect,
+    /// prioritizing favorites first.
+    pub async fn reconnect_contacts(&self) -> SyncResult<()> {
+        let mut contacts = self.storage.list_contacts()?;
+
+        // Sort by is_favorite (favorites first)
+        contacts.sort_by(|a, b| b.is_favorite.cmp(&a.is_favorite));
+
+        info!(
+            count = contacts.len(),
+            "Auto-reconnecting to saved contacts"
+        );
+
+        for contact in contacts {
+            match self.subscribe_contact_topic(&contact).await {
+                Ok(_) => {
+                    debug!(peer_did = %contact.peer_did, "Reconnected to contact");
+                }
+                Err(e) => {
+                    warn!(
+                        peer_did = %contact.peer_did,
+                        error = ?e,
+                        "Failed to reconnect to contact"
+                    );
+                }
+            }
+
+            // Add small delay to avoid overwhelming the network
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        }
+
+        Ok(())
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Internal Helper Methods
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Sign an invite with our hybrid keypair
+    fn sign_invite(
+        &self,
+        invite: &PeerContactInvite,
+    ) -> SyncResult<crate::identity::HybridSignature> {
+        // Serialize all fields except signature
+        let mut data = Vec::new();
+        data.extend_from_slice(&[invite.version]);
+        data.extend_from_slice(&invite.invite_id);
+        data.extend_from_slice(invite.inviter_did.as_bytes());
+        data.extend_from_slice(&invite.inviter_pubkey);
+
+        let profile_bytes = postcard::to_allocvec(&invite.profile_snapshot)
+            .map_err(|e| SyncError::Serialization(e.to_string()))?;
+        data.extend_from_slice(&profile_bytes);
+
+        let node_addr_bytes = postcard::to_allocvec(&invite.node_addr)
+            .map_err(|e| SyncError::Serialization(e.to_string()))?;
+        data.extend_from_slice(&node_addr_bytes);
+
+        data.extend_from_slice(&invite.created_at.to_le_bytes());
+        data.extend_from_slice(&invite.expires_at.to_le_bytes());
+
+        // Sign
+        Ok(self.keypair.sign(&data))
+    }
+
+    /// Verify invite signature
+    fn verify_invite_signature(&self, invite: &PeerContactInvite) -> SyncResult<()> {
+        // Reconstruct signed data
+        let mut data = Vec::new();
+        data.extend_from_slice(&[invite.version]);
+        data.extend_from_slice(&invite.invite_id);
+        data.extend_from_slice(invite.inviter_did.as_bytes());
+        data.extend_from_slice(&invite.inviter_pubkey);
+
+        let profile_bytes = postcard::to_allocvec(&invite.profile_snapshot)
+            .map_err(|e| SyncError::Serialization(e.to_string()))?;
+        data.extend_from_slice(&profile_bytes);
+
+        let node_addr_bytes = postcard::to_allocvec(&invite.node_addr)
+            .map_err(|e| SyncError::Serialization(e.to_string()))?;
+        data.extend_from_slice(&node_addr_bytes);
+
+        data.extend_from_slice(&invite.created_at.to_le_bytes());
+        data.extend_from_slice(&invite.expires_at.to_le_bytes());
+
+        // Deserialize signature
+        let signature = crate::identity::HybridSignature::from_bytes(&invite.signature)?;
+
+        // Deserialize public key
+        let public_key = HybridPublicKey::from_bytes(&invite.inviter_pubkey)?;
+
+        // Verify (returns bool, not Result)
+        if !public_key.verify(&data, &signature) {
+            return Err(SyncError::InvalidInvite(
+                "Signature verification failed".to_string(),
+            ));
+        }
+
+        Ok(())
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // QUIC Network Protocol Implementation
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Spawn background listener task for incoming contact messages
+    ///
+    /// Receives connections routed by the Router's ContactProtocolHandler.
+    /// The Router handles ALPN negotiation and forwards CONTACT_ALPN connections
+    /// to this listener via a channel.
+    fn spawn_listener(
+        gossip_sync: Arc<GossipSync>,
+        _keypair: Arc<HybridKeypair>,
+        _did: Did,
+        storage: Arc<Storage>,
+        event_tx: broadcast::Sender<ContactEvent>,
+    ) -> JoinHandle<()> {
+        let contact_rx = gossip_sync.contact_receiver();
+
+        tokio::spawn(async move {
+            info!("Contact listener task started (Router-based)");
+
+            let mut rx = contact_rx.lock().await;
+
+            loop {
+                // Receive connections from Router via channel
+                match rx.recv().await {
+                    Some(connection) => {
+                        let storage = storage.clone();
+                        let event_tx = event_tx.clone();
+
+                        tokio::spawn(async move {
+                            if let Err(e) =
+                                Self::handle_routed_connection(connection, storage, event_tx).await
+                            {
+                                error!(error = ?e, "Failed to handle routed contact connection");
+                            }
+                        });
+                    }
+                    None => {
+                        debug!("Contact receiver channel closed, stopping listener");
+                        break;
+                    }
+                }
+            }
+
+            info!("Contact listener task stopped");
+        })
+    }
+
+    /// Handle a routed QUIC connection from the Router
+    ///
+    /// The Router has already accepted the connection and verified CONTACT_ALPN.
+    /// This function processes the contact protocol message.
+    async fn handle_routed_connection(
+        connection: iroh::endpoint::Connection,
+        storage: Arc<Storage>,
+        event_tx: broadcast::Sender<ContactEvent>,
+    ) -> SyncResult<()> {
+        let remote_id = connection.remote_id();
+        debug!(?remote_id, "Handling routed contact connection");
+
+        // Accept a bi-directional stream
+        let (mut send, mut recv) = connection
+            .accept_bi()
+            .await
+            .map_err(|e| SyncError::Network(format!("Failed to accept bi stream: {}", e)))?;
+
+        // Read the message bytes
+        let bytes = recv
+            .read_to_end(1024 * 1024) // 1MB max
+            .await
+            .map_err(|e| SyncError::Network(format!("Failed to read message: {}", e)))?;
+
+        // Decode the message
+        let message = ContactMessage::decode(&bytes)
+            .map_err(|e| SyncError::Serialization(format!("Failed to decode contact message: {}", e)))?;
+
+        debug!(?message, "Received contact message");
+
+        // Handle the message based on variant
+        match message {
+            ContactMessage::ContactRequest {
+                invite_id,
+                requester_did,
+                requester_profile,
+                requester_node_addr,
+                requester_signature: _,
+            } => {
+                // Deserialize node address
+                let node_addr: NodeAddrBytes = postcard::from_bytes(&requester_node_addr)
+                    .map_err(|e| SyncError::Serialization(format!("Invalid node address: {}", e)))?;
+
+                // Save as IncomingPending
+                let pending = PendingContact {
+                    invite_id,
+                    peer_did: requester_did.clone(),
+                    profile: requester_profile.clone(),
+                    node_addr,
+                    state: ContactState::IncomingPending,
+                    created_at: chrono::Utc::now().timestamp(),
+                };
+
+                storage.save_pending(&pending)?;
+
+                info!(
+                    invite_id = ?invite_id,
+                    requester_did = %requester_did,
+                    "Received contact request, saved as IncomingPending"
+                );
+
+                // Emit event
+                let _ = event_tx.send(ContactEvent::ContactRequestReceived {
+                    invite_id,
+                    from: requester_profile,
+                });
+            }
+
+            ContactMessage::ContactResponse {
+                invite_id,
+                accepted,
+                inviter_profile: _,
+            } => {
+                // Load pending contact
+                if let Some(mut pending) = storage.load_pending(&invite_id)? {
+                    if accepted {
+                        // Update state to WaitingForMutual
+                        pending.state = ContactState::WaitingForMutual;
+                        storage.save_pending(&pending)?;
+
+                        info!(
+                            invite_id = ?invite_id,
+                            "Contact request accepted by inviter, waiting for mutual finalization"
+                        );
+                    } else {
+                        // Request was declined, delete pending
+                        storage.delete_pending(&invite_id)?;
+
+                        info!(invite_id = ?invite_id, "Contact request declined by inviter");
+
+                        let _ = event_tx.send(ContactEvent::ContactDeclined { invite_id });
+                    }
+                }
+            }
+
+            ContactMessage::ContactAccepted {
+                invite_id,
+                contact_topic,
+                contact_key,
+                signature: _,
+            } => {
+                // Load pending contact
+                if let Some(pending) = storage.load_pending(&invite_id)? {
+                    // Create ContactInfo
+                    let contact = ContactInfo {
+                        peer_did: pending.peer_did.clone(),
+                        peer_endpoint_id: pending.node_addr.node_id,
+                        profile: pending.profile.clone(),
+                        node_addr: pending.node_addr.clone(),
+                        contact_topic,
+                        contact_key,
+                        accepted_at: chrono::Utc::now().timestamp(),
+                        last_seen: chrono::Utc::now().timestamp() as u64,
+                        status: ContactStatus::Offline,
+                        is_favorite: false,
+                    };
+
+                    // Save to contacts table
+                    storage.save_contact(&contact)?;
+
+                    // Delete pending
+                    storage.delete_pending(&invite_id)?;
+
+                    info!(
+                        invite_id = ?invite_id,
+                        peer_did = %contact.peer_did,
+                        "Contact accepted and finalized"
+                    );
+
+                    // Emit event
+                    let _ = event_tx.send(ContactEvent::ContactAccepted {
+                        contact: contact.clone(),
+                    });
+
+                    // Send acknowledgment
+                    let ack_msg = ContactMessage::ContactAcknowledged { invite_id };
+                    let ack_bytes = ack_msg.encode().map_err(|e| {
+                        SyncError::Serialization(format!("Failed to encode acknowledgment: {}", e))
+                    })?;
+
+                    if let Err(e) = send.write_all(&ack_bytes).await {
+                        warn!(error = ?e, "Failed to send ContactAcknowledged");
+                    }
+                }
+            }
+
+            ContactMessage::ContactAcknowledged { invite_id } => {
+                info!(invite_id = ?invite_id, "Received ContactAcknowledged");
+                // Final confirmation - nothing to do, contact is already saved
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Send a ContactRequest message via QUIC
+    async fn send_contact_message(
+        &self,
+        node_addr: &NodeAddrBytes,
+        our_profile: ProfileSnapshot,
+        invite_id: [u8; 16],
+    ) -> SyncResult<()> {
+        // Convert NodeAddrBytes to EndpointAddr
+        let endpoint_addr = node_addr.to_endpoint_addr()?;
+
+        debug!(
+            peer = %endpoint_addr.id,
+            invite_id = ?invite_id,
+            "Connecting to inviter to send ContactRequest"
+        );
+
+        // Connect to the peer
+        let connection = self
+            .gossip_sync
+            .endpoint()
+            .connect(endpoint_addr.clone(), CONTACT_ALPN)
+            .await
+            .map_err(|e| SyncError::Network(format!("Failed to connect to inviter: {}", e)))?;
+
+        // Open a bi-directional stream
+        let (mut send, _recv) = connection
+            .open_bi()
+            .await
+            .map_err(|e| SyncError::Network(format!("Failed to open bi stream: {}", e)))?;
+
+        // Serialize our node address
+        let our_node_addr = NodeAddrBytes::from_endpoint_addr(&self.gossip_sync.endpoint_addr());
+        let our_node_addr_bytes = postcard::to_allocvec(&our_node_addr)
+            .map_err(|e| SyncError::Serialization(format!("Failed to serialize node address: {}", e)))?;
+
+        // Create and sign the request
+        // TODO: Add proper signature verification
+        let requester_signature = vec![]; // Placeholder
+
+        let message = ContactMessage::ContactRequest {
+            invite_id,
+            requester_did: self.did.to_string(),
+            requester_profile: our_profile,
+            requester_node_addr: our_node_addr_bytes,
+            requester_signature,
+        };
+
+        // Encode message
+        let bytes = message
+            .encode()
+            .map_err(|e| SyncError::Serialization(format!("Failed to encode ContactRequest: {}", e)))?;
+
+        // Send message
+        send.write_all(&bytes)
+            .await
+            .map_err(|e| SyncError::Network(format!("Failed to send ContactRequest: {}", e)))?;
+
+        send.finish()
+            .map_err(|e| SyncError::Network(format!("Failed to finish send stream: {}", e)))?;
+
+        info!(
+            peer = %endpoint_addr.id,
+            invite_id = ?invite_id,
+            "Sent ContactRequest"
+        );
+
+        Ok(())
+    }
+
+    /// Send a ContactResponse message via QUIC
+    async fn send_contact_response(
+        &self,
+        node_addr: &NodeAddrBytes,
+        invite_id: [u8; 16],
+        accepted: bool,
+    ) -> SyncResult<()> {
+        // Convert NodeAddrBytes to EndpointAddr
+        let endpoint_addr = node_addr.to_endpoint_addr()?;
+
+        debug!(
+            peer = %endpoint_addr.id,
+            invite_id = ?invite_id,
+            accepted,
+            "Connecting to requester to send ContactResponse"
+        );
+
+        // Connect to the peer
+        let connection = self
+            .gossip_sync
+            .endpoint()
+            .connect(endpoint_addr.clone(), CONTACT_ALPN)
+            .await
+            .map_err(|e| SyncError::Network(format!("Failed to connect to requester: {}", e)))?;
+
+        // Open a bi-directional stream
+        let (mut send, _recv) = connection
+            .open_bi()
+            .await
+            .map_err(|e| SyncError::Network(format!("Failed to open bi stream: {}", e)))?;
+
+        // Create response message
+        let inviter_profile = if accepted {
+            // TODO: Load our full profile from storage
+            Some(ProfileSnapshot {
+                display_name: "Inviter".to_string(),
+                subtitle: None,
+                avatar_blob_id: None,
+                bio_excerpt: String::new(),
+            })
+        } else {
+            None
+        };
+
+        let message = ContactMessage::ContactResponse {
+            invite_id,
+            accepted,
+            inviter_profile,
+        };
+
+        // Encode and send
+        let bytes = message
+            .encode()
+            .map_err(|e| SyncError::Serialization(format!("Failed to encode ContactResponse: {}", e)))?;
+
+        send.write_all(&bytes)
+            .await
+            .map_err(|e| SyncError::Network(format!("Failed to send ContactResponse: {}", e)))?;
+
+        send.finish()
+            .map_err(|e| SyncError::Network(format!("Failed to finish send stream: {}", e)))?;
+
+        info!(
+            peer = %endpoint_addr.id,
+            invite_id = ?invite_id,
+            accepted,
+            "Sent ContactResponse"
+        );
+
+        Ok(())
+    }
+
+    /// Send a ContactAccepted message via QUIC
+    async fn send_contact_accepted(
+        &self,
+        node_addr: &NodeAddrBytes,
+        invite_id: [u8; 16],
+        contact_topic: [u8; 32],
+        contact_key: [u8; 32],
+    ) -> SyncResult<()> {
+        // Convert NodeAddrBytes to EndpointAddr
+        let endpoint_addr = node_addr.to_endpoint_addr()?;
+
+        debug!(
+            peer = %endpoint_addr.id,
+            invite_id = ?invite_id,
+            "Connecting to peer to send ContactAccepted"
+        );
+
+        // Connect to the peer
+        let connection = self
+            .gossip_sync
+            .endpoint()
+            .connect(endpoint_addr.clone(), CONTACT_ALPN)
+            .await
+            .map_err(|e| SyncError::Network(format!("Failed to connect to peer: {}", e)))?;
+
+        // Open a bi-directional stream
+        let (mut send, _recv) = connection
+            .open_bi()
+            .await
+            .map_err(|e| SyncError::Network(format!("Failed to open bi stream: {}", e)))?;
+
+        // Create message with signature
+        // TODO: Add proper signature
+        let signature = vec![]; // Placeholder
+
+        let message = ContactMessage::ContactAccepted {
+            invite_id,
+            contact_topic,
+            contact_key,
+            signature,
+        };
+
+        // Encode and send
+        let bytes = message
+            .encode()
+            .map_err(|e| SyncError::Serialization(format!("Failed to encode ContactAccepted: {}", e)))?;
+
+        send.write_all(&bytes)
+            .await
+            .map_err(|e| SyncError::Network(format!("Failed to send ContactAccepted: {}", e)))?;
+
+        send.finish()
+            .map_err(|e| SyncError::Network(format!("Failed to finish send stream: {}", e)))?;
+
+        info!(
+            peer = %endpoint_addr.id,
+            invite_id = ?invite_id,
+            "Sent ContactAccepted"
+        );
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sync::GossipSync;
+    use tempfile::TempDir;
+
+    async fn create_test_manager() -> (ContactManager, TempDir) {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        let storage = Arc::new(Storage::new(&db_path).unwrap());
+
+        let gossip_sync = Arc::new(GossipSync::new().await.unwrap());
+        let keypair = Arc::new(HybridKeypair::generate());
+        let did = Did::from_public_key(&keypair.public_key());
+
+        let manager = ContactManager::new(gossip_sync, keypair, did, storage);
+
+        (manager, temp_dir)
+    }
+
+    fn create_test_profile(name: &str) -> ProfileSnapshot {
+        ProfileSnapshot {
+            display_name: name.to_string(),
+            subtitle: Some("Test User".to_string()),
+            avatar_blob_id: None,
+            bio_excerpt: "This is a test profile for unit testing.".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_generate_and_decode_invite() {
+        let (manager, _temp) = create_test_manager().await;
+        let profile = create_test_profile("Alice");
+
+        // Generate invite
+        let invite_code = manager.generate_invite(profile.clone(), 24).unwrap();
+        assert!(invite_code.starts_with("sync-contact:"));
+
+        // Decode invite
+        let decoded = manager.decode_invite(&invite_code).unwrap();
+        assert_eq!(decoded.version, 1);
+        assert_eq!(decoded.profile_snapshot.display_name, "Alice");
+        assert!(!decoded.is_expired());
+    }
+
+    #[tokio::test]
+    async fn test_decode_invalid_prefix() {
+        let (manager, _temp) = create_test_manager().await;
+
+        let result = manager.decode_invite("invalid-prefix:abc123");
+        assert!(result.is_err());
+        assert!(matches!(result, Err(SyncError::InvalidInvite(_))));
+    }
+
+    #[tokio::test]
+    async fn test_decode_invalid_base58() {
+        let (manager, _temp) = create_test_manager().await;
+
+        let result = manager.decode_invite("sync-contact:invalid!base58");
+        assert!(result.is_err());
+        assert!(matches!(result, Err(SyncError::InvalidInvite(_))));
+    }
+
+    #[tokio::test]
+    async fn test_send_contact_request() {
+        let (manager, _temp) = create_test_manager().await;
+        let profile = create_test_profile("Bob");
+
+        // Generate invite
+        let invite_code = manager.generate_invite(profile.clone(), 24).unwrap();
+        let invite = manager.decode_invite(&invite_code).unwrap();
+
+        // Send request
+        let our_profile = create_test_profile("Alice");
+        manager
+            .send_contact_request(invite.clone(), our_profile)
+            .await
+            .unwrap();
+
+        // Verify pending was saved
+        let pending = manager
+            .storage
+            .load_pending(&invite.invite_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(pending.state, ContactState::OutgoingPending);
+        assert_eq!(pending.profile.display_name, "Bob");
+    }
+
+    #[tokio::test]
+    async fn test_accept_contact_request() {
+        let (manager, _temp) = create_test_manager().await;
+
+        // Create a fake incoming pending contact
+        let invite_id = PeerContactInvite::generate_invite_id();
+        let pending = PendingContact {
+            invite_id,
+            peer_did: "did:sync:test".to_string(),
+            profile: create_test_profile("Charlie"),
+            node_addr: NodeAddrBytes::new([0u8; 32]),
+            state: ContactState::IncomingPending,
+            created_at: chrono::Utc::now().timestamp(),
+        };
+
+        manager.storage.save_pending(&pending).unwrap();
+
+        // Accept the contact
+        manager.accept_contact_request(&invite_id).await.unwrap();
+
+        // Verify pending is gone
+        assert!(manager.storage.load_pending(&invite_id).unwrap().is_none());
+
+        // Verify contact was created
+        let contacts = manager.storage.list_contacts().unwrap();
+        assert_eq!(contacts.len(), 1);
+        assert_eq!(contacts[0].peer_did, "did:sync:test");
+    }
+
+    #[tokio::test]
+    async fn test_decline_contact_request() {
+        let (manager, _temp) = create_test_manager().await;
+
+        // Create a fake incoming pending contact
+        let invite_id = PeerContactInvite::generate_invite_id();
+        let pending = PendingContact {
+            invite_id,
+            peer_did: "did:sync:test".to_string(),
+            profile: create_test_profile("Dave"),
+            node_addr: NodeAddrBytes::new([0u8; 32]),
+            state: ContactState::IncomingPending,
+            created_at: chrono::Utc::now().timestamp(),
+        };
+
+        manager.storage.save_pending(&pending).unwrap();
+
+        // Decline the contact
+        manager.decline_contact_request(&invite_id).await.unwrap();
+
+        // Verify pending is gone
+        assert!(manager.storage.load_pending(&invite_id).unwrap().is_none());
+
+        // Verify no contact was created
+        assert_eq!(manager.storage.list_contacts().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn test_derive_contact_topic_deterministic() {
+        let did1 = "did:sync:alice";
+        let did2 = "did:sync:bob";
+
+        let topic1 = ContactManager::derive_contact_topic(did1, did2);
+        let topic2 = ContactManager::derive_contact_topic(did2, did1);
+
+        // Both orders should produce the same topic
+        assert_eq!(topic1, topic2);
+    }
+
+    #[test]
+    fn test_derive_contact_key_deterministic() {
+        let did1 = "did:sync:alice";
+        let did2 = "did:sync:bob";
+
+        let key1 = ContactManager::derive_contact_key(did1, did2);
+        let key2 = ContactManager::derive_contact_key(did2, did1);
+
+        // Both orders should produce the same key
+        assert_eq!(key1, key2);
+    }
+
+    #[test]
+    fn test_derive_contact_topic_different_pairs() {
+        let topic1 = ContactManager::derive_contact_topic("did:sync:alice", "did:sync:bob");
+        let topic2 = ContactManager::derive_contact_topic("did:sync:alice", "did:sync:charlie");
+
+        // Different peer pairs should produce different topics
+        assert_ne!(topic1, topic2);
+    }
+
+    #[tokio::test]
+    async fn test_revoked_invite_rejected() {
+        let (manager, _temp) = create_test_manager().await;
+        let profile = create_test_profile("Eve");
+
+        // Generate invite
+        let invite_code = manager.generate_invite(profile, 24).unwrap();
+        let invite = manager.decode_invite(&invite_code).unwrap();
+
+        // Revoke it
+        manager.storage.revoke_invite(&invite.invite_id).unwrap();
+
+        // Try to decode again - should fail
+        let result = manager.decode_invite(&invite_code);
+        assert!(result.is_err());
+        assert!(matches!(result, Err(SyncError::InvalidInvite(_))));
+    }
+
+    #[tokio::test]
+    async fn test_expired_invite_rejected() {
+        let (manager, _temp) = create_test_manager().await;
+
+        // Create an expired invite manually
+        let invite_id = PeerContactInvite::generate_invite_id();
+        let node_addr = NodeAddrBytes::from_endpoint_addr(&manager.gossip_sync.endpoint_addr());
+
+        let mut invite = PeerContactInvite {
+            version: 1,
+            invite_id,
+            inviter_did: manager.did.to_string(),
+            inviter_pubkey: manager.keypair.public_key().to_bytes(),
+            profile_snapshot: create_test_profile("Expired"),
+            node_addr,
+            created_at: chrono::Utc::now().timestamp() - 1000,
+            expires_at: chrono::Utc::now().timestamp() - 100, // Already expired
+            signature: vec![],
+        };
+
+        // Sign it
+        let signature = manager.sign_invite(&invite).unwrap();
+        invite.signature = signature.to_bytes();
+
+        // Encode it
+        let serialized = postcard::to_allocvec(&invite).unwrap();
+        let encoded = bs58::encode(&serialized).into_string();
+        let invite_code = format!("sync-contact:{}", encoded);
+
+        // Try to decode - should fail due to expiry
+        let result = manager.decode_invite(&invite_code);
+        assert!(result.is_err());
+        assert!(matches!(result, Err(SyncError::InvalidInvite(_))));
+    }
+
+    #[tokio::test]
+    async fn test_contact_event_emitted_on_generate() {
+        let (manager, _temp) = create_test_manager().await;
+        let mut event_rx = manager.subscribe_events();
+
+        let profile = create_test_profile("Frank");
+        let _invite = manager.generate_invite(profile, 24).unwrap();
+
+        // Should receive InviteGenerated event
+        let event = tokio::time::timeout(tokio::time::Duration::from_millis(100), event_rx.recv())
+            .await
+            .expect("Timeout waiting for event")
+            .expect("Event channel closed");
+
+        assert!(matches!(event, ContactEvent::InviteGenerated { .. }));
+    }
+}

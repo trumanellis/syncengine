@@ -139,9 +139,8 @@ pub fn NavHeader(props: NavHeaderProps) -> Element {
                 let shared = engine();
                 let mut guard = shared.write().await;
                 if let Some(ref mut eng) = *guard {
-                    let payload = syncengine_core::profile::PacketPayload::DirectMessage { content };
-                    let address = syncengine_core::profile::PacketAddress::Global;
-                    match eng.create_and_broadcast_packet(payload, address).await {
+                    // Use send_message which properly sets recipient and routes to 1:1 topic
+                    match eng.send_message(&did, &content).await {
                         Ok(seq) => {
                             tracing::info!(to = %did, sequence = seq, "Sent message");
                         }

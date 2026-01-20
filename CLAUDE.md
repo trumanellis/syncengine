@@ -567,4 +567,59 @@ When starting a feature, copy this:
 
 ---
 
-*You are a worker. Implement your assigned feature following TDD. Escalate blockers early.*
+## Session Logging (REQUIRED)
+
+**Every session MUST end with a detailed log entry in `LOGS.md`.**
+
+This is non-negotiable. Future sessions (and humans) depend on understanding what was done, why, and what's left.
+
+### Log Entry Format
+
+```markdown
+## YYYY-MM-DD HH:MM — <Brief Title>
+
+### What Was Done
+- Bullet points of completed work
+- Include file paths changed (e.g., `engine.rs:2180-2191`)
+- Note any tests added/modified/deleted
+
+### Why
+- Explain the reasoning behind changes
+- Link to any bugs fixed or features implemented
+- Note any architectural decisions made
+
+### What's Left / Known Issues
+- Unfinished work
+- Known bugs introduced or discovered
+- Tests that are flaky or skipped
+
+### Key Code Changes
+- Brief description of significant changes
+- Before/after if behavior changed substantially
+```
+
+### When to Log
+
+- **At the end of every session** — Even if interrupted
+- **After significant milestones** — Major feature complete, bug fixed
+- **Before context switches** — Switching to different feature/branch
+
+### What Makes a Good Log
+
+| ✅ Good | ❌ Bad |
+|---------|--------|
+| "Deleted `test_startup_sync_prioritizes_contacts` — test was outdated after contacts now auto-connect via gossip (see `startup_sync` lines 2180-2191)" | "Fixed test" |
+| "Changed `peers_attempted` assertion from 2 to 1 because contacts are skipped in connection loop" | "Updated assertions" |
+| "Bug: messages not appearing — root cause was packets stored but conversation query didn't include sent messages" | "Fixed message bug" |
+
+### Log File Location
+
+```
+syncengine/LOGS.md
+```
+
+Append new entries at the **top** of the file (most recent first).
+
+---
+
+*You are a worker. Implement your assigned feature following TDD. Escalate blockers early. **Always log your work.***

@@ -390,6 +390,8 @@ pub enum PacketPayload {
     DirectMessage {
         /// Message content
         content: String,
+        /// Recipient DID (for tracking sent messages when using topic-level privacy)
+        recipient: Did,
     },
 
     /// Automatic receipt acknowledging packet reception.
@@ -471,6 +473,7 @@ mod tests {
 
         let payload = PacketPayload::DirectMessage {
             content: "Hello, world!".to_string(),
+            recipient: recipient_keys.did(),
         };
 
         let envelope = PacketEnvelope::create(
@@ -501,8 +504,10 @@ mod tests {
             recipient2_keys.public_bundle(),
         ];
 
+        // Use recipient1 as the primary recipient in payload
         let payload = PacketPayload::DirectMessage {
             content: "To multiple recipients".to_string(),
+            recipient: recipient1_keys.did(),
         };
 
         let envelope = PacketEnvelope::create(
@@ -559,6 +564,7 @@ mod tests {
 
         let payload = PacketPayload::DirectMessage {
             content: "Secret message".to_string(),
+            recipient: recipient_keys.did(),
         };
 
         let envelope = PacketEnvelope::create(
@@ -582,6 +588,7 @@ mod tests {
 
         let payload = PacketPayload::DirectMessage {
             content: "Original message".to_string(),
+            recipient: recipient_keys.did(),
         };
 
         let mut envelope = PacketEnvelope::create(
@@ -608,6 +615,7 @@ mod tests {
 
         let payload = PacketPayload::DirectMessage {
             content: "Test hash".to_string(),
+            recipient: recipient_keys.did(),
         };
 
         let envelope = PacketEnvelope::create(
@@ -634,6 +642,7 @@ mod tests {
 
         let payload = PacketPayload::DirectMessage {
             content: "Test serialization".to_string(),
+            recipient: recipient_keys.did(),
         };
 
         let envelope = PacketEnvelope::create(
@@ -675,6 +684,7 @@ mod tests {
             },
             PacketPayload::DirectMessage {
                 content: "Hello".to_string(),
+                recipient: ProfileKeys::generate().did(),
             },
             PacketPayload::Receipt {
                 original_sender: ProfileKeys::generate().did(),

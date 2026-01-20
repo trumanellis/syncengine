@@ -12,13 +12,13 @@ use iroh::protocol::ProtocolHandler;
 use iroh_gossip::net::Gossip;
 use iroh_gossip::TopicId;
 use tokio::sync::broadcast;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 
 use crate::error::SyncError;
 use crate::invite::NodeAddrBytes;
 use crate::storage::Storage;
 use crate::sync::contact_protocol::{ContactMessage, CONTACT_ALPN};
-use crate::sync::ContactEvent;
+use crate::sync::{ActiveContactTopics, ContactEvent};
 use crate::types::contact::{ContactState, PendingContact, ProfileSnapshot};
 use crate::types::peer::{ContactDetails, Peer, PeerSource, PeerStatus};
 
@@ -36,6 +36,10 @@ pub struct ContactProtocolHandler {
     static_discovery: StaticProvider,
     /// Our local DID for key derivation in the simplified protocol
     local_did: String,
+    /// Shared active topics map for contact topic senders.
+    /// When we receive a ContactAccept, we subscribe to the contact topic and
+    /// add the sender here so ContactManager can use it for sending messages.
+    active_topics: ActiveContactTopics,
 }
 
 impl std::fmt::Debug for ContactProtocolHandler {
@@ -46,6 +50,7 @@ impl std::fmt::Debug for ContactProtocolHandler {
             .field("gossip", &"<Gossip>")
             .field("static_discovery", &"<StaticProvider>")
             .field("local_did", &self.local_did)
+            .field("active_topics", &"<ActiveContactTopics>")
             .finish()
     }
 }
@@ -56,12 +61,15 @@ impl ContactProtocolHandler {
     /// The `local_did` is required for the simplified protocol to derive
     /// contact keys locally without transmitting them.
     /// The `static_discovery` is used to add peer addresses before gossip subscription.
+    /// The `active_topics` is the shared map where we add senders when receiving ContactAccept,
+    /// so ContactManager can use them for sending messages to contacts.
     pub fn new(
         storage: Arc<Storage>,
         event_tx: broadcast::Sender<ContactEvent>,
         gossip: Gossip,
         static_discovery: StaticProvider,
         local_did: String,
+        active_topics: ActiveContactTopics,
     ) -> Self {
         Self {
             storage,
@@ -69,6 +77,7 @@ impl ContactProtocolHandler {
             gossip,
             static_discovery,
             local_did,
+            active_topics,
         }
     }
 
@@ -87,6 +96,7 @@ impl ContactProtocolHandler {
         gossip: Gossip,
         static_discovery: StaticProvider,
         local_did: String,
+        active_topics: ActiveContactTopics,
     ) -> Result<(), SyncError> {
         let remote_id = connection.remote_id();
         debug!(?remote_id, "Handling routed contact connection");
@@ -396,80 +406,38 @@ impl ContactProtocolHandler {
                                     "Subscribed to contact gossip topic"
                                 );
 
-                                // Split the topic and spawn a listener for profile announcements
-                                // IMPORTANT: We must keep the sender alive or the topic closes!
+                                // Split the topic to get sender for active_topics
+                                // CRITICAL: Add sender to active_topics so ContactManager can use it for SENDING.
+                                // The receiver is dropped here - ContactManager will create its own subscription
+                                // when it receives the ContactAccepted event, which will handle RECEIVING.
+                                //
+                                // This separation is important because iroh-gossip allows multiple subscriptions
+                                // to the same topic, each getting its own receiver. We need the sender here
+                                // for immediate sending capability, while ContactManager's listener handles
+                                // all message processing (Announce AND Packet messages).
                                 let (sender, receiver) = topic.split();
-                                let storage_clone = storage.clone();
-                                let event_tx_clone = event_tx.clone();
-                                let peer_did_for_listener = accepter_did.clone();
 
-                                tokio::spawn(async move {
-                                    // Keep sender alive for the duration of the listener
-                                    let _keep_alive = sender;
-                                    use n0_future::StreamExt;
-                                    use iroh_gossip::api::Event;
+                                // Wrap sender in TopicSender and add to active_topics
+                                let topic_sender = crate::sync::TopicSender::from_raw(sender, contact_topic_id);
+                                {
+                                    let mut topics = active_topics.write().await;
+                                    topics.insert(contact.contact_topic, topic_sender);
+                                    info!(
+                                        peer_did = %contact.peer_did,
+                                        topic_bytes = ?contact.contact_topic,
+                                        "Added contact topic sender to active_topics (handler)"
+                                    );
+                                }
 
-                                    debug!(peer_did = %peer_did_for_listener, "Contact topic listener started (handler)");
-
-                                    let mut receiver = receiver;
-                                    // Use next() instead of try_next() to block and wait for messages
-                                    while let Some(result) = receiver.next().await {
-                                        let event = match result {
-                                            Ok(event) => event,
-                                            Err(_) => break, // Topic closed
-                                        };
-                                        // Only process received messages, ignore neighbor events
-                                        let msg = match event {
-                                            Event::Received(msg) => msg,
-                                            Event::NeighborUp(_) | Event::NeighborDown(_) | Event::Lagged => continue,
-                                        };
-                                        // Process the message
-                                        {
-                                            // Try to parse as profile gossip message
-                                            if let Ok(crate::sync::ProfileGossipMessage::Announce {
-                                                signed_profile, ..
-                                            }) = crate::sync::ProfileGossipMessage::from_bytes(&msg.content) {
-                                                // Verify signature
-                                                if !signed_profile.verify() {
-                                                    warn!(peer_did = %peer_did_for_listener, "Invalid signature on profile");
-                                                    continue;
-                                                }
-
-                                                let signer_did = signed_profile.did().to_string();
-                                                if signer_did != peer_did_for_listener {
-                                                    continue;
-                                                }
-
-                                                // Update peer profile in storage
-                                                if let Ok(Some(mut peer)) = storage_clone.load_peer_by_did(&signer_did) {
-                                                    use crate::types::contact::ProfileSnapshot;
-                                                    peer.profile = Some(ProfileSnapshot {
-                                                        display_name: signed_profile.profile.display_name.clone(),
-                                                        subtitle: signed_profile.profile.subtitle.clone(),
-                                                        avatar_blob_id: signed_profile.profile.avatar_blob_id.clone(),
-                                                        bio: signed_profile.profile.bio.clone(),
-                                                    });
-
-                                                    if let Err(e) = storage_clone.save_peer(&peer) {
-                                                        warn!(did = %signer_did, error = %e, "Failed to save peer profile");
-                                                    } else {
-                                                        info!(
-                                                            did = %signer_did,
-                                                            name = %signed_profile.profile.display_name,
-                                                            "Updated contact profile from contact topic (handler)"
-                                                        );
-                                                        // Notify UI of profile update
-                                                        let _ = event_tx_clone.send(ContactEvent::ProfileUpdated {
-                                                            did: signer_did.clone(),
-                                                        });
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                    debug!(peer_did = %peer_did_for_listener, "Contact topic listener stopped (handler)");
-                                });
+                                // Drop receiver - ContactManager will create its own subscription
+                                // when it receives the ContactAccepted event via start_contact_subscription_task().
+                                // This prevents the bug where handler's listener consumed messages meant
+                                // for ContactManager's listener (which processes Packet messages).
+                                drop(receiver);
+                                debug!(
+                                    peer_did = %contact.peer_did,
+                                    "Dropped handler receiver - ContactManager will subscribe for receiving"
+                                );
                             }
                             Err(e) => {
                                 error!(
@@ -546,12 +514,13 @@ impl ProtocolHandler for ContactProtocolHandler {
         let gossip = self.gossip.clone();
         let static_discovery = self.static_discovery.clone();
         let local_did = self.local_did.clone();
+        let active_topics = self.active_topics.clone();
 
         async move {
             debug!(peer = %conn.remote_id(), "Router accepting contact connection");
 
             // Process the connection fully before returning
-            if let Err(e) = Self::handle_connection(conn, storage, event_tx, gossip, static_discovery, local_did).await {
+            if let Err(e) = Self::handle_connection(conn, storage, event_tx, gossip, static_discovery, local_did, active_topics).await {
                 error!(error = ?e, "Failed to handle contact connection");
                 return Err(iroh::protocol::AcceptError::from_err(e));
             }

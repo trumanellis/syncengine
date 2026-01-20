@@ -47,6 +47,7 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use anyhow::Result;
+use tokio::io::AsyncBufReadExt;
 use clap::{Parser, Subcommand};
 use syncengine_core::{Did, PeerStatus, RealmId, SyncEngine, TaskId};
 
@@ -122,6 +123,12 @@ enum Commands {
     Packet {
         #[command(subcommand)]
         action: PacketAction,
+    },
+
+    /// Chat commands for direct messaging
+    Chat {
+        #[command(subcommand)]
+        action: ChatAction,
     },
 
     /// Start serving/syncing as a persistent P2P node
@@ -342,6 +349,38 @@ enum PacketAction {
 
     /// Show profile keys info
     Keys,
+}
+
+/// Chat commands for direct messaging
+#[derive(Subcommand)]
+enum ChatAction {
+    /// List all conversations
+    List,
+
+    /// Show conversation with a contact
+    Show {
+        /// Contact's DID
+        did: String,
+
+        /// Number of messages to show (default: all)
+        #[arg(short, long)]
+        limit: Option<usize>,
+    },
+
+    /// Send a message to a contact
+    Send {
+        /// Contact's DID
+        did: String,
+
+        /// Message content
+        message: String,
+    },
+
+    /// Interactive chat mode with a contact
+    Interactive {
+        /// Contact's DID
+        did: String,
+    },
 }
 
 fn setup_logging(verbosity: u8) {
@@ -1085,6 +1124,199 @@ async fn main() -> Result<()> {
                     }
                     Err(e) => {
                         println!("  Error: {}", e);
+                    }
+                }
+            }
+        },
+
+        // ═══════════════════════════════════════════════════════════════════════
+        // Chat Commands
+        // ═══════════════════════════════════════════════════════════════════════
+
+        Commands::Chat { action } => match action {
+            ChatAction::List => {
+                engine.init_profile_keys()?;
+
+                println!("Conversations:");
+                println!();
+
+                let conversations = engine.list_conversations()?;
+                if conversations.is_empty() {
+                    println!("  (no conversations yet)");
+                    println!();
+                    println!("  Send a message to start a conversation:");
+                    println!("  syncengine chat send <did> \"Hello!\"");
+                } else {
+                    for convo in conversations {
+                        let preview = convo.preview(50).unwrap_or_else(|| "(no messages)".to_string());
+                        let time = convo.last_message()
+                            .map(|m| m.relative_time())
+                            .unwrap_or_else(|| "".to_string());
+                        let unread = convo.unread_count();
+                        let unread_badge = if unread > 0 {
+                            format!(" [{}]", unread)
+                        } else {
+                            String::new()
+                        };
+
+                        println!("  {} ({}){}",
+                            convo.display_name(),
+                            time,
+                            unread_badge
+                        );
+                        println!("    \"{}\"", preview);
+                        println!("    DID: {}", convo.contact_did);
+                        println!();
+                    }
+                }
+            }
+
+            ChatAction::Show { did, limit } => {
+                engine.init_profile_keys()?;
+
+                let convo = engine.get_conversation(&did)?;
+
+                println!("Conversation with {}:", convo.display_name());
+                println!("DID: {}", convo.contact_did);
+                println!("Messages: {}", convo.len());
+                println!();
+
+                let messages = convo.messages();
+                let to_show: &[_] = if let Some(n) = limit {
+                    let start = messages.len().saturating_sub(n);
+                    &messages[start..]
+                } else {
+                    messages
+                };
+
+                if to_show.is_empty() {
+                    println!("  (no messages)");
+                } else {
+                    for msg in to_show {
+                        let sender = if msg.is_mine { "You" } else { &msg.display_sender() };
+                        let time = msg.relative_time();
+                        println!("  [{} - {}]", sender, time);
+                        println!("    {}", msg.content);
+                        println!();
+                    }
+                }
+            }
+
+            ChatAction::Send { did, message } => {
+                engine.init_profile_keys()?;
+
+                match engine.send_message(&did, &message).await {
+                    Ok(seq) => {
+                        println!("Message sent!");
+                        println!("  Sequence: {}", seq);
+                        println!("  To: {}", did);
+                        println!("  Content: {}", message);
+                    }
+                    Err(e) => {
+                        // Check if this is the "recipient key lookup not implemented" error
+                        if e.to_string().contains("Recipient public key lookup not yet implemented") {
+                            println!("Cannot send message: Contact key exchange not complete.");
+                            println!();
+                            println!("To send encrypted messages, you need to:");
+                            println!("  1. Exchange contact invites with the recipient");
+                            println!("  2. Both parties must accept the contact request");
+                            println!("  3. Wait for key exchange to complete");
+                            println!();
+                            println!("Use 'syncengine contact generate-invite' to create an invite.");
+                        } else {
+                            return Err(e.into());
+                        }
+                    }
+                }
+            }
+
+            ChatAction::Interactive { did } => {
+                engine.init_profile_keys()?;
+                engine.start_networking().await?;
+
+                // Get contact name
+                let peer = engine.get_peer_by_did(&did)?;
+                let contact_name = peer
+                    .and_then(|p| p.profile.as_ref().map(|pr| pr.display_name.clone()))
+                    .unwrap_or_else(|| did.chars().take(12).collect());
+
+                println!("Interactive chat with {} (Ctrl+C to exit)", contact_name);
+                println!("DID: {}", did);
+                println!("{}", "─".repeat(50));
+
+                // Show recent history
+                let convo = engine.get_conversation(&did)?;
+                let recent: Vec<_> = convo.messages().iter().rev().take(10).collect();
+                for msg in recent.into_iter().rev() {
+                    let sender = if msg.is_mine { "You" } else { &contact_name };
+                    println!("{}: {}", sender, msg.content);
+                }
+
+                if !convo.is_empty() {
+                    println!("{}", "─".repeat(50));
+                }
+
+                println!("Type a message and press Enter to send.");
+                println!();
+
+                // Track last seen sequence for new message detection
+                let mut last_seq = convo.last_received_sequence();
+
+                // Set up stdin reader
+                let stdin = tokio::io::stdin();
+                let reader = tokio::io::BufReader::new(stdin);
+                let mut lines = tokio::io::AsyncBufReadExt::lines(reader);
+
+                // Interactive loop
+                loop {
+                    tokio::select! {
+                        // Check for new messages every second
+                        _ = tokio::time::sleep(Duration::from_secs(1)) => {
+                            match engine.get_new_messages(&did, last_seq) {
+                                Ok(new_msgs) => {
+                                    for msg in new_msgs {
+                                        println!("{}: {}", contact_name, msg.content);
+                                        if msg.sequence > last_seq {
+                                            last_seq = msg.sequence;
+                                        }
+                                    }
+                                }
+                                Err(_) => {} // Ignore errors in polling
+                            }
+                        }
+                        // Read user input
+                        line = lines.next_line() => {
+                            match line {
+                                Ok(Some(text)) => {
+                                    let text = text.trim();
+                                    if !text.is_empty() {
+                                        match engine.send_message(&did, text).await {
+                                            Ok(_seq) => {
+                                                println!("You: {}", text);
+                                            }
+                                            Err(e) => {
+                                                eprintln!("Failed to send: {}", e);
+                                            }
+                                        }
+                                    }
+                                }
+                                Ok(None) => {
+                                    // EOF - stdin closed
+                                    println!();
+                                    println!("Input closed, exiting...");
+                                    break;
+                                }
+                                Err(e) => {
+                                    eprintln!("Read error: {}", e);
+                                }
+                            }
+                        }
+                        // Handle Ctrl+C
+                        _ = tokio::signal::ctrl_c() => {
+                            println!();
+                            println!("Exiting chat...");
+                            break;
+                        }
                     }
                 }
             }

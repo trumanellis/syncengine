@@ -64,7 +64,10 @@ async fn test_engine_profile_keys_lifecycle() {
         "Should not have profile keys initially"
     );
 
-    // Initialize profile keys
+    // Identity must be initialized before profile keys
+    engine.init_identity().unwrap();
+
+    // Initialize profile keys (derived from identity)
     engine.init_profile_keys().unwrap();
 
     // Now should have profile keys
@@ -80,6 +83,13 @@ async fn test_engine_profile_keys_lifecycle() {
         did.unwrap().to_string().starts_with("did:sync:"),
         "DID should be properly formatted"
     );
+
+    // Profile DID should match Identity DID (unified system)
+    assert_eq!(
+        engine.did().unwrap(),
+        engine.profile_did().unwrap(),
+        "Profile DID should match Identity DID"
+    );
 }
 
 /// Test that profile keys persist across engine restarts.
@@ -90,6 +100,7 @@ async fn test_profile_keys_persistence() {
     // First engine instance - create keys
     let first_did = {
         let mut engine = SyncEngine::new(temp_dir.path()).await.unwrap();
+        engine.init_identity().unwrap();
         engine.init_profile_keys().unwrap();
         engine.profile_did().unwrap().to_string()
     };
@@ -97,12 +108,20 @@ async fn test_profile_keys_persistence() {
     // Second engine instance - keys should persist
     {
         let mut engine2 = SyncEngine::new(temp_dir.path()).await.unwrap();
+        engine2.init_identity().unwrap();
         engine2.init_profile_keys().unwrap();
         let second_did = engine2.profile_did().unwrap().to_string();
 
         assert_eq!(
             first_did, second_did,
             "Profile DID should persist across restarts"
+        );
+
+        // Also verify profile DID matches identity DID
+        assert_eq!(
+            engine2.did().unwrap(),
+            engine2.profile_did().unwrap(),
+            "Profile DID should match Identity DID"
         );
     }
 }
@@ -502,11 +521,13 @@ async fn test_global_packet_roundtrip() {
     let mut bob = SyncEngine::new(bob_dir.path()).await.unwrap();
     bob.init_profile_keys().unwrap();
 
-    // Create a global packet with a direct message
+    // Create a global packet with a direct message (addressed to Bob)
+    let bob_did = bob.profile_did().unwrap();
     alice
         .create_packet(
             PacketPayload::DirectMessage {
                 content: "Hello Bob!".to_string(),
+                recipient: bob_did,
             },
             PacketAddress::Global,
         )
@@ -523,7 +544,7 @@ async fn test_global_packet_roundtrip() {
     );
 
     match decrypted.unwrap() {
-        PacketPayload::DirectMessage { content } => {
+        PacketPayload::DirectMessage { content, recipient: _ } => {
             assert_eq!(content, "Hello Bob!");
         }
         _ => panic!("Expected DirectMessage payload"),

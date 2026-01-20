@@ -5,56 +5,44 @@
 //! Follows Design System v2: minimal terminal aesthetic.
 
 use dioxus::prelude::*;
-use syncengine_core::profile::{PacketEnvelope, PacketPayload};
-use syncengine_core::{ContactEvent, Did, Peer, PeerStatus};
+use syncengine_core::{ContactEvent, Peer};
 
 use crate::components::images::AsyncImage;
-use crate::components::messages::{MessageCompose, MessagesList, ReceivedMessage};
+use crate::components::messages::{ChatBubbleMessage, ConversationView};
 use crate::components::{NavHeader, NavLocation};
 use crate::context::{use_engine, use_engine_ready};
 
-/// Format timestamp as relative time string
-fn format_relative_time(timestamp: u64) -> String {
-    let now = chrono::Utc::now().timestamp() as u64;
-    let elapsed = now.saturating_sub(timestamp);
-
-    if elapsed < 60 {
-        "Just now".to_string()
-    } else if elapsed < 3600 {
-        format!("{}m ago", elapsed / 60)
-    } else if elapsed < 86400 {
-        format!("{}h ago", elapsed / 3600)
-    } else {
-        format!("{}d ago", elapsed / 86400)
-    }
+/// Contact with conversation preview info
+#[derive(Clone)]
+struct ContactWithPreview {
+    peer: Peer,
+    last_message_time: Option<i64>,
+    last_message_preview: Option<String>,
+    unread_count: u32,
 }
 
-/// Extract messages from packet envelopes
-fn extract_messages(
-    packets: &[PacketEnvelope],
-    sender_did: &str,
-    sender_name: Option<String>,
-) -> Vec<ReceivedMessage> {
-    packets
-        .iter()
-        .filter_map(|env| {
-            // Try to decode as DirectMessage
-            if env.is_global() {
-                if let Ok(payload) = env.decode_global_payload() {
-                    if let PacketPayload::DirectMessage { content } = payload {
-                        return Some(ReceivedMessage {
-                            sender_did: sender_did.to_string(),
-                            sender_name: sender_name.clone(),
-                            content,
-                            timestamp: env.timestamp,
-                            sequence: env.sequence,
-                        });
-                    }
-                }
-            }
-            None
-        })
-        .collect()
+/// Currently selected contact
+#[derive(Clone)]
+struct SelectedContact {
+    did: String,
+    name: String,
+}
+
+/// Format timestamp as relative time string (for milliseconds)
+fn format_relative_time(timestamp_ms: i64) -> String {
+    let now = chrono::Utc::now().timestamp_millis();
+    let elapsed_ms = now - timestamp_ms;
+    let elapsed_secs = (elapsed_ms / 1000) as u64;
+
+    if elapsed_secs < 60 {
+        "Just now".to_string()
+    } else if elapsed_secs < 3600 {
+        format!("{}m ago", elapsed_secs / 60)
+    } else if elapsed_secs < 86400 {
+        format!("{}h ago", elapsed_secs / 3600)
+    } else {
+        format!("{}d ago", elapsed_secs / 86400)
+    }
 }
 
 /// Network page - displays contacts with messaging capability.
@@ -64,13 +52,15 @@ pub fn Network() -> Element {
     let engine_ready = use_engine_ready();
 
     // State
-    let mut contacts: Signal<Vec<Peer>> = use_signal(Vec::new);
-    let mut messages: Signal<Vec<ReceivedMessage>> = use_signal(Vec::new);
+    let mut contacts: Signal<Vec<ContactWithPreview>> = use_signal(Vec::new);
     let mut loading = use_signal(|| true);
     let mut syncing = use_signal(|| false);
 
-    // Message compose modal state
-    let mut compose_target: Signal<Option<(String, String)>> = use_signal(|| None); // (did, name)
+    // Conversation state
+    let mut selected_contact: Signal<Option<SelectedContact>> = use_signal(|| None);
+    let mut conversation_messages: Signal<Vec<ChatBubbleMessage>> = use_signal(Vec::new);
+    let mut conversation_loading = use_signal(|| false);
+    let mut sending = use_signal(|| false);
 
     // Load contacts and messages when engine becomes ready
     use_effect(move || {
@@ -80,32 +70,45 @@ pub fn Network() -> Element {
                 let guard = shared.read().await;
 
                 if let Some(ref eng) = *guard {
-                    // Load contacts
+                    // Load contacts with preview info
                     if let Ok(contact_list) = eng.list_peer_contacts() {
-                        // Also load messages from each contact's mirror
-                        let mut all_messages = Vec::new();
+                        let mut contacts_with_preview = Vec::new();
 
-                        for contact in &contact_list {
+                        for contact in contact_list {
                             if let Some(ref did_str) = contact.did {
-                                if let Ok(did) = did_str.parse::<Did>() {
-                                    // Get packets from mirror
-                                    if let Ok(packets) = eng.mirror_packets_since(&did, 0) {
-                                        let msgs = extract_messages(
-                                            &packets,
-                                            did_str,
-                                            Some(contact.display_name()),
-                                        );
-                                        all_messages.extend(msgs);
+                                // Get conversation to extract last message info
+                                let (last_time, last_preview) = match eng.get_conversation(did_str) {
+                                    Ok(convo) => {
+                                        let last_msg = convo.messages().last();
+                                        if let Some(msg) = last_msg {
+                                            let preview = if msg.content.len() > 50 {
+                                                format!("{}...", &msg.content[..47])
+                                            } else {
+                                                msg.content.clone()
+                                            };
+                                            (Some(msg.timestamp), Some(preview))
+                                        } else {
+                                            (None, None)
+                                        }
                                     }
-                                }
+                                    Err(_) => (None, None),
+                                };
+
+                                contacts_with_preview.push(ContactWithPreview {
+                                    peer: contact,
+                                    last_message_time: last_time,
+                                    last_message_preview: last_preview,
+                                    unread_count: 0, // TODO: implement unread tracking
+                                });
                             }
                         }
 
-                        // Sort messages by timestamp
-                        all_messages.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+                        // Sort by last message time (most recent first)
+                        contacts_with_preview.sort_by(|a, b| {
+                            b.last_message_time.cmp(&a.last_message_time)
+                        });
 
-                        contacts.set(contact_list);
-                        messages.set(all_messages);
+                        contacts.set(contacts_with_preview);
                     }
 
                     loading.set(false);
@@ -124,34 +127,47 @@ pub fn Network() -> Element {
 
                             while let Ok(event) = event_rx.recv().await {
                                 match event {
-                                    ContactEvent::ProfileUpdated { did } => {
-                                        // Refresh contacts and messages
+                                    ContactEvent::ProfileUpdated { did: _did } => {
+                                        // Refresh contacts list
                                         let shared = engine();
                                         let guard = shared.read().await;
                                         if let Some(ref eng) = *guard {
                                             if let Ok(contact_list) = eng.list_peer_contacts() {
-                                                // Reload messages
-                                                let mut all_messages = Vec::new();
-                                                for contact in &contact_list {
+                                                let mut contacts_with_preview = Vec::new();
+
+                                                for contact in contact_list {
                                                     if let Some(ref did_str) = contact.did {
-                                                        if let Ok(did) = did_str.parse::<Did>() {
-                                                            if let Ok(packets) =
-                                                                eng.mirror_packets_since(&did, 0)
-                                                            {
-                                                                let msgs = extract_messages(
-                                                                    &packets,
-                                                                    did_str,
-                                                                    Some(contact.display_name()),
-                                                                );
-                                                                all_messages.extend(msgs);
+                                                        let (last_time, last_preview) = match eng.get_conversation(did_str) {
+                                                            Ok(convo) => {
+                                                                let last_msg = convo.messages().last();
+                                                                if let Some(msg) = last_msg {
+                                                                    let preview = if msg.content.len() > 50 {
+                                                                        format!("{}...", &msg.content[..47])
+                                                                    } else {
+                                                                        msg.content.clone()
+                                                                    };
+                                                                    (Some(msg.timestamp), Some(preview))
+                                                                } else {
+                                                                    (None, None)
+                                                                }
                                                             }
-                                                        }
+                                                            Err(_) => (None, None),
+                                                        };
+
+                                                        contacts_with_preview.push(ContactWithPreview {
+                                                            peer: contact,
+                                                            last_message_time: last_time,
+                                                            last_message_preview: last_preview,
+                                                            unread_count: 0,
+                                                        });
                                                     }
                                                 }
-                                                all_messages
-                                                    .sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
-                                                contacts.set(contact_list);
-                                                messages.set(all_messages);
+
+                                                contacts_with_preview.sort_by(|a, b| {
+                                                    b.last_message_time.cmp(&a.last_message_time)
+                                                });
+
+                                                contacts.set(contacts_with_preview);
                                             }
                                         }
                                     }
@@ -166,32 +182,33 @@ pub fn Network() -> Element {
                 }
             });
 
-            // Poll for new messages periodically
+            // Poll for new messages in current conversation periodically
             spawn(async move {
                 loop {
                     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
 
-                    let shared = engine();
-                    let guard = shared.read().await;
-                    if let Some(ref eng) = *guard {
-                        if let Ok(contact_list) = eng.list_peer_contacts() {
-                            let mut all_messages = Vec::new();
-                            for contact in &contact_list {
-                                if let Some(ref did_str) = contact.did {
-                                    if let Ok(did) = did_str.parse::<Did>() {
-                                        if let Ok(packets) = eng.mirror_packets_since(&did, 0) {
-                                            let msgs = extract_messages(
-                                                &packets,
-                                                did_str,
-                                                Some(contact.display_name()),
-                                            );
-                                            all_messages.extend(msgs);
-                                        }
-                                    }
-                                }
+                    // If a contact is selected, refresh their conversation
+                    if let Some(ref contact) = selected_contact() {
+                        let contact_did = contact.did.clone();
+
+                        let shared = engine();
+                        let guard = shared.read().await;
+                        if let Some(ref eng) = *guard {
+                            if let Ok(convo) = eng.get_conversation(&contact_did) {
+                                let messages: Vec<ChatBubbleMessage> = convo
+                                    .messages()
+                                    .iter()
+                                    .map(|msg| ChatBubbleMessage {
+                                        id: msg.id.clone(),
+                                        content: msg.content.clone(),
+                                        sender_name: msg.sender_name.clone(),
+                                        timestamp: msg.timestamp,
+                                        is_mine: msg.is_mine,
+                                    })
+                                    .collect();
+
+                                conversation_messages.set(messages);
                             }
-                            all_messages.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
-                            messages.set(all_messages);
                         }
                     }
                 }
@@ -199,50 +216,92 @@ pub fn Network() -> Element {
         }
     });
 
-    // Handler for sending a message
-    let send_message = move |content: String| {
-        if let Some((did, name)) = compose_target() {
+    // Load conversation when contact is selected
+    use_effect(move || {
+        if let Some(ref contact) = selected_contact() {
+            let contact_did = contact.did.clone();
+
             spawn(async move {
+                conversation_loading.set(true);
+
                 let shared = engine();
-                let mut guard = shared.write().await;
+                let guard = shared.read().await;
 
-                if let Some(ref mut eng) = *guard {
-                    // Create a DirectMessage packet addressed to the specific contact
-                    // This routes the packet via the 1:1 contact topic, not the global topic
-                    let payload = syncengine_core::PacketPayload::DirectMessage { content };
+                if let Some(ref eng) = *guard {
+                    match eng.get_conversation(&contact_did) {
+                        Ok(convo) => {
+                            let messages: Vec<ChatBubbleMessage> = convo
+                                .messages()
+                                .iter()
+                                .map(|msg| ChatBubbleMessage {
+                                    id: msg.id.clone(),
+                                    content: msg.content.clone(),
+                                    sender_name: msg.sender_name.clone(),
+                                    timestamp: msg.timestamp,
+                                    is_mine: msg.is_mine,
+                                })
+                                .collect();
 
-                    // Parse the DID and create an Individual address for direct routing
-                    let address = match syncengine_core::Did::parse(&did) {
-                        Ok(parsed_did) => syncengine_core::PacketAddress::Individual(parsed_did),
-                        Err(e) => {
-                            tracing::error!(error = %e, did = %did, "Invalid DID for message");
-                            compose_target.set(None);
-                            return;
-                        }
-                    };
-
-                    match eng.create_and_broadcast_packet(payload, address).await {
-                        Ok(seq) => {
-                            tracing::info!(
-                                to = %did,
-                                sequence = seq,
-                                "Sent message via 1:1 contact topic"
-                            );
+                            conversation_messages.set(messages);
                         }
                         Err(e) => {
-                            tracing::error!(error = %e, to = %did, "Failed to send message");
+                            tracing::error!(error = %e, did = %contact_did, "Failed to load conversation");
+                            conversation_messages.set(Vec::new());
                         }
                     }
                 }
 
-                // Close modal
-                compose_target.set(None);
+                conversation_loading.set(false);
+            });
+        }
+    });
+
+    // Handler for sending a message
+    let send_message = move |content: String| {
+        if let Some(ref contact) = selected_contact() {
+            let contact_did = contact.did.clone();
+
+            spawn(async move {
+                sending.set(true);
+
+                let shared = engine();
+                let mut guard = shared.write().await;
+
+                if let Some(ref mut eng) = *guard {
+                    match eng.send_message(&contact_did, &content).await {
+                        Ok(seq) => {
+                            tracing::info!(
+                                to = %contact_did,
+                                sequence = seq,
+                                "Sent message"
+                            );
+
+                            // Optimistically add message to conversation
+                            let new_msg = ChatBubbleMessage {
+                                id: format!("sent-{}", seq),
+                                content,
+                                sender_name: None,
+                                timestamp: chrono::Utc::now().timestamp_millis(),
+                                is_mine: true,
+                            };
+
+                            let mut msgs = conversation_messages();
+                            msgs.push(new_msg);
+                            conversation_messages.set(msgs);
+                        }
+                        Err(e) => {
+                            tracing::error!(error = %e, to = %contact_did, "Failed to send message");
+                        }
+                    }
+                }
+
+                sending.set(false);
             });
         }
     };
 
     // Handler for manual sync
-    let on_sync_click = move |_: ()| {
+    let _on_sync_click = move |_: ()| {
         if syncing() {
             return;
         }
@@ -257,7 +316,41 @@ pub fn Network() -> Element {
                 match eng.manual_sync().await {
                     Ok(_) => {
                         if let Ok(contact_list) = eng.list_peer_contacts() {
-                            contacts.set(contact_list);
+                            let mut contacts_with_preview = Vec::new();
+
+                            for contact in contact_list {
+                                if let Some(ref did_str) = contact.did {
+                                    let (last_time, last_preview) = match eng.get_conversation(did_str) {
+                                        Ok(convo) => {
+                                            let last_msg = convo.messages().last();
+                                            if let Some(msg) = last_msg {
+                                                let preview = if msg.content.len() > 50 {
+                                                    format!("{}...", &msg.content[..47])
+                                                } else {
+                                                    msg.content.clone()
+                                                };
+                                                (Some(msg.timestamp), Some(preview))
+                                            } else {
+                                                (None, None)
+                                            }
+                                        }
+                                        Err(_) => (None, None),
+                                    };
+
+                                    contacts_with_preview.push(ContactWithPreview {
+                                        peer: contact,
+                                        last_message_time: last_time,
+                                        last_message_preview: last_preview,
+                                        unread_count: 0,
+                                    });
+                                }
+                            }
+
+                            contacts_with_preview.sort_by(|a, b| {
+                                b.last_message_time.cmp(&a.last_message_time)
+                            });
+
+                            contacts.set(contacts_with_preview);
                         }
                     }
                     Err(e) => {
@@ -271,14 +364,6 @@ pub fn Network() -> Element {
     };
 
     let contact_count = contacts().len();
-    let message_count = messages().len();
-    let online_count = contacts()
-        .iter()
-        .filter(|c| matches!(c.status, PeerStatus::Online))
-        .count();
-
-    let status_text = format!("{} contacts · {} online", contact_count, online_count);
-    let action_text = if syncing() { "Syncing..." } else { "Sync" };
 
     rsx! {
         div { class: "network-page",
@@ -293,80 +378,106 @@ pub fn Network() -> Element {
                 }
             } else {
                 div { class: "network-content",
-                    // Two-column layout: contacts on left, messages on right
-                    div { class: "network-grid",
-                        // Contacts section
-                        section { class: "network-section contacts-section",
-                            header { class: "section-header",
-                                h2 { class: "card-title", "Contacts" }
+                    div { class: "network-chat-layout",
+                        // Contacts Sidebar
+                        aside {
+                            class: if selected_contact().is_some() {
+                                "contacts-sidebar mobile-hidden"
+                            } else {
+                                "contacts-sidebar"
+                            },
+
+                            header { class: "sidebar-header",
+                                h2 { class: "sidebar-title", "Contacts" }
+                                if contact_count > 0 {
+                                    span { class: "contact-count-badge", "{contact_count}" }
+                                }
                             }
 
                             if contacts().is_empty() {
                                 div { class: "empty-state",
-                                    p { class: "empty-state-message",
-                                        "No contacts yet"
-                                    }
-                                    p { class: "empty-state-hint",
-                                        "Add contacts to start messaging."
-                                    }
+                                    p { class: "empty-state-message", "No contacts yet" }
+                                    p { class: "empty-state-hint", "Add contacts to start messaging." }
                                 }
                             } else {
                                 div { class: "contacts-list",
                                     for contact in contacts() {
                                         {
-                                            let contact_did = contact.did.clone().unwrap_or_default();
-                                            let contact_name = contact.display_name();
-                                            let contact_did_for_click = contact_did.clone();
-                                            let contact_name_for_click = contact_name.clone();
-                                            let is_online = matches!(contact.status, PeerStatus::Online);
-                                            let avatar_blob_id = contact.profile.as_ref().and_then(|p| p.avatar_blob_id.clone());
-                                            let first_char = contact_name.chars().next().unwrap_or('?').to_uppercase().to_string();
+                                            let did = contact.peer.did.clone().unwrap_or_default();
+                                            let name = contact.peer.display_name();
+                                            let is_selected = selected_contact()
+                                                .as_ref()
+                                                .map(|s| s.did == did)
+                                                .unwrap_or(false);
+                                            let has_unread = contact.unread_count > 0;
+                                            let did_clone = did.clone();
+                                            let name_clone = name.clone();
+                                            let avatar_blob_id = contact.peer.profile
+                                                .as_ref()
+                                                .and_then(|p| p.avatar_blob_id.clone());
+                                            let first_char = name.chars().next()
+                                                .unwrap_or('?')
+                                                .to_uppercase()
+                                                .to_string();
 
                                             rsx! {
                                                 div {
-                                                    key: "{contact_did}",
-                                                    class: "contact-row",
+                                                    key: "{did}",
+                                                    class: if is_selected {
+                                                        "contact-row contact-row-selected"
+                                                    } else {
+                                                        "contact-row"
+                                                    },
+                                                    onclick: move |_| {
+                                                        selected_contact.set(Some(SelectedContact {
+                                                            did: did_clone.clone(),
+                                                            name: name_clone.clone(),
+                                                        }));
+                                                    },
 
                                                     // Avatar
-                                                    if let Some(ref blob_id) = avatar_blob_id {
-                                                        AsyncImage {
-                                                            blob_id: blob_id.clone(),
-                                                            alt: contact_name.clone(),
-                                                            class: Some("contact-avatar".to_string()),
-                                                        }
-                                                    } else {
-                                                        div { class: "contact-avatar-placeholder",
-                                                            span { "{first_char}" }
+                                                    div { class: "contact-row-avatar",
+                                                        if let Some(ref blob_id) = avatar_blob_id {
+                                                            AsyncImage {
+                                                                blob_id: blob_id.clone(),
+                                                                alt: name.clone(),
+                                                                class: Some("avatar-image".to_string()),
+                                                            }
+                                                        } else {
+                                                            div { class: "avatar-placeholder",
+                                                                "{first_char}"
+                                                            }
                                                         }
                                                     }
 
                                                     // Info
-                                                    div { class: "contact-info",
-                                                        div { class: "contact-name", "{contact_name}" }
-                                                        div { class: "contact-meta",
-                                                            div { class: "contact-status",
-                                                                span {
-                                                                    class: if is_online { "status-dot online" } else { "status-dot" }
-                                                                }
-                                                                span { class: "contact-status-text",
-                                                                    if is_online { "online" } else { "offline" }
+                                                    div { class: "contact-row-info",
+                                                        div { class: "contact-row-header",
+                                                            span { class: "contact-row-name", "{name}" }
+                                                            if has_unread {
+                                                                span { class: "unread-dot" }
+                                                            }
+                                                            if let Some(time) = contact.last_message_time {
+                                                                span { class: "contact-row-time",
+                                                                    "{format_relative_time(time)}"
                                                                 }
                                                             }
-                                                            span { "· {format_relative_time(contact.last_seen)}" }
+                                                        }
+                                                        if let Some(ref preview) = contact.last_message_preview {
+                                                            p { class: "contact-row-preview", "{preview}" }
                                                         }
                                                     }
 
-                                                    // Message button
-                                                    div { class: "contact-actions",
-                                                        button {
-                                                            class: "btn btn-primary btn-message",
-                                                            onclick: move |_| {
-                                                                compose_target.set(Some((
-                                                                    contact_did_for_click.clone(),
-                                                                    contact_name_for_click.clone(),
-                                                                )));
-                                                            },
-                                                            "Message"
+                                                    // Chevron (mobile indicator)
+                                                    div { class: "contact-row-chevron",
+                                                        svg {
+                                                            width: "16",
+                                                            height: "16",
+                                                            view_box: "0 0 24 24",
+                                                            fill: "none",
+                                                            stroke: "currentColor",
+                                                            stroke_width: "2",
+                                                            polyline { points: "9 18 15 12 9 6" }
                                                         }
                                                     }
                                                 }
@@ -377,31 +488,33 @@ pub fn Network() -> Element {
                             }
                         }
 
-                        // Messages section
-                        section { class: "network-section messages-section",
-                            header { class: "section-header",
-                                h2 { class: "card-title", "Messages" }
-                                if message_count > 0 {
-                                    span { class: "message-count", "{message_count}" }
-                                }
-                            }
+                        // Conversation Panel
+                        main {
+                            class: if selected_contact().is_some() {
+                                "conversation-panel"
+                            } else {
+                                "conversation-panel mobile-hidden"
+                            },
 
-                            MessagesList {
-                                messages: messages(),
-                                loading: loading(),
+                            if let Some(ref contact) = selected_contact() {
+                                ConversationView {
+                                    contact_did: contact.did.clone(),
+                                    contact_name: contact.name.clone(),
+                                    messages: conversation_messages(),
+                                    on_send: send_message,
+                                    on_back: move |_| selected_contact.set(None),
+                                    sending: sending(),
+                                    loading: conversation_loading(),
+                                }
+                            } else {
+                                // Empty state
+                                div { class: "empty-conversation",
+                                    p { class: "empty-icon", "~" }
+                                    p { class: "empty-text", "Select a contact to begin transmission" }
+                                }
                             }
                         }
                     }
-                }
-            }
-
-            // Message compose modal
-            if let Some((did, name)) = compose_target() {
-                MessageCompose {
-                    recipient_name: name,
-                    recipient_did: did,
-                    on_send: send_message,
-                    on_close: move |_| compose_target.set(None),
                 }
             }
         }

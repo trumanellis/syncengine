@@ -81,7 +81,7 @@ pub use contact_protocol::{
 };
 pub use envelope::{SyncEnvelope, ENVELOPE_VERSION};
 pub use events::{NetworkDebugInfo, SyncEvent, SyncStatus};
-pub use gossip::{GossipMessage, GossipSync, TopicEvent, TopicHandle, TopicReceiver, TopicSender};
+pub use gossip::{ActiveContactTopics, GossipMessage, GossipSync, TopicEvent, TopicHandle, TopicReceiver, TopicSender};
 pub use manager::SyncManager;
 pub use profile_pinning::{
     derive_profile_topic, global_profile_topic, ProfileAction, ProfileGossipMessage,

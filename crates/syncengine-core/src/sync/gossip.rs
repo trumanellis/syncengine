@@ -2,6 +2,7 @@
 //!
 //! Provides multi-peer broadcast synchronization for realms.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use iroh::discovery::static_provider::StaticProvider;
@@ -9,7 +10,7 @@ use iroh::protocol::Router;
 use iroh::{Endpoint, EndpointAddr, PublicKey, SecretKey};
 use iroh_gossip::net::{Gossip, GOSSIP_ALPN};
 use iroh_gossip::proto::TopicId;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, info, warn};
 
 use crate::blobs::{BlobManager, BlobProtocolHandler};
@@ -59,7 +60,25 @@ pub struct TopicReceiver {
     topic_id: TopicId,
 }
 
+/// Type alias for the shared active contact topics map
+///
+/// This map is shared between ContactProtocolHandler and ContactManager so that
+/// both can access contact topic senders. The handler adds senders when receiving
+/// ContactAccept messages, and the manager uses them for sending messages.
+pub type ActiveContactTopics = Arc<RwLock<HashMap<[u8; 32], TopicSender>>>;
+
 impl TopicSender {
+    /// Create a TopicSender from a raw iroh-gossip sender
+    ///
+    /// This is used by ContactProtocolHandler to wrap the sender from gossip.subscribe()
+    /// so it can be added to the shared active_topics map.
+    pub fn from_raw(sender: iroh_gossip::api::GossipSender, topic_id: TopicId) -> Self {
+        Self {
+            sender: Arc::new(Mutex::new(sender)),
+            topic_id,
+        }
+    }
+
     /// Broadcast a message to all peers on this topic
     pub async fn broadcast(&self, msg: impl Into<Vec<u8>>) -> SyncResult<()> {
         let data: Vec<u8> = msg.into();
@@ -328,7 +347,8 @@ impl GossipSync {
     /// Spawns an iroh endpoint with gossip protocol support.
     /// The endpoint will be reachable by other peers.
     pub async fn new() -> SyncResult<Self> {
-        Self::with_secret_key(None, None, None, None).await
+        let (gossip_sync, _) = Self::with_secret_key(None, None, None, None).await?;
+        Ok(gossip_sync)
     }
 
     /// Create a new gossip sync instance with a specific secret key
@@ -338,12 +358,17 @@ impl GossipSync {
     /// The local_did is required for the simplified contact protocol's local key derivation.
     /// If profile handler deps are provided, profile protocol handler will be registered.
     /// If blob manager is provided, blob protocol handler will be registered for P2P image transfer.
+    ///
+    /// Returns the GossipSync instance along with the shared active_topics map.
+    /// The active_topics map should be passed to ContactManager so both the handler
+    /// and manager can share access to contact topic senders. Returns None for active_topics
+    /// if contact_handler_deps was None.
     pub async fn with_secret_key(
         secret_key: Option<SecretKey>,
         contact_handler_deps: Option<(Arc<crate::storage::Storage>, tokio::sync::broadcast::Sender<crate::sync::ContactEvent>, String)>,
         profile_handler_deps: Option<(Arc<crate::storage::Storage>, Arc<HybridKeypair>, Did)>,
         blob_manager: Option<&BlobManager>,
-    ) -> SyncResult<Self> {
+    ) -> SyncResult<(Self, Option<ActiveContactTopics>)> {
         let secret_key = secret_key.unwrap_or_else(|| SecretKey::generate(&mut rand::rng()));
 
         // Create static provider for out-of-band peer addresses
@@ -384,6 +409,15 @@ impl GossipSync {
         // Build router - register contact, profile, and blob protocols if dependencies provided
         let mut router_builder = Router::builder(endpoint.clone()).accept(GOSSIP_ALPN, gossip.clone());
 
+        // Create shared active_topics map if contact handler will be registered.
+        // This map is shared between ContactProtocolHandler and ContactManager so both
+        // can add/access contact topic senders.
+        let active_topics = if contact_handler_deps.is_some() {
+            Some(Arc::new(RwLock::new(HashMap::new())))
+        } else {
+            None
+        };
+
         if let Some((storage, event_tx, local_did)) = contact_handler_deps {
             let contact_handler = ContactProtocolHandler::new(
                 storage,
@@ -391,9 +425,10 @@ impl GossipSync {
                 gossip.clone(),
                 static_provider.clone(),
                 local_did,
+                active_topics.clone().expect("active_topics created when contact_handler_deps is Some"),
             );
             router_builder = router_builder.accept(CONTACT_ALPN, contact_handler);
-            info!("Contact protocol handler registered");
+            info!("Contact protocol handler registered with shared active_topics");
         }
 
         if let Some((storage, keypair, did)) = profile_handler_deps {
@@ -411,13 +446,13 @@ impl GossipSync {
         let router = router_builder.spawn();
         info!("Router spawned");
 
-        Ok(Self {
+        Ok((Self {
             endpoint,
             gossip,
             router,
             static_provider,
             secret_key,
-        })
+        }, active_topics))
     }
 
     /// Get this node's endpoint ID
@@ -770,7 +805,7 @@ mod tests {
         let secret_key = SecretKey::generate(&mut rand::rng());
         let expected_public = secret_key.public();
 
-        let gossip = GossipSync::with_secret_key(Some(secret_key), None, None, None)
+        let (gossip, _active_topics) = GossipSync::with_secret_key(Some(secret_key), None, None, None)
             .await
             .expect("Failed to create GossipSync with secret key");
 

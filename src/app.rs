@@ -53,6 +53,12 @@ pub fn App() -> Element {
                         tracing::error!("Failed to initialize identity: {}", e);
                     }
 
+                    // Initialize profile keys for the packet layer (direct messaging)
+                    // This is required for send_message() and get_conversation() to work
+                    if let Err(e) = eng.init_profile_keys() {
+                        tracing::error!("Failed to initialize profile keys: {}", e);
+                    }
+
                     // Perform immediate startup sync with known peers
                     // Uses jitter to avoid the simultaneous wake-up problem
                     match eng.startup_sync().await {

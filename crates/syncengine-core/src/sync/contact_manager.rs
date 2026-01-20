@@ -22,12 +22,11 @@
 //! └─────────────────────────────────────────────────────────────────┘
 //! ```
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use base64::Engine as _;
 use iroh_gossip::proto::TopicId;
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::broadcast;
 use tracing::{debug, error, info, warn};
 
 use crate::error::SyncError;
@@ -35,7 +34,7 @@ use crate::identity::{Did, HybridKeypair, HybridPublicKey};
 use crate::invite::NodeAddrBytes;
 use crate::storage::Storage;
 use crate::sync::contact_protocol::{ContactMessage, CONTACT_ALPN};
-use crate::sync::{GossipSync, TopicSender};
+use crate::sync::{ActiveContactTopics, GossipSync};
 use crate::types::contact::{
     ContactInfo, ContactState, ContactStatus, HybridContactInvite, PeerContactInvite,
     PendingContact, ProfileSnapshot,
@@ -90,7 +89,11 @@ pub struct ContactManager {
     /// Active 1:1 gossip topics (contact_topic -> sender)
     /// We use TopicSender instead of TopicHandle because the receiver is consumed
     /// by the contact topic listener for processing incoming profile announcements.
-    active_topics: Arc<RwLock<HashMap<[u8; 32], crate::sync::TopicSender>>>,
+    ///
+    /// IMPORTANT: This map is shared with ContactProtocolHandler. When the handler
+    /// receives a ContactAccept, it adds the sender here so we can send messages.
+    /// When we accept a contact, we also add the sender here via subscribe_contact_topic().
+    active_topics: ActiveContactTopics,
 }
 
 impl ContactManager {
@@ -103,15 +106,19 @@ impl ContactManager {
     /// * `did` - Our DID
     /// * `storage` - Storage for persistence
     /// * `event_tx` - Event broadcast channel (shared with ContactProtocolHandler)
+    /// * `active_topics` - Shared map of contact topic senders (shared with ContactProtocolHandler)
     pub fn new(
         gossip_sync: Arc<GossipSync>,
         keypair: Arc<HybridKeypair>,
         did: Did,
         storage: Arc<Storage>,
         event_tx: broadcast::Sender<ContactEvent>,
+        active_topics: ActiveContactTopics,
     ) -> Self {
         // Note: Incoming contact messages are handled by ContactProtocolHandler
         // registered with the Router in GossipSync. No listener task needed here.
+        // The active_topics map is shared between this manager and the handler,
+        // ensuring both can add and access contact topic senders.
 
         Self {
             gossip_sync,
@@ -119,7 +126,7 @@ impl ContactManager {
             did,
             storage,
             event_tx,
-            active_topics: Arc::new(RwLock::new(HashMap::new())),
+            active_topics,
         }
     }
 
@@ -177,6 +184,63 @@ impl ContactManager {
         });
 
         info!("Contact auto-accept task started");
+    }
+
+    /// Start a background task that subscribes to contact topics when contacts are accepted.
+    ///
+    /// When ContactAccepted event fires (from handler receiving ContactAccept),
+    /// this ensures we have our own listener for the contact topic. The handler adds
+    /// the sender to active_topics for sending, but drops its receiver. This task
+    /// creates a separate subscription for receiving messages.
+    ///
+    /// This separation fixes the bug where handler's listener (which only processed Announce)
+    /// would consume Packet messages before ContactManager's listener could see them.
+    pub fn start_contact_subscription_task(self: Arc<Self>) {
+        let mut event_rx = self.event_tx.subscribe();
+
+        tokio::spawn(async move {
+            loop {
+                match event_rx.recv().await {
+                    Ok(ContactEvent::ContactAccepted { contact }) => {
+                        info!(
+                            peer_did = %contact.peer_did,
+                            "ContactAccepted event received, ensuring topic subscription for receiving"
+                        );
+
+                        // Small delay to ensure storage is updated
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+                        // Subscribe to contact topic (this spawns the listener that processes ALL messages)
+                        // Note: subscribe_contact_topic has deduplication, so if already subscribed,
+                        // this will skip. But we need to call it to ensure the RECEIVING listener exists.
+                        if let Err(e) = self.subscribe_contact_topic(&contact).await {
+                            error!(
+                                peer_did = %contact.peer_did,
+                                error = ?e,
+                                "Failed to subscribe to contact topic after accept"
+                            );
+                        } else {
+                            info!(
+                                peer_did = %contact.peer_did,
+                                "Successfully subscribed to contact topic for receiving messages"
+                            );
+                        }
+                    }
+                    Ok(_) => {
+                        // Ignore other events
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        warn!("Contact subscription task lagged, missed {} events", n);
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        debug!("Contact subscription task event channel closed, stopping");
+                        break;
+                    }
+                }
+            }
+        });
+
+        info!("Contact subscription task started");
     }
 
     /// Retry an async operation with exponential backoff
@@ -884,8 +948,28 @@ impl ContactManager {
     ///
     /// Creates a direct communication channel with this contact.
     /// Also spawns a listener for incoming profile announcements on this topic.
+    ///
+    /// Note: This may be called when a sender already exists in active_topics
+    /// (e.g., handler added sender but we need a listener). In that case, we
+    /// still create a subscription to get a receiver for the listener.
     async fn subscribe_contact_topic(&self, contact: &ContactInfo) -> SyncResult<()> {
         let topic_id = TopicId::from_bytes(contact.contact_topic);
+
+        // Check if we already have a sender in active_topics
+        // If so, we still need to subscribe to get a receiver for our listener,
+        // but we won't overwrite the existing sender.
+        let already_has_sender = {
+            let active = self.active_topics.read().await;
+            active.contains_key(&contact.contact_topic)
+        };
+
+        if already_has_sender {
+            debug!(
+                peer_did = %contact.peer_did,
+                topic_id = ?topic_id,
+                "Sender already in active_topics - subscribing for listener only"
+            );
+        }
 
         // Get bootstrap peer from contact's endpoint ID
         // CRITICAL: Gossip requires at least one bootstrap peer to form a mesh!
@@ -901,16 +985,36 @@ impl ContactManager {
         // Subscribe WITH the contact as a bootstrap peer
         let (sender, receiver) = self.gossip_sync.subscribe_split(topic_id, vec![bootstrap_peer]).await?;
 
-        // Store sender for broadcasting profile announcements to this contact
-        self.active_topics
-            .write()
-            .await
-            .insert(contact.contact_topic, sender);
+        // Clone sender for the listener (to keep subscription alive for receiving)
+        // CRITICAL: The listener needs to hold onto a sender to keep the subscription alive.
+        // Without this, messages sent to us on this topic won't be received.
+        let sender_for_listener = sender.clone();
 
-        // Spawn listener for incoming messages (including profile announcements)
+        // Only add to active_topics if we don't already have a sender
+        // (handler may have already added one - we don't want to overwrite it)
+        if !already_has_sender {
+            self.active_topics
+                .write()
+                .await
+                .insert(contact.contact_topic, sender);
+            debug!(
+                peer_did = %contact.peer_did,
+                "Added sender to active_topics"
+            );
+        } else {
+            debug!(
+                peer_did = %contact.peer_did,
+                "Skipping active_topics insert - handler already added sender"
+            );
+        }
+
+        // Spawn listener for incoming messages (including profile announcements AND Packet messages)
+        // This is CRITICAL: the listener processes all message types, unlike the old handler listener
+        // which only processed Announce messages and silently dropped Packet messages.
         Self::spawn_contact_topic_listener(
             self.storage.clone(),
             contact.peer_did.clone(),
+            sender_for_listener,
             receiver,
             self.event_tx.clone(),
         );
@@ -918,6 +1022,7 @@ impl ContactManager {
         info!(
             peer_did = %contact.peer_did,
             topic_id = ?topic_id,
+            already_had_sender = already_has_sender,
             "Subscribed to contact gossip topic with profile listener"
         );
 
@@ -934,16 +1039,57 @@ impl ContactManager {
     fn spawn_contact_topic_listener(
         storage: Arc<Storage>,
         peer_did: String,
+        sender: crate::sync::TopicSender,
         mut receiver: crate::sync::TopicReceiver,
         event_tx: broadcast::Sender<ContactEvent>,
     ) {
         tokio::spawn(async move {
             use crate::sync::TopicEvent;
 
-            debug!(peer_did = %peer_did, "Contact topic listener started");
+            // CRITICAL: Keep the sender alive for the entire lifetime of the listener.
+            // Dropping the sender closes the gossip topic, causing the receiver to immediately
+            // return None and the listener to exit. This mirrors spawn_profile_topic_listener.
+            let _keep_alive = sender;
+
+            info!(
+                peer_did = %peer_did,
+                "Contact topic listener STARTED - attempting to receive events"
+            );
 
             while let Some(event) = receiver.recv_event().await {
+                // Log EVERY event type to diagnose mesh formation and message flow
+                match &event {
+                    TopicEvent::Message(msg) => {
+                        info!(
+                            peer_did = %peer_did,
+                            content_len = msg.content.len(),
+                            from = ?msg.from,
+                            "RECEIVED gossip message on contact topic"
+                        );
+                    }
+                    TopicEvent::NeighborUp(neighbor) => {
+                        info!(
+                            peer_did = %peer_did,
+                            neighbor = ?neighbor,
+                            "Neighbor UP on contact topic - mesh forming"
+                        );
+                    }
+                    TopicEvent::NeighborDown(neighbor) => {
+                        warn!(
+                            peer_did = %peer_did,
+                            neighbor = ?neighbor,
+                            "Neighbor DOWN on contact topic - peer disconnected"
+                        );
+                    }
+                }
+
                 if let TopicEvent::Message(msg) = event {
+                    debug!(
+                        peer_did = %peer_did,
+                        content_len = msg.content.len(),
+                        "Processing gossip message content"
+                    );
+
                     // Try to parse as profile gossip message
                     match crate::sync::ProfileGossipMessage::from_bytes(&msg.content) {
                         Ok(crate::sync::ProfileGossipMessage::Announce {
@@ -1014,6 +1160,20 @@ impl ContactManager {
                             // Direct message packet received via 1:1 contact topic
                             let sender_did = envelope.sender.to_string();
 
+                            // DIAGNOSTIC: Log at info level with raw byte comparison
+                            // This helps identify subtle DID format mismatches
+                            info!(
+                                sender_did = %sender_did,
+                                expected_peer_did = %peer_did,
+                                sender_did_len = sender_did.len(),
+                                peer_did_len = peer_did.len(),
+                                sender_did_bytes = ?sender_did.as_bytes(),
+                                peer_did_bytes = ?peer_did.as_bytes(),
+                                sequence = envelope.sequence,
+                                did_match = (sender_did == peer_did),
+                                "PARSED PACKET - checking DID match"
+                            );
+
                             // Only process packets from the expected peer (the contact)
                             if sender_did == peer_did {
                                 // Store packet in MirrorStore
@@ -1045,10 +1205,11 @@ impl ContactManager {
                                     }
                                 }
                             } else {
-                                debug!(
-                                    expected = %peer_did,
-                                    actual = %sender_did,
-                                    "Received packet from unexpected sender on contact topic"
+                                // DID mismatch - LOG AT WARN LEVEL so we can see it during debugging
+                                warn!(
+                                    expected_peer_did = %peer_did,
+                                    actual_sender_did = %sender_did,
+                                    "REJECTED packet from unexpected sender - DID MISMATCH!"
                                 );
                             }
                         }
@@ -1064,7 +1225,15 @@ impl ContactManager {
                 // NeighborUp/NeighborDown events could be used for presence detection
             }
 
-            debug!(peer_did = %peer_did, "Contact topic listener stopped");
+            // Warn because listener exit means no more messages will be received
+            // This could indicate:
+            // - Sender was dropped (subscription closed)
+            // - Gossip mesh collapsed
+            // - Network disconnection
+            warn!(
+                peer_did = %peer_did,
+                "Contact topic listener EXITED - recv_event returned None, no more messages will be received!"
+            );
         });
     }
 
@@ -1217,10 +1386,21 @@ impl ContactManager {
         );
 
         for contact in contacts {
+            let topic_id = TopicId::from_bytes(contact.contact_topic);
+            debug!(
+                peer_did = %contact.peer_did,
+                contact_topic = ?topic_id,
+                "Attempting to reconnect to contact"
+            );
+
             // 1. Subscribe to the 1:1 contact topic (for direct messaging)
             match self.subscribe_contact_topic(&contact).await {
                 Ok(_) => {
-                    debug!(peer_did = %contact.peer_did, "Reconnected to contact topic");
+                    debug!(
+                        peer_did = %contact.peer_did,
+                        contact_topic = ?topic_id,
+                        "Successfully subscribed to contact topic - listener spawned"
+                    );
                 }
                 Err(e) => {
                     warn!(
@@ -1743,7 +1923,9 @@ mod tests {
 
     use super::*;
     use crate::sync::GossipSync;
+    use std::collections::HashMap;
     use tempfile::TempDir;
+    use tokio::sync::RwLock;
 
     async fn create_test_manager() -> (ContactManager, TempDir) {
         let temp_dir = TempDir::new().unwrap();
@@ -1755,7 +1937,10 @@ mod tests {
         let did = Did::from_public_key(&keypair.public_key());
         let (event_tx, _) = broadcast::channel(100);
 
-        let manager = ContactManager::new(gossip_sync, keypair, did, storage, event_tx);
+        // Create empty active_topics for testing (normally shared with ContactProtocolHandler)
+        let active_topics = Arc::new(RwLock::new(HashMap::new()));
+
+        let manager = ContactManager::new(gossip_sync, keypair, did, storage, event_tx, active_topics);
 
         (manager, temp_dir)
     }
