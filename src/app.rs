@@ -3,7 +3,7 @@ use std::sync::Arc;
 use dioxus::prelude::*;
 use tokio::sync::RwLock;
 
-use crate::context::{get_data_dir, get_init_connect, get_init_profile_name, SharedEngine};
+use crate::context::{get_data_dir, get_init_connect, get_init_profile_name, PendingChatContact, SharedEngine};
 use crate::pages::{Field, Landing, Network, Profile, RealmView};
 use crate::theme::GLOBAL_STYLES;
 
@@ -36,10 +36,12 @@ pub fn App() -> Element {
     // Initialize shared engine state
     let engine: Signal<SharedEngine> = use_signal(|| Arc::new(RwLock::new(None)));
     let mut engine_ready: Signal<bool> = use_signal(|| false);
+    let pending_chat_contact: Signal<Option<PendingChatContact>> = use_signal(|| None);
 
     // Provide engine context to all child components
     use_context_provider(|| engine);
     use_context_provider(|| engine_ready);
+    use_context_provider(|| pending_chat_contact);
 
     // Initialize engine on mount
     use_effect(move || {

@@ -68,3 +68,24 @@ pub fn use_engine() -> Signal<SharedEngine> {
 pub fn use_engine_ready() -> Signal<bool> {
     use_context::<Signal<bool>>()
 }
+
+/// Pending contact to open chat with (navigation from PeerStatusDropdown).
+///
+/// When a user clicks the message button in the status dropdown, this
+/// context is set with the target contact, then navigation occurs to
+/// the Network page which reads and clears this value.
+#[derive(Clone, Debug, Default)]
+pub struct PendingChatContact {
+    /// The DID of the contact to open chat with
+    pub did: String,
+    /// The display name of the contact
+    pub name: String,
+}
+
+/// Hook to access pending chat contact from context.
+///
+/// Returns a Signal containing an optional PendingChatContact.
+/// Set this before navigating to /network to auto-select a contact.
+pub fn use_pending_chat_contact() -> Signal<Option<PendingChatContact>> {
+    use_context::<Signal<Option<PendingChatContact>>>()
+}

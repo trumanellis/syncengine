@@ -10,7 +10,7 @@ use syncengine_core::{ContactEvent, Peer};
 use crate::components::images::AsyncImage;
 use crate::components::messages::{ChatBubbleMessage, ConversationView};
 use crate::components::{NavHeader, NavLocation};
-use crate::context::{use_engine, use_engine_ready};
+use crate::context::{use_engine, use_engine_ready, use_pending_chat_contact};
 
 /// Contact with conversation preview info
 #[derive(Clone)]
@@ -61,6 +61,9 @@ pub fn Network() -> Element {
     let mut conversation_messages: Signal<Vec<ChatBubbleMessage>> = use_signal(Vec::new);
     let mut conversation_loading = use_signal(|| false);
     let mut sending = use_signal(|| false);
+
+    // Pending chat contact from navigation (e.g., clicking message button in status dropdown)
+    let mut pending_chat_contact = use_pending_chat_contact();
 
     // Load contacts and messages when engine becomes ready
     use_effect(move || {
@@ -254,6 +257,17 @@ pub fn Network() -> Element {
 
                 conversation_loading.set(false);
             });
+        }
+    });
+
+    // Check for pending chat contact from navigation (e.g., from status dropdown message button)
+    use_effect(move || {
+        if let Some(pending) = pending_chat_contact() {
+            selected_contact.set(Some(SelectedContact {
+                did: pending.did.clone(),
+                name: pending.name.clone(),
+            }));
+            pending_chat_contact.set(None); // Clear to prevent re-trigger
         }
     });
 

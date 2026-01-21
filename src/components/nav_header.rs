@@ -7,10 +7,9 @@ use dioxus::prelude::*;
 use syncengine_core::{PacketEvent, Peer, PeerStatus};
 
 use crate::app::Route;
-use crate::components::messages::MessageCompose;
 use crate::components::mobile_nav::MobileNav;
 use crate::components::PeerStatusDropdown;
-use crate::context::{use_engine, use_engine_ready};
+use crate::context::{use_engine, use_engine_ready, use_pending_chat_contact, PendingChatContact};
 
 /// Navigation location within the application
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -61,8 +60,11 @@ pub fn NavHeader(props: NavHeaderProps) -> Element {
     let mut show_dropdown = use_signal(|| false);
     let mut peers: Signal<Vec<Peer>> = use_signal(Vec::new);
     let mut syncing = use_signal(|| false);
-    let mut compose_target: Signal<Option<(String, String)>> = use_signal(|| None);
     let mut packet_events: Signal<Vec<PacketEvent>> = use_signal(Vec::new);
+
+    // Navigation for message button
+    let mut pending_chat_contact = use_pending_chat_contact();
+    let navigator = use_navigator();
 
     let locations = [
         NavLocation::Field,
@@ -145,32 +147,11 @@ pub fn NavHeader(props: NavHeaderProps) -> Element {
         });
     };
 
-    // Message handler
+    // Message handler - navigates to Network page with contact pre-selected
     let on_message = move |(did, name): (String, String)| {
-        compose_target.set(Some((did, name)));
+        pending_chat_contact.set(Some(PendingChatContact { did, name }));
         show_dropdown.set(false);
-    };
-
-    // Send message handler
-    let send_message = move |content: String| {
-        if let Some((did, _name)) = compose_target() {
-            spawn(async move {
-                let shared = engine();
-                let mut guard = shared.write().await;
-                if let Some(ref mut eng) = *guard {
-                    // Use send_message which properly sets recipient and routes to 1:1 topic
-                    match eng.send_message(&did, &content).await {
-                        Ok(seq) => {
-                            tracing::info!(to = %did, sequence = seq, "Sent message");
-                        }
-                        Err(e) => {
-                            tracing::error!(error = %e, "Failed to send message");
-                        }
-                    }
-                }
-                compose_target.set(None);
-            });
-        }
+        navigator.push(Route::Network {});
     };
 
     let peer_count = peers().len();
@@ -252,16 +233,6 @@ pub fn NavHeader(props: NavHeaderProps) -> Element {
                 on_sync: on_sync,
                 on_message: on_message,
                 packet_events: packet_events(),
-            }
-        }
-
-        // Message compose modal
-        if let Some((did, name)) = compose_target() {
-            MessageCompose {
-                recipient_name: name,
-                recipient_did: did,
-                on_send: send_message,
-                on_close: move |_| compose_target.set(None),
             }
         }
     }
