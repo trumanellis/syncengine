@@ -6468,14 +6468,15 @@ body {
   animation: fadeIn var(--transition-normal);
 }
 
-/* Mobile: position dropdown above the bottom nav */
+/* Mobile: position dropdown above the bottom nav, anchored to right */
 @media (max-width: 768px) {
   .peer-dropdown {
     top: auto;
     bottom: 80px;
     right: var(--space-4);
-    left: var(--space-4);
+    left: auto;
     width: auto;
+    min-width: min(280px, calc(100vw - var(--space-8)));
   }
 }
 
