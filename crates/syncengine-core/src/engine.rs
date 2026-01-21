@@ -674,6 +674,38 @@ impl SyncEngine {
         mirror.list_mirrored_dids()
     }
 
+    // =========================================================================
+    // Relay Storage Methods (Store-and-Forward)
+    // =========================================================================
+
+    /// Get all packets stored for relay to a specific recipient.
+    ///
+    /// This returns packets that were addressed to the given DID but the
+    /// recipient wasn't online to receive them. These packets should be
+    /// forwarded when the recipient comes online.
+    ///
+    /// Used by the store-and-forward relay mechanism.
+    pub fn get_packets_for_recipient(&self, recipient: &Did) -> Result<Vec<PacketEnvelope>, SyncError> {
+        let mirror = self.mirror_store.as_ref().ok_or_else(|| {
+            SyncError::Storage("Mirror store not initialized".to_string())
+        })?;
+        mirror.get_packets_for_recipient(recipient)
+    }
+
+    /// Mark a packet as delivered to a recipient, removing it from the relay index.
+    ///
+    /// After successfully forwarding a packet to its intended recipient, call
+    /// this method to remove the packet from the relay index. The packet remains
+    /// in the mirror store for redundancy.
+    ///
+    /// Used by the store-and-forward relay mechanism.
+    pub fn mark_packet_delivered(&self, recipient: &Did, packet_hash: &[u8; 32]) -> Result<(), SyncError> {
+        let mirror = self.mirror_store.as_ref().ok_or_else(|| {
+            SyncError::Storage("Mirror store not initialized".to_string())
+        })?;
+        mirror.mark_delivered(recipient, packet_hash)
+    }
+
     /// Create and sign a new packet.
     ///
     /// Creates a packet with the given payload, signs it with our profile keys,

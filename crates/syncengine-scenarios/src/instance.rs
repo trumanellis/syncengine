@@ -320,8 +320,11 @@ impl InstanceManager {
     }
 
     /// Get bootstrap directory for cross-instance connections
+    /// This must match the path used in app.rs for invite file exchange
     pub fn bootstrap_dir(&self) -> PathBuf {
-        self.data_base.join("bootstrap")
+        dirs::data_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("syncengine-bootstrap")
     }
 }
 

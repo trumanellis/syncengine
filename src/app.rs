@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use dioxus::prelude::*;
 use tokio::sync::RwLock;
@@ -81,88 +82,98 @@ pub fn App() -> Element {
                         }
                     }
 
+                    // Scenario mode setup: write our invite and start watcher
+                    // Triggered by --init-profile-name (indicates scenario mode)
+                    let mut watcher_config: Option<(String, std::path::PathBuf)> = None;
+
+                    // Get our profile name
+                    let our_name = eng.get_own_profile()
+                        .map(|p| p.display_name.to_lowercase())
+                        .unwrap_or_default();
+
+                    // In scenario mode, always write our invite and prepare watcher
+                    if get_init_profile_name().is_some() && !our_name.is_empty() && our_name != "anonymous user" {
+                        let bootstrap_dir = dirs::data_dir()
+                            .unwrap_or_else(|| std::path::PathBuf::from("."))
+                            .join("syncengine-bootstrap");
+
+                        if let Err(e) = std::fs::create_dir_all(&bootstrap_dir) {
+                            tracing::warn!("Could not create bootstrap directory: {}", e);
+                        } else {
+                            // Generate and write our invite for others to find
+                            match eng.generate_contact_invite(24).await {
+                                Ok(invite_str) => {
+                                    let our_invite_path = bootstrap_dir.join(format!("{}.invite", our_name));
+                                    if let Err(e) = std::fs::write(&our_invite_path, &invite_str) {
+                                        tracing::warn!("Could not write bootstrap invite: {}", e);
+                                    } else {
+                                        tracing::info!("Bootstrap invite written to {:?}", our_invite_path);
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!("Could not generate bootstrap invite: {}", e);
+                                }
+                            }
+
+                            // Capture config for bootstrap watcher
+                            watcher_config = Some((our_name.clone(), bootstrap_dir.clone()));
+                        }
+                    }
+
                     // Bootstrap auto-connect: connect with other named instances
                     // This allows ./se love joy peace to auto-connect all three instances
                     if let Some(bootstrap_peers) = get_init_connect() {
-                        // Get our profile name to identify ourselves
-                        let our_name = eng.get_own_profile()
-                            .map(|p| p.display_name.to_lowercase())
-                            .unwrap_or_default();
+                        let bootstrap_dir = dirs::data_dir()
+                            .unwrap_or_else(|| std::path::PathBuf::from("."))
+                            .join("syncengine-bootstrap");
 
-                        if !our_name.is_empty() && our_name != "anonymous user" {
-                            // Bootstrap directory for sharing invites between instances
-                            let bootstrap_dir = dirs::data_dir()
-                                .unwrap_or_else(|| std::path::PathBuf::from("."))
-                                .join("syncengine-bootstrap");
+                        // Small delay to let other instances write their invites
+                        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
-                            // Create directory if it doesn't exist
-                            if let Err(e) = std::fs::create_dir_all(&bootstrap_dir) {
-                                tracing::warn!("Could not create bootstrap directory: {}", e);
-                            } else {
-                                // Generate and write our invite for others to find
-                                match eng.generate_contact_invite(24).await {
-                                    Ok(invite_str) => {
-                                        let our_invite_path = bootstrap_dir.join(format!("{}.invite", our_name));
-                                        if let Err(e) = std::fs::write(&our_invite_path, &invite_str) {
-                                            tracing::warn!("Could not write bootstrap invite: {}", e);
-                                        } else {
-                                            tracing::info!("Bootstrap invite written to {:?}", our_invite_path);
-                                        }
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!("Could not generate bootstrap invite: {}", e);
-                                    }
-                                }
+                        // Read invites from other bootstrap peers and send contact requests
+                        for peer_name in &bootstrap_peers {
+                            let peer_name_lower = peer_name.to_lowercase();
 
-                                // Small delay to let other instances write their invites
-                                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                            // Skip ourselves
+                            if peer_name_lower == our_name {
+                                continue;
+                            }
 
-                                // Read invites from other bootstrap peers and send contact requests
-                                for peer_name in &bootstrap_peers {
-                                    let peer_name_lower = peer_name.to_lowercase();
+                            let peer_invite_path = bootstrap_dir.join(format!("{}.invite", peer_name_lower));
 
-                                    // Skip ourselves
-                                    if peer_name_lower == our_name {
-                                        continue;
-                                    }
-
-                                    let peer_invite_path = bootstrap_dir.join(format!("{}.invite", peer_name_lower));
-
-                                    // Try to read the peer's invite file
-                                    if let Ok(invite_str) = std::fs::read_to_string(&peer_invite_path) {
-                                        // Decode and send contact request
-                                        match eng.decode_contact_invite(&invite_str).await {
-                                            Ok(invite) => {
-                                                match eng.send_contact_request(invite).await {
-                                                    Ok(()) => {
-                                                        tracing::info!(
-                                                            "Bootstrap: sent contact request to '{}'",
-                                                            peer_name
-                                                        );
-                                                    }
-                                                    Err(e) => {
-                                                        // May fail if already connected or request pending
-                                                        tracing::debug!(
-                                                            "Bootstrap: could not send request to '{}': {}",
-                                                            peer_name, e
-                                                        );
-                                                    }
-                                                }
+                            // Try to read the peer's invite file
+                            if let Ok(invite_str) = std::fs::read_to_string(&peer_invite_path) {
+                                // Decode and send contact request
+                                match eng.decode_contact_invite(&invite_str).await {
+                                    Ok(invite) => {
+                                        match eng.send_contact_request(invite).await {
+                                            Ok(()) => {
+                                                tracing::info!(
+                                                    "Bootstrap: sent contact request to '{}'",
+                                                    peer_name
+                                                );
                                             }
                                             Err(e) => {
+                                                // May fail if already connected or request pending
                                                 tracing::debug!(
-                                                    "Bootstrap: could not decode invite from '{}': {}",
+                                                    "Bootstrap: could not send request to '{}': {}",
                                                     peer_name, e
                                                 );
                                             }
                                         }
-                                    } else {
+                                    }
+                                    Err(e) => {
                                         tracing::debug!(
-                                            "Bootstrap: no invite found for '{}' (may not be running yet)",
-                                            peer_name
+                                            "Bootstrap: could not decode invite from '{}': {}",
+                                            peer_name, e
                                         );
                                     }
                                 }
+                            } else {
+                                tracing::debug!(
+                                    "Bootstrap: no invite found for '{}' (may not be running yet)",
+                                    peer_name
+                                );
                             }
                         }
                     }
@@ -191,6 +202,55 @@ pub fn App() -> Element {
                     drop(guard);
                     engine_ready.set(true);
                     tracing::info!("SyncEngine initialized with identity");
+
+                    // Spawn background task to watch for connection requests (.connect files)
+                    // This enables ctx.connect() in Lua scenarios to trigger connections mid-run
+                    if let Some((our_name, bootstrap_dir)) = watcher_config {
+                        let shared_engine = engine();
+                        tokio::spawn(async move {
+                            let connect_file = bootstrap_dir.join(format!("{}.connect", our_name));
+                            tracing::debug!("Bootstrap watcher started, watching: {:?}", connect_file);
+
+                            loop {
+                                tokio::time::sleep(Duration::from_secs(1)).await;
+
+                                if connect_file.exists() {
+                                    if let Ok(invite_str) = std::fs::read_to_string(&connect_file) {
+                                        // Remove the file first to prevent re-processing
+                                        let _ = std::fs::remove_file(&connect_file);
+
+                                        // Process the invite
+                                        let mut eng = shared_engine.write().await;
+                                        if let Some(ref mut engine) = *eng {
+                                            match engine.decode_contact_invite(&invite_str).await {
+                                                Ok(invite) => {
+                                                    match engine.send_contact_request(invite).await {
+                                                        Ok(()) => {
+                                                            tracing::info!(
+                                                                "Bootstrap watcher: sent contact request from .connect file"
+                                                            );
+                                                        }
+                                                        Err(e) => {
+                                                            tracing::warn!(
+                                                                "Bootstrap watcher: failed to send request: {}",
+                                                                e
+                                                            );
+                                                        }
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    tracing::warn!(
+                                                        "Bootstrap watcher: failed to decode invite: {}",
+                                                        e
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        });
+                    }
                 }
                 Err(e) => {
                     tracing::error!("Failed to initialize SyncEngine: {}", e);

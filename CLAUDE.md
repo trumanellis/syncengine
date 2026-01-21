@@ -6,6 +6,65 @@
 
 ---
 
+## Worktrees for Feature Development
+
+**Use git worktrees for significant new features.** This keeps `main` stable and allows parallel experimentation.
+
+### When to Use a Worktree
+
+| Use Worktree | Stay on Main |
+|--------------|--------------|
+| New UI components (e.g., new card types) | Bug fixes |
+| Major refactors | CSS tweaks |
+| Experimental features | Small enhancements |
+| Multi-file architectural changes | Single-file edits |
+| Anything you might want to abandon | Quick iterations |
+
+### Creating a Worktree
+
+```bash
+# From the main syncengine directory
+git worktree add ../syncengine-wt-<feature-name> -b feature/<feature-name>
+
+# Example: new vertical card component
+git worktree add ../syncengine-wt-vertical-cards -b feature/vertical-quest-cards
+```
+
+### Working in a Worktree
+
+```bash
+# Navigate to the worktree
+cd ../syncengine-wt-<feature-name>
+
+# Work normally - commits go to the feature branch
+cargo build
+cargo test
+git add -A && git commit -m "feat: implement feature"
+```
+
+### Merging Back to Main
+
+```bash
+# From main directory
+cd /path/to/syncengine
+git checkout main
+git merge feature/<feature-name>
+
+# Clean up
+git worktree remove ../syncengine-wt-<feature-name>
+git branch -d feature/<feature-name>
+```
+
+### Listing Worktrees
+
+```bash
+git worktree list
+```
+
+**Recommendation:** When the user asks for a significant new feature, suggest creating a worktree first. This protects main from experimental code and makes it easy to compare approaches or abandon failed experiments.
+
+---
+
 ## Development Workflow: TDD → CLI → UI
 
 **The core principle:** All logic lives in `syncengine-core`. CLI and Dioxus are **thin wrappers** that call core functions.
@@ -467,17 +526,23 @@ Types:
 
 ### When to Commit
 
-- After each passing test (small commits are good)
+**DO NOT commit until the user has manually tested and confirmed the feature works.**
+
+For UI changes especially, the code may compile but the feature may not work as intended. Wait for the user to:
+1. Run the app
+2. Test the feature visually
+3. Confirm it's working
+
+Only then should you commit. This prevents cluttering git history with broken or incomplete code.
+
+**After user confirmation, commit when:**
+- A feature is complete and tested
 - Before switching to a different part of the feature
 - Before any risky refactor
 
 ```bash
-# Good rhythm
-git add -A && git commit -m "test: add test_gossip_echo"
-# ... implement ...
+# Wait for user to test, then:
 git add -A && git commit -m "feat: implement gossip echo"
-# ... refactor ...
-git add -A && git commit -m "refactor: extract gossip connection setup"
 ```
 
 ---

@@ -1722,7 +1722,7 @@ body {
 }
 
 /* === Quest Card Grid === */
-/* Linear scaling: 1 column on narrow mobile, more columns as width increases */
+/* Linear scaling: 1 column on narrow mobile, up to 3 columns on desktop */
 .realm-quest-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(min(280px, 100%), 1fr));
@@ -1731,9 +1731,10 @@ body {
   margin-left: 0.5rem;
 }
 
-/* Slightly larger gap on wider screens */
-@media (min-width: 768px) {
+/* Cap at 2 columns on wide screens for larger cards */
+@media (min-width: 900px) {
   .realm-quest-grid {
+    grid-template-columns: repeat(2, 1fr);
     gap: 1.5rem;
   }
 }

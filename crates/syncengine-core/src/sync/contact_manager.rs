@@ -1059,7 +1059,8 @@ impl ContactManager {
             // CRITICAL: Keep the sender alive for the entire lifetime of the listener.
             // Dropping the sender closes the gossip topic, causing the receiver to immediately
             // return None and the listener to exit. This mirrors spawn_profile_topic_listener.
-            let _keep_alive = sender;
+            // Note: We also use this sender to forward relayed packets when the neighbor comes online.
+            let topic_sender = sender;
 
             info!(
                 peer_did = %peer_did,
@@ -1083,6 +1084,69 @@ impl ContactManager {
                             neighbor = ?neighbor,
                             "Neighbor UP on contact topic - mesh forming"
                         );
+
+                        // RELAY FORWARDING: Check if we have packets addressed to this peer
+                        // that we've been storing as a relay. Forward them now that peer is online.
+                        if let Ok(peer_did_parsed) = crate::identity::Did::parse(&peer_did) {
+                            match crate::profile::MirrorStore::new(storage.db_handle()) {
+                                Ok(mirror) => {
+                                    match mirror.get_packets_for_recipient(&peer_did_parsed) {
+                                        Ok(packets) if !packets.is_empty() => {
+                                            info!(
+                                                peer_did = %peer_did,
+                                                packet_count = packets.len(),
+                                                "Found relayed packets for peer - forwarding now"
+                                            );
+                                            for envelope in packets {
+                                                // Create packet sync message and forward
+                                                let msg = crate::sync::ProfileGossipMessage::Packet {
+                                                    envelope: envelope.clone(),
+                                                };
+                                                match msg.to_bytes() {
+                                                    Ok(bytes) => {
+                                                        // Broadcast the relayed packet
+                                                        if let Err(e) = topic_sender.broadcast(bytes).await {
+                                                            warn!(
+                                                                peer_did = %peer_did,
+                                                                error = %e,
+                                                                "Failed to forward relayed packet"
+                                                            );
+                                                        } else {
+                                                            info!(
+                                                                peer_did = %peer_did,
+                                                                sender = %envelope.sender,
+                                                                sequence = envelope.sequence,
+                                                                "Forwarded relayed packet to peer"
+                                                            );
+                                                            // Mark as delivered (remove from relay index)
+                                                            let packet_hash = envelope.hash();
+                                                            if let Err(e) = mirror.mark_delivered(&peer_did_parsed, &packet_hash) {
+                                                                warn!(
+                                                                    error = %e,
+                                                                    "Failed to mark packet as delivered"
+                                                                );
+                                                            }
+                                                        }
+                                                    }
+                                                    Err(e) => {
+                                                        warn!(error = %e, "Failed to encode packet for relay");
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        Ok(_) => {
+                                            debug!(peer_did = %peer_did, "No relayed packets for peer");
+                                        }
+                                        Err(e) => {
+                                            warn!(error = %e, "Failed to query relayed packets");
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    warn!(error = %e, "Failed to create MirrorStore for relay check");
+                                }
+                            }
+                        }
                     }
                     TopicEvent::NeighborDown(neighbor) => {
                         warn!(
@@ -1245,6 +1309,20 @@ impl ContactManager {
                                     }
                                 };
 
+                                // Detect relay: if gossip sender (delivered_from) differs from
+                                // packet author (sender_did), the packet was relayed
+                                let (relay_did, relay_name) = if delivered_from != sender_did {
+                                    // Packet was relayed through another peer
+                                    let relay_name = storage.load_peer_by_did(&delivered_from)
+                                        .ok()
+                                        .flatten()
+                                        .map(|p| p.display_name())
+                                        .unwrap_or_else(|| format!("{}...", &delivered_from[..16.min(delivered_from.len())]));
+                                    (Some(delivered_from.clone()), Some(relay_name))
+                                } else {
+                                    (None, None)
+                                };
+
                                 let event = crate::sync::PacketEvent {
                                     id: crate::sync::PacketEvent::make_id(&sender_did, envelope.sequence),
                                     timestamp: chrono::Utc::now().timestamp_millis(),
@@ -1252,8 +1330,8 @@ impl ContactManager {
                                     sequence: envelope.sequence,
                                     author_did: sender_did.clone(),
                                     author_name,
-                                    relay_did: None, // TODO: Detect relay from msg.from vs expected node
-                                    relay_name: None,
+                                    relay_did,
+                                    relay_name,
                                     destination_did,
                                     destination_name,
                                     decryption_status,

@@ -131,6 +131,7 @@ async fn test_profile_keys_persistence() {
 async fn test_create_global_packet() {
     let temp_dir = tempdir().unwrap();
     let mut engine = SyncEngine::new(temp_dir.path()).await.unwrap();
+    engine.init_identity().unwrap();
     engine.init_profile_keys().unwrap();
 
     // Create a heartbeat packet (global/public)
@@ -153,6 +154,7 @@ async fn test_create_global_packet() {
 async fn test_packet_hash_chain() {
     let temp_dir = tempdir().unwrap();
     let mut engine = SyncEngine::new(temp_dir.path()).await.unwrap();
+    engine.init_identity().unwrap();
     engine.init_profile_keys().unwrap();
 
     // Create several packets
@@ -284,11 +286,13 @@ async fn test_two_peers_direct_packet_simulated() {
 
     // Setup Love
     let mut love = SyncEngine::new(love_dir.path()).await.unwrap();
+    love.init_identity().unwrap();
     love.init_profile_keys().unwrap();
     let love_did = love.profile_did().unwrap().clone();
 
     // Setup Joy
     let mut joy = SyncEngine::new(joy_dir.path()).await.unwrap();
+    joy.init_identity().unwrap();
     joy.init_profile_keys().unwrap();
 
     // Love creates a heartbeat packet
@@ -330,13 +334,16 @@ async fn test_encrypted_relay_simulated() {
 
     // Setup all three nodes
     let mut love = SyncEngine::new(love_dir.path()).await.unwrap();
+    love.init_identity().unwrap();
     love.init_profile_keys().unwrap();
     let love_did = love.profile_did().unwrap().clone();
 
     let mut joy = SyncEngine::new(joy_dir.path()).await.unwrap();
+    joy.init_identity().unwrap();
     joy.init_profile_keys().unwrap();
 
     let mut peace = SyncEngine::new(peace_dir.path()).await.unwrap();
+    peace.init_identity().unwrap();
     peace.init_profile_keys().unwrap();
 
     // Love creates a global packet (encrypted per-recipient not yet tested)
@@ -386,10 +393,12 @@ async fn test_mirror_sync_after_offline_simulated() {
 
     // Setup all three nodes
     let mut love = SyncEngine::new(love_dir.path()).await.unwrap();
+    love.init_identity().unwrap();
     love.init_profile_keys().unwrap();
     let love_did = love.profile_did().unwrap().clone();
 
     let mut peace = SyncEngine::new(peace_dir.path()).await.unwrap();
+    peace.init_identity().unwrap();
     peace.init_profile_keys().unwrap();
 
     // Love creates several packets while Joy is offline
@@ -412,6 +421,7 @@ async fn test_mirror_sync_after_offline_simulated() {
 
     // Now Joy comes online
     let mut joy = SyncEngine::new(joy_dir.path()).await.unwrap();
+    joy.init_identity().unwrap();
     joy.init_profile_keys().unwrap();
 
     // Simulate Joy syncing from Peace's mirror
@@ -515,10 +525,12 @@ async fn test_global_packet_roundtrip() {
 
     // Setup Love
     let mut love = SyncEngine::new(love_dir.path()).await.unwrap();
+    love.init_identity().unwrap();
     love.init_profile_keys().unwrap();
 
     // Setup Joy
     let mut joy = SyncEngine::new(joy_dir.path()).await.unwrap();
+    joy.init_identity().unwrap();
     joy.init_profile_keys().unwrap();
 
     // Create a global packet with a direct message (addressed to Joy)
@@ -626,16 +638,20 @@ async fn test_list_mirrored_dids() {
 
     // Create packets from multiple profiles
     let mut love = SyncEngine::new(love_dir.path()).await.unwrap();
+    love.init_identity().unwrap();
     love.init_profile_keys().unwrap();
 
     let mut joy = SyncEngine::new(joy_dir.path()).await.unwrap();
+    joy.init_identity().unwrap();
     joy.init_profile_keys().unwrap();
 
     let mut peace = SyncEngine::new(peace_dir.path()).await.unwrap();
+    peace.init_identity().unwrap();
     peace.init_profile_keys().unwrap();
 
     // Create a receiving node
     let mut receiver = SyncEngine::new(mirror_dir.path()).await.unwrap();
+    receiver.init_identity().unwrap();
     receiver.init_profile_keys().unwrap();
 
     // Love and Joy create packets
@@ -762,9 +778,11 @@ async fn test_duplicate_packet_handling() {
     let joy_dir = tempdir().unwrap();
 
     let mut love = SyncEngine::new(love_dir.path()).await.unwrap();
+    love.init_identity().unwrap();
     love.init_profile_keys().unwrap();
 
     let mut joy = SyncEngine::new(joy_dir.path()).await.unwrap();
+    joy.init_identity().unwrap();
     joy.init_profile_keys().unwrap();
 
     // Love creates a packet
@@ -792,10 +810,12 @@ async fn test_out_of_order_packets() {
     let joy_dir = tempdir().unwrap();
 
     let mut love = SyncEngine::new(love_dir.path()).await.unwrap();
+    love.init_identity().unwrap();
     love.init_profile_keys().unwrap();
     let love_did = love.profile_did().unwrap().clone();
 
     let mut joy = SyncEngine::new(joy_dir.path()).await.unwrap();
+    joy.init_identity().unwrap();
     joy.init_profile_keys().unwrap();
 
     // Love creates 3 packets
@@ -824,5 +844,320 @@ async fn test_out_of_order_packets() {
         joy.mirror_head(&love_did),
         Some(2),
         "Should have all packets"
+    );
+}
+
+// ============================================================================
+// Store-and-Forward Relay Tests
+// ============================================================================
+
+/// Helper to create a sealed packet envelope directly (bypassing contact exchange)
+fn create_sealed_packet(
+    sender_keys: &ProfileKeys,
+    recipient_keys: &ProfileKeys,
+    sequence: u64,
+    prev_hash: [u8; 32],
+    content: &str,
+) -> syncengine_core::profile::PacketEnvelope {
+    let payload = PacketPayload::DirectMessage {
+        content: content.to_string(),
+        recipient: recipient_keys.did(),
+    };
+    syncengine_core::profile::PacketEnvelope::create(
+        sender_keys,
+        &payload,
+        &[recipient_keys.public_bundle()],
+        sequence,
+        prev_hash,
+    )
+    .expect("Should create envelope")
+}
+
+/// Test the store-and-forward relay mechanism for offline message delivery.
+///
+/// This tests the complete relay flow:
+/// 1. Love creates a packet addressed to Peace (who is offline)
+/// 2. Joy receives and stores the packet as a relay
+/// 3. When Peace comes online, Joy can retrieve packets addressed to Peace
+/// 4. After delivery, Joy can mark packets as delivered
+///
+/// Scenario from the sacred geometry:
+/// ```text
+///     Love ─────→ Joy (relay) ────→ Peace
+///                  ↓
+///           stores packet
+///           for Peace
+/// ```
+#[tokio::test]
+async fn test_offline_relay_store_and_forward() {
+    let joy_dir = tempdir().unwrap();
+    let peace_dir = tempdir().unwrap();
+
+    // Create keys directly (bypassing contact exchange for test)
+    let love_keys = ProfileKeys::generate();
+    let love_did = love_keys.did();
+
+    let peace_keys = ProfileKeys::generate();
+    let peace_did = peace_keys.did();
+
+    // Setup Joy (the relay node)
+    let mut joy = SyncEngine::new(joy_dir.path()).await.unwrap();
+    joy.init_identity().unwrap();
+    joy.init_profile_keys().unwrap();
+
+    // Setup Peace (to verify decryption)
+    let mut peace = SyncEngine::new(peace_dir.path()).await.unwrap();
+    peace.init_identity().unwrap();
+    peace.init_profile_keys().unwrap();
+
+    // Love creates a sealed packet addressed to Peace
+    // Note: We create this directly to bypass the contact exchange requirement
+    let sealed_packet = create_sealed_packet(
+        &love_keys,
+        &peace_keys,
+        0,
+        [0u8; 32],
+        "Hello Peace! This is Love reaching out through the field.",
+    );
+
+    // Verify the packet is sealed (not global)
+    assert!(
+        !sealed_packet.is_global(),
+        "Packet should be sealed, not global"
+    );
+    assert!(
+        sealed_packet.recipients().iter().any(|r| **r == peace_did),
+        "Peace should be a recipient"
+    );
+
+    // Joy receives the packet (as a relay - she can't decrypt it)
+    let is_new = joy.handle_incoming_packet(sealed_packet.clone()).unwrap();
+    assert!(is_new, "Packet should be new to Joy");
+
+    // Verify Joy stored it in her mirror
+    let joy_mirror_head = joy.mirror_head(&love_did);
+    assert_eq!(
+        joy_mirror_head,
+        Some(0),
+        "Joy should have Love's packet in mirror"
+    );
+
+    // Verify Joy indexed it for Peace (the relay index)
+    // Joy can't decrypt it, but she stored it for later relay
+    let packets_for_peace = joy.get_packets_for_recipient(&peace_did).unwrap();
+    assert_eq!(
+        packets_for_peace.len(),
+        1,
+        "Joy should have 1 packet stored for Peace"
+    );
+    assert_eq!(
+        packets_for_peace[0].sender, love_did,
+        "Packet should be from Love"
+    );
+
+    // Now Peace "comes online" and receives the packet
+    // Note: Peace uses her engine but the packet was created with her ProfileKeys
+    // For decryption test, we verify using the keys directly
+    let decrypted = sealed_packet.open(&peace_keys);
+    assert!(
+        decrypted.is_ok(),
+        "Peace should be able to decrypt the sealed packet with her keys: {:?}",
+        decrypted.err()
+    );
+
+    match decrypted.unwrap() {
+        PacketPayload::DirectMessage { content, recipient } => {
+            assert_eq!(
+                content,
+                "Hello Peace! This is Love reaching out through the field."
+            );
+            assert_eq!(recipient, peace_did);
+        }
+        _ => panic!("Expected DirectMessage payload"),
+    }
+
+    // After successful delivery, Joy marks the packet as delivered
+    // This removes it from the relay index
+    joy.mark_packet_delivered(&peace_did, &sealed_packet.hash())
+        .unwrap();
+
+    // Verify Joy's relay index is now empty for Peace
+    let packets_after_delivery = joy.get_packets_for_recipient(&peace_did).unwrap();
+    assert_eq!(
+        packets_after_delivery.len(),
+        0,
+        "Joy should have no more packets for Peace after delivery"
+    );
+
+    // But Joy still has the packet in her mirror (for redundancy/sync)
+    assert_eq!(
+        joy.mirror_head(&love_did),
+        Some(0),
+        "Joy's mirror should still contain Love's packet"
+    );
+}
+
+/// Helper to create a multi-recipient sealed packet
+fn create_multi_recipient_packet(
+    sender_keys: &ProfileKeys,
+    recipient_keys: &[&ProfileKeys],
+    sequence: u64,
+    prev_hash: [u8; 32],
+    content: &str,
+) -> syncengine_core::profile::PacketEnvelope {
+    let primary_recipient = recipient_keys[0].did();
+    let payload = PacketPayload::DirectMessage {
+        content: content.to_string(),
+        recipient: primary_recipient,
+    };
+    let bundles: Vec<_> = recipient_keys.iter().map(|k| k.public_bundle()).collect();
+    syncengine_core::profile::PacketEnvelope::create(
+        sender_keys,
+        &payload,
+        &bundles,
+        sequence,
+        prev_hash,
+    )
+    .expect("Should create envelope")
+}
+
+/// Test relay storage with multiple recipients.
+///
+/// When a packet is addressed to multiple recipients, the relay node
+/// should store it in the index for each recipient.
+#[tokio::test]
+async fn test_relay_multiple_recipients() {
+    let relay_dir = tempdir().unwrap();
+
+    // Create keys directly (bypassing contact exchange for test)
+    let sender_keys = ProfileKeys::generate();
+    let sender_did = sender_keys.did();
+
+    let alice_keys = ProfileKeys::generate();
+    let alice_did = alice_keys.did();
+
+    let bob_keys = ProfileKeys::generate();
+    let bob_did = bob_keys.did();
+
+    // Setup relay node
+    let mut relay = SyncEngine::new(relay_dir.path()).await.unwrap();
+    relay.init_identity().unwrap();
+    relay.init_profile_keys().unwrap();
+
+    // Sender creates a packet addressed to BOTH Alice and Bob
+    let packet = create_multi_recipient_packet(
+        &sender_keys,
+        &[&alice_keys, &bob_keys],
+        0,
+        [0u8; 32],
+        "Group message to Alice and Bob",
+    );
+
+    // Relay receives the packet
+    relay.handle_incoming_packet(packet.clone()).unwrap();
+
+    // Relay should have indexed it for BOTH recipients
+    let packets_for_alice = relay.get_packets_for_recipient(&alice_did).unwrap();
+    let packets_for_bob = relay.get_packets_for_recipient(&bob_did).unwrap();
+
+    assert_eq!(
+        packets_for_alice.len(),
+        1,
+        "Relay should have 1 packet for Alice"
+    );
+    assert_eq!(
+        packets_for_bob.len(),
+        1,
+        "Relay should have 1 packet for Bob"
+    );
+
+    // Mark delivered for Alice only
+    relay
+        .mark_packet_delivered(&alice_did, &packet.hash())
+        .unwrap();
+
+    // Alice's index should be empty, Bob's should still have the packet
+    let packets_after_alice = relay.get_packets_for_recipient(&alice_did).unwrap();
+    let packets_after_alice_bob = relay.get_packets_for_recipient(&bob_did).unwrap();
+
+    assert_eq!(
+        packets_after_alice.len(),
+        0,
+        "Alice's relay should be cleared"
+    );
+    assert_eq!(
+        packets_after_alice_bob.len(),
+        1,
+        "Bob's relay should still have packet"
+    );
+
+    // Mark delivered for Bob
+    relay
+        .mark_packet_delivered(&bob_did, &packet.hash())
+        .unwrap();
+
+    let packets_after_both = relay.get_packets_for_recipient(&bob_did).unwrap();
+    assert_eq!(
+        packets_after_both.len(),
+        0,
+        "Bob's relay should be cleared after delivery"
+    );
+
+    // Mirror still contains the packet
+    assert_eq!(relay.mirror_head(&sender_did), Some(0));
+}
+
+/// Test that global packets are NOT indexed for relay.
+///
+/// Global packets are public and don't need store-and-forward relay -
+/// anyone can read them, so there's no specific recipient to relay to.
+#[tokio::test]
+async fn test_global_packets_not_indexed_for_relay() {
+    let sender_dir = tempdir().unwrap();
+    let relay_dir = tempdir().unwrap();
+    let other_dir = tempdir().unwrap();
+
+    let mut sender = SyncEngine::new(sender_dir.path()).await.unwrap();
+    sender.init_identity().unwrap();
+    sender.init_profile_keys().unwrap();
+    let sender_did = sender.profile_did().unwrap().clone();
+
+    let mut relay = SyncEngine::new(relay_dir.path()).await.unwrap();
+    relay.init_identity().unwrap();
+    relay.init_profile_keys().unwrap();
+
+    let mut other = SyncEngine::new(other_dir.path()).await.unwrap();
+    other.init_identity().unwrap();
+    other.init_profile_keys().unwrap();
+    let other_did = other.profile_did().unwrap().clone();
+
+    // Sender creates a GLOBAL heartbeat
+    sender
+        .create_packet(heartbeat(), PacketAddress::Global)
+        .unwrap();
+
+    let packet = sender.my_log().unwrap().entries_ordered()[0]
+        .envelope
+        .clone();
+
+    // Verify it's global
+    assert!(packet.is_global(), "Packet should be global");
+
+    // Relay receives the packet
+    relay.handle_incoming_packet(packet).unwrap();
+
+    // Mirror should contain it
+    assert_eq!(
+        relay.mirror_head(&sender_did),
+        Some(0),
+        "Relay mirror should have the packet"
+    );
+
+    // But relay index should be empty (global packets aren't indexed)
+    let packets_for_other = relay.get_packets_for_recipient(&other_did).unwrap();
+    assert_eq!(
+        packets_for_other.len(),
+        0,
+        "Global packets should not be indexed for relay"
     );
 }

@@ -1,16 +1,17 @@
 #!/bin/bash
 # Launch multiple Synchronicity Engine instances
-# Usage: ./se [--logs] <name1> [name2] [name3] ...
+# Usage: ./se [--no-logs] <name1> [name2] [name3] ...
 #        ./se @<scenario>     # Run a Lua scenario
 #
 # Each instance gets its own data directory and window title.
 # On clean launch (no existing databases), profile names are auto-set.
+# Logs are captured to LOGS.md by default (use --no-logs to disable).
 #
 # Examples:
-#   ./se love           # Single instance named "love"
+#   ./se love           # Single instance (logs to LOGS.md)
 #   ./se love joy       # Two instances side by side
 #   ./se alice bob eve  # Three instances for testing sync
-#   ./se --logs love    # Single instance with logging to LOGS.md
+#   ./se --no-logs love # Single instance without logging
 #   ./se @mesh-3        # Run the mesh-3 scenario (3 nodes in full mesh)
 #   ./se @chaos         # Run the chaos scenario (random failures)
 
@@ -25,7 +26,29 @@ NC='\033[0m'
 # Base data directory (macOS)
 DATA_BASE="${HOME}/Library/Application Support"
 
-# Check for scenario mode (@scenario-name)
+# Default: logging is enabled
+ENABLE_LOGS=true
+
+# Process flags first (before checking for @scenario)
+while [[ "$1" == --* ]]; do
+    case "$1" in
+        --no-logs)
+            ENABLE_LOGS=false
+            shift
+            ;;
+        --logs)
+            # Legacy flag, logs are now on by default
+            ENABLE_LOGS=true
+            shift
+            ;;
+        *)
+            echo "Unknown option: $1"
+            exit 1
+            ;;
+    esac
+done
+
+# Check for scenario mode (@scenario-name) AFTER processing flags
 if [[ "$1" == @* ]]; then
     SCENARIO_NAME="${1:1}"  # Remove @ prefix
     echo -e "${CYAN}Running scenario: ${YELLOW}${SCENARIO_NAME}${NC}"
@@ -54,13 +77,33 @@ if [[ "$1" == @* ]]; then
     exec "$SCENARIO_BIN" "$SCENARIO_NAME" --verbose
 fi
 
-# Check for --logs flag
-ENABLE_LOGS=false
-if [ "$1" == "--logs" ]; then
-    ENABLE_LOGS=true
-    shift # Remove --logs from arguments
+# Show usage if no arguments
+if [ $# -eq 0 ]; then
+    echo "Usage: ./se [--no-logs] <name1> [name2] [name3] ..."
+    echo "       ./se @<scenario>     # Run a Lua scenario"
+    echo ""
+    echo "Options:"
+    echo "  --no-logs           Disable log capture (logs to LOGS.md by default)"
+    echo ""
+    echo "Examples:"
+    echo "  ./se love           # Single instance (with logging)"
+    echo "  ./se love joy       # Two instances"
+    echo "  ./se alice bob eve  # Three instances"
+    echo "  ./se --no-logs love # Without logging"
+    echo ""
+    echo "Scenarios:"
+    echo "  ./se @mesh-3        # 3 nodes in full mesh topology"
+    echo "  ./se @hub-spoke     # Central hub with satellite nodes"
+    echo "  ./se @staggered-join  # Nodes join at different times"
+    echo "  ./se @chaos         # Random node failures for resilience testing"
+    echo ""
+    echo "Each instance gets its own data directory:"
+    echo "  ~/Library/Application Support/instance-<name>/"
+    exit 1
+fi
 
-    # Initialize LOGS.md with better structure
+# Initialize LOGS.md if logging is enabled
+if [ "$ENABLE_LOGS" = true ]; then
     cat > LOGS.md << 'EOF'
 # Synchronicity Engine - Run Logs
 
@@ -74,30 +117,6 @@ EOF
     echo "" >> LOGS.md
     echo "---" >> LOGS.md
     echo "" >> LOGS.md
-fi
-
-if [ $# -eq 0 ]; then
-    echo "Usage: ./se [--logs] <name1> [name2] [name3] ..."
-    echo "       ./se @<scenario>     # Run a Lua scenario"
-    echo ""
-    echo "Options:"
-    echo "  --logs              Capture all logs to LOGS.md"
-    echo ""
-    echo "Examples:"
-    echo "  ./se love           # Single instance"
-    echo "  ./se love joy       # Two instances"
-    echo "  ./se alice bob eve  # Three instances"
-    echo "  ./se --logs love    # With logging enabled"
-    echo ""
-    echo "Scenarios:"
-    echo "  ./se @mesh-3        # 3 nodes in full mesh topology"
-    echo "  ./se @hub-spoke     # Central hub with satellite nodes"
-    echo "  ./se @staggered-join  # Nodes join at different times"
-    echo "  ./se @chaos         # Random node failures for resilience testing"
-    echo ""
-    echo "Each instance gets its own data directory:"
-    echo "  ~/Library/Application Support/instance-<name>/"
-    exit 1
 fi
 
 # Check if any instance needs initialization (for info message)

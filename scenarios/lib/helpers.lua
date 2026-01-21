@@ -115,3 +115,17 @@ function banner(name, description)
     end
     print("╚════════════════════════════════════════════════════════════╝")
 end
+
+-- Return module table for require()
+return {
+    generate_instances = generate_instances,
+    mesh_topology = mesh_topology,
+    hub_spoke_topology = hub_spoke_topology,
+    chain_topology = chain_topology,
+    ring_topology = ring_topology,
+    staggered_launch = staggered_launch,
+    random_sacred_names = random_sacred_names,
+    sacred_instances = sacred_instances,
+    banner = banner,
+    SACRED_NAMES = SACRED_NAMES,
+}

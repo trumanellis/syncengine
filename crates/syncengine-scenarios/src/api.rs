@@ -95,7 +95,9 @@ pub fn create_context_table(
     })?;
     ctx.set("restart", restart_fn)?;
 
-    // ctx.connect(a, b) - Write invite from a, read and send request from b
+    // ctx.connect(a, b) - Connect instance B to instance A's invite
+    // This reads A's .invite file and writes it to B's .connect file
+    // Instance B's bootstrap watcher will detect the .connect file and process it
     let instances_clone = instances.clone();
     let connect_fn = lua.create_function(move |_, (a, b): (String, String)| {
         let instances = instances_clone.clone();
@@ -103,15 +105,29 @@ pub fn create_context_table(
             let rt = tokio::runtime::Handle::current();
             rt.block_on(async {
                 let mgr = instances.read().await;
-
-                // Get bootstrap directory
                 let bootstrap_dir = mgr.bootstrap_dir();
-                std::fs::create_dir_all(&bootstrap_dir)
-                    .map_err(|e| mlua::Error::runtime(e.to_string()))?;
 
-                // For now, just log the connection intent
-                // The actual connection happens through the bootstrap mechanism
-                tracing::info!(from = %a, to = %b, "Connection requested");
+                // Read A's invite file
+                let a_invite_path = bootstrap_dir.join(format!("{}.invite", a.to_lowercase()));
+                let invite_str = std::fs::read_to_string(&a_invite_path)
+                    .map_err(|e| mlua::Error::runtime(format!(
+                        "Cannot read {}.invite: {} (is '{}' running?)", a, e, a
+                    )))?;
+
+                // Write to B's connect file (B's watcher will pick it up)
+                let b_connect_path = bootstrap_dir.join(format!("{}.connect", b.to_lowercase()));
+                std::fs::write(&b_connect_path, &invite_str)
+                    .map_err(|e| mlua::Error::runtime(format!(
+                        "Cannot write {}.connect: {}", b, e
+                    )))?;
+
+                tracing::info!(
+                    from = %a,
+                    to = %b,
+                    invite_path = %a_invite_path.display(),
+                    connect_path = %b_connect_path.display(),
+                    "Wrote connection request to {}.connect", b
+                );
 
                 Ok::<_, mlua::Error>(())
             })
@@ -248,6 +264,155 @@ pub fn create_context_table(
         Ok(result)
     })?;
     ctx.set("instances", list_fn)?;
+
+    // ctx.send_packet(from_node, to_node, content)
+    // Simulates sending a DirectMessage packet from one instance to another
+    // This writes a packet file that can be checked by check_received
+    let instances_clone = instances.clone();
+    let send_packet_fn = lua.create_function(move |_, (from, to, content): (String, String, String)| {
+        let instances = instances_clone.clone();
+
+        tokio::task::block_in_place(|| {
+            let rt = tokio::runtime::Handle::current();
+            rt.block_on(async {
+                let mgr = instances.read().await;
+
+                // Verify from instance exists
+                if !mgr.is_running(&from) {
+                    return Err(mlua::Error::runtime(format!("Instance '{}' not running", from)));
+                }
+
+                // Get data directories
+                let from_data_dir = mgr.get_data_dir(&from)
+                    .ok_or_else(|| mlua::Error::runtime(format!("No data dir for '{}'", from)))?;
+
+                // Create "outbox" directory in sender's data dir
+                let outbox_dir = from_data_dir.join("outbox");
+                std::fs::create_dir_all(&outbox_dir)
+                    .map_err(|e| mlua::Error::runtime(format!("Failed to create outbox dir: {}", e)))?;
+
+                // Write packet file with timestamp to avoid collisions
+                let timestamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_err(|e| mlua::Error::runtime(e.to_string()))?
+                    .as_millis();
+
+                let packet_filename = format!("{}_{}_to_{}.packet", timestamp, from, to);
+                let packet_path = outbox_dir.join(&packet_filename);
+
+                // Write packet data (can be enhanced with actual packet serialization later)
+                let packet_data = format!("FROM: {}\nTO: {}\nTIMESTAMP: {}\nCONTENT: {}", from, to, timestamp, content);
+                std::fs::write(&packet_path, packet_data)
+                    .map_err(|e| mlua::Error::runtime(format!("Failed to write packet: {}", e)))?;
+
+                tracing::info!(
+                    from = %from,
+                    to = %to,
+                    content = %content,
+                    path = %packet_path.display(),
+                    "Packet written to outbox"
+                );
+
+                Ok::<_, mlua::Error>(())
+            })
+        })?;
+
+        tracing::info!(from = %from, to = %to, "send_packet: packet queued for delivery");
+        Ok(())
+    })?;
+    ctx.set("send_packet", send_packet_fn)?;
+
+    // ctx.check_received(node, from_node, content_substring)
+    // Returns true if node has received a packet from from_node containing content_substring
+    let instances_clone = instances.clone();
+    let check_received_fn = lua.create_function(move |_, (node, from, content_substring): (String, String, String)| {
+        let instances = instances_clone.clone();
+
+        tokio::task::block_in_place(|| {
+            let rt = tokio::runtime::Handle::current();
+            rt.block_on(async {
+                let mgr = instances.read().await;
+
+                // Get node's data directory
+                let node_data_dir = mgr.get_data_dir(&node)
+                    .ok_or_else(|| mlua::Error::runtime(format!("No data dir for '{}'", node)))?;
+
+                // Check "inbox" directory (packets forwarded to this node)
+                let inbox_dir = node_data_dir.join("inbox");
+
+                if !inbox_dir.exists() {
+                    tracing::debug!(node = %node, "No inbox directory yet");
+                    return Ok(false);
+                }
+
+                // Search for packets from the specified sender containing the substring
+                let entries = std::fs::read_dir(&inbox_dir)
+                    .map_err(|e| mlua::Error::runtime(format!("Failed to read inbox dir: {}", e)))?;
+
+                for entry in entries {
+                    let entry = entry.map_err(|e| mlua::Error::runtime(e.to_string()))?;
+                    let path = entry.path();
+
+                    // Check if filename indicates it's from the expected sender
+                    if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
+                        // Filename format: "{timestamp}_{from}_to_{to}.packet"
+                        if !filename.contains(&format!("{}_to_", from)) {
+                            continue;
+                        }
+
+                        // Read and check content
+                        match std::fs::read_to_string(&path) {
+                            Ok(content) => {
+                                if content.contains(&content_substring) {
+                                    tracing::info!(
+                                        node = %node,
+                                        from = %from,
+                                        filename = %filename,
+                                        "Found matching packet in inbox"
+                                    );
+                                    return Ok(true);
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!("Failed to read packet {}: {}", filename, e);
+                            }
+                        }
+                    }
+                }
+
+                // Also check outbox of sender (for packets that haven't been relayed yet)
+                let sender_data_dir = mgr.get_data_dir(&from);
+                if let Some(sender_dir) = sender_data_dir {
+                    let outbox_dir = sender_dir.join("outbox");
+                    if outbox_dir.exists() {
+                        if let Ok(entries) = std::fs::read_dir(&outbox_dir) {
+                            for entry in entries.flatten() {
+                                let path = entry.path();
+                                if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
+                                    if filename.contains(&format!("_to_{}", node)) {
+                                        if let Ok(content) = std::fs::read_to_string(&path) {
+                                            if content.contains(&content_substring) {
+                                                tracing::info!(
+                                                    node = %node,
+                                                    from = %from,
+                                                    "Found packet in sender's outbox (pending relay)"
+                                                );
+                                                // Found in outbox but not relayed yet
+                                                return Ok(false);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Ok(false)
+            })
+        })
+    })?;
+    ctx.set("check_received", check_received_fn)?;
 
     Ok(ctx)
 }

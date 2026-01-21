@@ -25,16 +25,16 @@ impl ScenarioRuntime {
         let instances = create_shared_manager()?;
         let scheduler = create_shared_scheduler();
 
-        // Load helper library if it exists
-        let helpers_path = scenarios_dir.join("lib").join("helpers.lua");
-        if helpers_path.exists() {
-            let helpers_code = std::fs::read_to_string(&helpers_path)
-                .context("Failed to read helpers.lua")?;
-            lua.load(&helpers_code)
-                .set_name("helpers.lua")
-                .exec()
-                .context("Failed to execute helpers.lua")?;
-        }
+        // Set up Lua package.path to find modules in scenarios directory
+        // This allows scenarios to use: require("lib.helpers")
+        let scenarios_path = scenarios_dir.to_string_lossy();
+        let package_path_setup = format!(
+            r#"package.path = "{0}/?.lua;{0}/?/init.lua;" .. package.path"#,
+            scenarios_path
+        );
+        lua.load(&package_path_setup)
+            .exec()
+            .context("Failed to set package.path")?;
 
         Ok(Self {
             lua,
