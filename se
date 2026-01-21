@@ -1,6 +1,7 @@
 #!/bin/bash
 # Launch multiple Synchronicity Engine instances
 # Usage: ./se [--logs] <name1> [name2] [name3] ...
+#        ./se @<scenario>     # Run a Lua scenario
 #
 # Each instance gets its own data directory and window title.
 # On clean launch (no existing databases), profile names are auto-set.
@@ -10,6 +11,8 @@
 #   ./se love joy       # Two instances side by side
 #   ./se alice bob eve  # Three instances for testing sync
 #   ./se --logs love    # Single instance with logging to LOGS.md
+#   ./se @mesh-3        # Run the mesh-3 scenario (3 nodes in full mesh)
+#   ./se @chaos         # Run the chaos scenario (random failures)
 
 set -e
 
@@ -21,6 +24,35 @@ NC='\033[0m'
 
 # Base data directory (macOS)
 DATA_BASE="${HOME}/Library/Application Support"
+
+# Check for scenario mode (@scenario-name)
+if [[ "$1" == @* ]]; then
+    SCENARIO_NAME="${1:1}"  # Remove @ prefix
+    echo -e "${CYAN}Running scenario: ${YELLOW}${SCENARIO_NAME}${NC}"
+
+    # Build the scenario runner first
+    echo -e "${CYAN}Building scenario runner...${NC}"
+    cargo build -p syncengine-scenarios --release 2>&1 | grep -E "(Compiling|Finished|error)" || true
+
+    # Also need to build the main desktop binary
+    echo -e "${CYAN}Building Synchronicity Engine...${NC}"
+    cargo build --bin syncengine-desktop --release 2>&1 | grep -E "(Compiling|Finished|error)" || true
+
+    SCENARIO_BIN="./target/release/syncengine-scenario"
+    if [ ! -f "$SCENARIO_BIN" ]; then
+        echo "Scenario runner not found at $SCENARIO_BIN"
+        echo "Trying debug build..."
+        SCENARIO_BIN="./target/debug/syncengine-scenario"
+    fi
+
+    if [ ! -f "$SCENARIO_BIN" ]; then
+        echo -e "${YELLOW}Error: Could not find scenario runner binary${NC}"
+        exit 1
+    fi
+
+    # Run the scenario
+    exec "$SCENARIO_BIN" "$SCENARIO_NAME" --verbose
+fi
 
 # Check for --logs flag
 ENABLE_LOGS=false
@@ -46,6 +78,7 @@ fi
 
 if [ $# -eq 0 ]; then
     echo "Usage: ./se [--logs] <name1> [name2] [name3] ..."
+    echo "       ./se @<scenario>     # Run a Lua scenario"
     echo ""
     echo "Options:"
     echo "  --logs              Capture all logs to LOGS.md"
@@ -55,6 +88,12 @@ if [ $# -eq 0 ]; then
     echo "  ./se love joy       # Two instances"
     echo "  ./se alice bob eve  # Three instances"
     echo "  ./se --logs love    # With logging enabled"
+    echo ""
+    echo "Scenarios:"
+    echo "  ./se @mesh-3        # 3 nodes in full mesh topology"
+    echo "  ./se @hub-spoke     # Central hub with satellite nodes"
+    echo "  ./se @staggered-join  # Nodes join at different times"
+    echo "  ./se @chaos         # Random node failures for resilience testing"
     echo ""
     echo "Each instance gets its own data directory:"
     echo "  ~/Library/Application Support/instance-<name>/"

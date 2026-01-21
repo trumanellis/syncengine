@@ -1,0 +1,29 @@
+[package]
+name = "syncengine-scenarios"
+version = "0.1.0"
+edition = "2021"
+description = "Lua-based scenario runner for SyncEngine testing"
+
+[[bin]]
+name = "syncengine-scenario"
+path = "src/main.rs"
+
+[dependencies]
+# Lua runtime
+mlua.workspace = true
+
+# Async runtime
+tokio.workspace = true
+
+# CLI
+clap.workspace = true
+
+# Utilities
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+rand.workspace = true
+dirs.workspace = true
+
+# For process management
+nix.workspace = true
