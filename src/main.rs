@@ -208,7 +208,8 @@ fn main() {
             window_width,
             window_height,
         ))
-        .with_resizable(true);
+        .with_resizable(true)
+        .with_focused(true); // Ensure window comes to front when launched
 
     // Set position if specified (y=25 accounts for menu bar)
     if args.position.is_some() {

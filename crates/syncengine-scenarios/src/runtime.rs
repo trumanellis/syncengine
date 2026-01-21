@@ -87,6 +87,9 @@ impl ScenarioRuntime {
 
             // Handle instances array if present
             if let Ok(instances_table) = config.get::<Table>("instances") {
+                // Calculate total expected instances for proper window tiling
+                let total_expected = Some(all_instance_names.len() as u8);
+
                 for pair in instances_table.pairs::<i32, Table>() {
                     if let Ok((_, instance)) = pair {
                         let inst_name: String =
@@ -108,14 +111,16 @@ impl ScenarioRuntime {
                             None
                         };
 
-                        // Launch instance with auto-connect
+                        // Launch instance with auto-connect and expected total for tiling
                         let instances_clone = instances.clone();
-                        let rt = tokio::runtime::Handle::current();
-                        rt.block_on(async {
-                            let mut mgr = instances_clone.write().await;
-                            if let Err(e) = mgr.launch_with_connect(&inst_name, &profile, connect_peers) {
-                                tracing::error!(name = %inst_name, error = %e, "Failed to launch");
-                            }
+                        tokio::task::block_in_place(|| {
+                            let rt = tokio::runtime::Handle::current();
+                            rt.block_on(async {
+                                let mut mgr = instances_clone.write().await;
+                                if let Err(e) = mgr.launch_with_connect(&inst_name, &profile, connect_peers, total_expected) {
+                                    tracing::error!(name = %inst_name, error = %e, "Failed to launch");
+                                }
+                            });
                         });
 
                         // Small delay between launches

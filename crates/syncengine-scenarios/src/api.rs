@@ -19,7 +19,10 @@ pub fn create_context_table(
     let ctx = lua.create_table()?;
 
     // ctx.launch(name, opts)
-    // opts can include: profile (string), connect_to (array of instance names)
+    // opts can include:
+    //   - profile (string): Profile name for the instance
+    //   - connect_to (array): List of instance names to auto-connect to
+    //   - total (number): Expected total instance count for proper window tiling
     let instances_clone = instances.clone();
     let launch_fn = lua.create_function(move |_lua, args: (String, Option<Table>)| {
         let (name, opts) = args;
@@ -34,15 +37,21 @@ pub fn create_context_table(
             t.get::<Vec<String>>("connect_to").ok()
         });
 
+        // Get expected total for proper window tiling (for dynamic scenarios)
+        let total_expected: Option<u8> = opts.as_ref().and_then(|t| {
+            t.get::<u8>("total").ok()
+        });
+
         let instances = instances_clone.clone();
 
-        // We need to use blocking because mlua async is tricky
-        let rt = tokio::runtime::Handle::current();
-        rt.block_on(async {
-            let mut mgr = instances.write().await;
-            mgr.launch_with_connect(&name, &profile, connect_peers.clone())
-                .map_err(|e| mlua::Error::runtime(e.to_string()))?;
-            Ok::<_, mlua::Error>(())
+        // Use block_in_place to safely block from within async context
+        tokio::task::block_in_place(|| {
+            let rt = tokio::runtime::Handle::current();
+            rt.block_on(async {
+                let mut mgr = instances.write().await;
+                mgr.launch_with_connect(&name, &profile, connect_peers.clone(), total_expected)
+                    .map_err(|e| mlua::Error::runtime(e.to_string()))
+            })
         })?;
 
         if let Some(ref peers) = connect_peers {
@@ -58,12 +67,13 @@ pub fn create_context_table(
     let instances_clone = instances.clone();
     let kill_fn = lua.create_function(move |_, name: String| {
         let instances = instances_clone.clone();
-        let rt = tokio::runtime::Handle::current();
-        rt.block_on(async {
-            let mut mgr = instances.write().await;
-            mgr.kill(&name)
-                .map_err(|e| mlua::Error::runtime(e.to_string()))?;
-            Ok::<_, mlua::Error>(())
+        tokio::task::block_in_place(|| {
+            let rt = tokio::runtime::Handle::current();
+            rt.block_on(async {
+                let mut mgr = instances.write().await;
+                mgr.kill(&name)
+                    .map_err(|e| mlua::Error::runtime(e.to_string()))
+            })
         })?;
         Ok(())
     })?;
@@ -73,12 +83,13 @@ pub fn create_context_table(
     let instances_clone = instances.clone();
     let restart_fn = lua.create_function(move |_, name: String| {
         let instances = instances_clone.clone();
-        let rt = tokio::runtime::Handle::current();
-        rt.block_on(async {
-            let mut mgr = instances.write().await;
-            mgr.restart(&name)
-                .map_err(|e| mlua::Error::runtime(e.to_string()))?;
-            Ok::<_, mlua::Error>(())
+        tokio::task::block_in_place(|| {
+            let rt = tokio::runtime::Handle::current();
+            rt.block_on(async {
+                let mut mgr = instances.write().await;
+                mgr.restart(&name)
+                    .map_err(|e| mlua::Error::runtime(e.to_string()))
+            })
         })?;
         Ok(())
     })?;
@@ -88,20 +99,22 @@ pub fn create_context_table(
     let instances_clone = instances.clone();
     let connect_fn = lua.create_function(move |_, (a, b): (String, String)| {
         let instances = instances_clone.clone();
-        let rt = tokio::runtime::Handle::current();
-        rt.block_on(async {
-            let mgr = instances.read().await;
+        tokio::task::block_in_place(|| {
+            let rt = tokio::runtime::Handle::current();
+            rt.block_on(async {
+                let mgr = instances.read().await;
 
-            // Get bootstrap directory
-            let bootstrap_dir = mgr.bootstrap_dir();
-            std::fs::create_dir_all(&bootstrap_dir)
-                .map_err(|e| mlua::Error::runtime(e.to_string()))?;
+                // Get bootstrap directory
+                let bootstrap_dir = mgr.bootstrap_dir();
+                std::fs::create_dir_all(&bootstrap_dir)
+                    .map_err(|e| mlua::Error::runtime(e.to_string()))?;
 
-            // For now, just log the connection intent
-            // The actual connection happens through the bootstrap mechanism
-            tracing::info!(from = %a, to = %b, "Connection requested");
+                // For now, just log the connection intent
+                // The actual connection happens through the bootstrap mechanism
+                tracing::info!(from = %a, to = %b, "Connection requested");
 
-            Ok::<_, mlua::Error>(())
+                Ok::<_, mlua::Error>(())
+            })
         })?;
         Ok(())
     })?;
@@ -124,16 +137,18 @@ pub fn create_context_table(
     let instances_clone = instances.clone();
     let connect_to_all_fn = lua.create_function(move |_, name: String| {
         let instances = instances_clone.clone();
-        let rt = tokio::runtime::Handle::current();
-        rt.block_on(async {
-            let mgr = instances.read().await;
-            let all_instances = mgr.list_instances();
-            for other in all_instances {
-                if other != name {
-                    tracing::info!(from = %name, to = %other, "Connect to all");
+        tokio::task::block_in_place(|| {
+            let rt = tokio::runtime::Handle::current();
+            rt.block_on(async {
+                let mgr = instances.read().await;
+                let all_instances = mgr.list_instances();
+                for other in all_instances {
+                    if other != name {
+                        tracing::info!(from = %name, to = %other, "Connect to all");
+                    }
                 }
-            }
-            Ok::<_, mlua::Error>(())
+                Ok::<_, mlua::Error>(())
+            })
         })?;
         Ok(())
     })?;
@@ -148,10 +163,12 @@ pub fn create_context_table(
         // Store callback in registry so it survives
         let key = lua.create_registry_value(callback)?;
 
-        let rt = tokio::runtime::Handle::current();
-        rt.block_on(async {
-            let mut sched = scheduler.write().await;
-            sched.schedule_after(delay, key);
+        tokio::task::block_in_place(|| {
+            let rt = tokio::runtime::Handle::current();
+            rt.block_on(async {
+                let mut sched = scheduler.write().await;
+                sched.schedule_after(delay, key);
+            });
         });
 
         tracing::debug!(seconds = seconds, "Scheduled after callback");
@@ -167,10 +184,12 @@ pub fn create_context_table(
 
         let key = lua.create_registry_value(callback)?;
 
-        let rt = tokio::runtime::Handle::current();
-        rt.block_on(async {
-            let mut sched = scheduler.write().await;
-            sched.schedule_every(interval, key);
+        tokio::task::block_in_place(|| {
+            let rt = tokio::runtime::Handle::current();
+            rt.block_on(async {
+                let mut sched = scheduler.write().await;
+                sched.schedule_every(interval, key);
+            });
         });
 
         tracing::debug!(seconds = seconds, "Scheduled every callback");
@@ -190,10 +209,12 @@ pub fn create_context_table(
     let instances_clone = instances.clone();
     let random_instance_fn = lua.create_function(move |_, ()| {
         let instances = instances_clone.clone();
-        let rt = tokio::runtime::Handle::current();
-        let result = rt.block_on(async {
-            let mgr = instances.read().await;
-            mgr.random_instance()
+        let result = tokio::task::block_in_place(|| {
+            let rt = tokio::runtime::Handle::current();
+            rt.block_on(async {
+                let mgr = instances.read().await;
+                mgr.random_instance()
+            })
         });
         Ok(result)
     })?;
@@ -217,10 +238,12 @@ pub fn create_context_table(
     let instances_clone = instances.clone();
     let list_fn = lua.create_function(move |_, ()| {
         let instances = instances_clone.clone();
-        let rt = tokio::runtime::Handle::current();
-        let result = rt.block_on(async {
-            let mgr = instances.read().await;
-            mgr.list_instances()
+        let result = tokio::task::block_in_place(|| {
+            let rt = tokio::runtime::Handle::current();
+            rt.block_on(async {
+                let mgr = instances.read().await;
+                mgr.list_instances()
+            })
         });
         Ok(result)
     })?;

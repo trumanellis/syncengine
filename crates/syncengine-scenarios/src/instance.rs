@@ -90,15 +90,24 @@ impl InstanceManager {
 
     /// Launch a new instance with auto-connect support
     pub fn launch(&mut self, name: &str, profile: &str) -> Result<()> {
-        self.launch_with_connect(name, profile, None)
+        self.launch_with_connect(name, profile, None, None)
     }
 
-    /// Launch a new instance with optional auto-connect peers
+    /// Launch a new instance with optional auto-connect peers and expected total
+    ///
+    /// # Arguments
+    /// * `name` - Instance name
+    /// * `profile` - Profile name for the instance
+    /// * `connect_peers` - Optional list of peer names to auto-connect to
+    /// * `total_expected` - Optional expected total instance count for proper window tiling.
+    ///   When provided (e.g., from declarative scenarios), enables correct tiling from the start.
+    ///   When None, falls back to dynamic calculation based on currently launched instances.
     pub fn launch_with_connect(
         &mut self,
         name: &str,
         profile: &str,
         connect_peers: Option<Vec<String>>,
+        total_expected: Option<u8>,
     ) -> Result<()> {
         if self.instances.contains_key(name) {
             anyhow::bail!("Instance '{}' already exists", name);
@@ -109,7 +118,8 @@ impl InstanceManager {
 
         let position = self.next_position;
         self.next_position += 1;
-        let total = self.instances.len() as u8 + 1;
+        // Use expected total if provided, otherwise fall back to dynamic calculation
+        let total = total_expected.unwrap_or(self.instances.len() as u8 + 1);
 
         // Convert numeric position to string format expected by the binary
         let position_str = match (position, total) {
