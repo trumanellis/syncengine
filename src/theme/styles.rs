@@ -57,6 +57,12 @@ pub const GLOBAL_STYLES: &str = r#"
   --space-6: 24px;
   --space-8: 32px;
 
+  /* Header Layout */
+  --header-padding-y: 1rem;
+  --header-padding-x: 3rem;
+  --header-margin-bottom: 1.5rem;
+  --page-content-top-padding: 1.5rem;
+
   /* Transitions (simplified: 2 speeds) */
   --transition-fast: 150ms ease;
   --transition-normal: 200ms ease;
@@ -718,7 +724,7 @@ body {
 .app-shell {
   min-height: 100vh;
   background: var(--void-black);
-  padding: 2rem;
+  padding: 0;
   position: relative;
 }
 
@@ -1480,7 +1486,7 @@ body {
 /* === Responsive Layout for Narrow Windows === */
 @media (max-width: 900px) {
   .app-shell {
-    padding: 1rem;
+    padding: 0;
   }
 
   .realm-sidebar {
@@ -1794,6 +1800,350 @@ body {
   grid-column: 1 / -1; /* Span full width in grid */
 }
 
+/* === Vertical Artifact Card === */
+/* Portrait card with 1:1.618 golden ratio, image background with overlay content */
+.vertical-artifact-card {
+  position: relative;
+  aspect-ratio: 1 / 1.618;
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--void-deep);
+  border: 1px solid rgba(212, 175, 55, 0.2);
+  transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.vertical-artifact-card.interactive {
+  cursor: pointer;
+}
+
+.vertical-artifact-card.interactive:hover {
+  transform: translateY(-4px);
+  border-color: rgba(212, 175, 55, 0.5);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4), 0 0 20px rgba(212, 175, 55, 0.1);
+}
+
+.vertical-artifact-card--completed {
+  border-color: rgba(124, 184, 124, 0.4);
+}
+
+/* Background image layer */
+.artifact-card__background {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+}
+
+.artifact-card__image {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  opacity: 0.7;
+  transition: opacity 0.2s ease, transform 0.3s ease;
+}
+
+.vertical-artifact-card:hover .artifact-card__image {
+  opacity: 0.85;
+  transform: scale(1.02);
+}
+
+/* Content overlay */
+.artifact-card__overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
+  padding: 1rem;
+  background: linear-gradient(
+    to bottom,
+    rgba(10, 10, 10, 0.8) 0%,
+    rgba(10, 10, 10, 0.6) 40%,
+    rgba(10, 10, 10, 0.3) 100%
+  );
+}
+
+/* Header section at top */
+.artifact-card__header {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.artifact-card__title {
+  font-family: var(--font-serif);
+  font-size: 1.125rem;
+  font-weight: 600;
+  color: var(--gold);
+  margin: 0;
+  text-shadow: 0 2px 4px rgba(0, 0, 0, 0.8);
+  line-height: 1.3;
+}
+
+.artifact-card__subtitle {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: rgba(124, 184, 124, 0.9);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
+}
+
+/* Content section below header */
+.artifact-card__content {
+  margin-top: 0.5rem;
+  flex: 1;
+  overflow: hidden;
+}
+
+.artifact-card__content .card-markdown {
+  font-size: 0.8rem;
+  line-height: 1.5;
+  color: rgba(255, 255, 255, 0.9);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
+}
+
+.artifact-card__content .card-markdown p {
+  margin: 0 0 0.5rem 0;
+}
+
+.artifact-card__content .card-markdown p:last-child {
+  margin-bottom: 0;
+}
+
+/* Mini peer avatars at bottom */
+.artifact-card__peers {
+  display: flex;
+  align-items: center;
+  margin-top: auto;
+  padding-top: 0.5rem;
+}
+
+.artifact-card__peer-avatar {
+  width: 1.25rem;
+  height: 1.25rem;
+  border-radius: 50%;
+  background: linear-gradient(135deg, rgba(212, 175, 55, 0.8), rgba(212, 175, 55, 0.5));
+  border: 1px solid rgba(10, 10, 10, 0.8);
+  color: var(--void-deep);
+  font-family: var(--font-mono);
+  font-size: 0.6rem;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-right: -0.375rem;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+}
+
+.artifact-card__peer-more {
+  margin-left: 0.5rem;
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  color: rgba(255, 255, 255, 0.7);
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
+}
+
+/* Completion badge */
+.artifact-card__badge {
+  position: absolute;
+  top: 0.75rem;
+  right: 0.75rem;
+  width: 1.75rem;
+  height: 1.75rem;
+  border-radius: 50%;
+  background: rgba(124, 184, 124, 0.9);
+  color: var(--void-deep);
+  font-size: 1rem;
+  font-weight: bold;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+}
+
+/* Grid for vertical artifact cards */
+.vertical-artifact-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(200px, 100%), 1fr));
+  gap: 1rem;
+  padding: 1rem 0;
+}
+
+@media (min-width: 768px) {
+  .vertical-artifact-grid {
+    gap: 1.5rem;
+  }
+}
+
+@media (max-width: 480px) {
+  .vertical-artifact-card {
+    aspect-ratio: 1 / 1.4; /* Slightly shorter on very small screens */
+  }
+
+  .artifact-card__title {
+    font-size: 1rem;
+  }
+
+  .artifact-card__content .card-markdown {
+    font-size: 0.75rem;
+  }
+}
+
+/* Artifact card wrapper with delete button */
+.artifact-card-wrapper {
+  position: relative;
+  transition: transform 0.2s ease-in-out;
+}
+
+.artifact-card-wrapper:hover {
+  transform: translateY(-2px);
+}
+
+.artifact-card-delete {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.5rem;
+  width: 2rem;
+  height: 2rem;
+  border-radius: 50%;
+  background: rgba(10, 10, 10, 0.7);
+  border: 1px solid var(--gold);
+  color: var(--gold);
+  font-size: 1.5rem;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.2s ease-in-out, background 0.2s ease-in-out;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10;
+}
+
+.artifact-card-wrapper:hover .artifact-card-delete {
+  opacity: 1;
+}
+
+.artifact-card-delete:hover {
+  background: rgba(212, 175, 55, 0.2);
+  border-color: var(--gold-bright);
+  color: var(--gold-bright);
+}
+
+.artifact-card-delete:active {
+  transform: scale(0.95);
+}
+
+/* === Quest Card Modal === */
+.quest-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.85);
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  animation: fadeIn 0.2s ease-out;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.quest-modal-content {
+  position: relative;
+  width: 100%;
+  max-width: 900px;
+  max-height: 90vh;
+  overflow-y: auto;
+  animation: slideUp 0.2s ease-out;
+}
+
+@keyframes slideUp {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.quest-modal-close {
+  position: absolute;
+  top: -2.5rem;
+  right: 0;
+  width: 2rem;
+  height: 2rem;
+  border-radius: 50%;
+  background: rgba(10, 10, 10, 0.8);
+  border: 1px solid var(--gold);
+  color: var(--gold);
+  font-size: 1.5rem;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.2s ease, border-color 0.2s ease;
+  z-index: 10;
+}
+
+.quest-modal-close:hover {
+  background: rgba(212, 175, 55, 0.2);
+  border-color: var(--gold-bright);
+}
+
+.quest-modal-card {
+  width: 100%;
+}
+
+.quest-modal-card .golden-card {
+  width: 100%;
+  max-width: none;
+  aspect-ratio: auto;
+  height: auto;
+}
+
+.quest-modal-card .golden-card--landscape {
+  aspect-ratio: auto;
+}
+
+.quest-modal-card .golden-card__interior {
+  display: flex;
+  flex-direction: row;
+}
+
+.quest-modal-card .card-image-area {
+  width: 38.2%;
+  flex-shrink: 0;
+  min-height: 300px;
+}
+
+.quest-modal-card .card-content {
+  flex: 1;
+  padding: 1.5rem;
+}
+
+@media (max-width: 768px) {
+  .quest-modal-content {
+    max-width: 100%;
+  }
+
+  .quest-modal-card .golden-card__interior {
+    flex-direction: column;
+  }
+
+  .quest-modal-card .card-image-area {
+    width: 100%;
+    min-height: 200px;
+  }
+}
+
 /* === Create Realm Section === */
 .create-realm-section {
   margin-top: 3rem;
@@ -1899,7 +2249,7 @@ body {
   display: flex;
   flex-direction: column;
   align-items: center;
-  padding: 2rem;
+  padding: var(--page-content-top-padding) 2rem 2rem 2rem;
   width: 100%;
   flex: 1;
 }
@@ -2201,7 +2551,7 @@ body {
 
 @media (max-width: 700px) {
   .profile-page {
-    padding: 1rem;
+    padding: 0;
   }
 
   .stats-grid {
@@ -4381,7 +4731,7 @@ body {
 .profile-page {
   min-height: 100vh;
   background: var(--void-black);
-  padding: 1.5rem;
+  padding: 0;
   position: relative;
 }
 
@@ -5217,6 +5567,7 @@ body {
 .network-content {
   max-width: 1000px;
   margin: 0 auto;
+  padding-top: var(--page-content-top-padding);
 }
 
 /* === Stats Cards === */
@@ -5727,7 +6078,7 @@ body {
 /* === Responsive === */
 @media (max-width: 700px) {
   .network-page {
-    padding: 1rem;
+    padding: 0;
   }
 
   .network-stats {
@@ -5973,7 +6324,7 @@ body {
 .nav-header {
   position: relative;
   width: 100%;
-  margin-bottom: var(--space-6);
+  margin-bottom: var(--header-margin-bottom);
   background: var(--void-black);
   border-bottom: 1px solid var(--void-border);
 }
@@ -6075,7 +6426,7 @@ body {
   grid-template-columns: 1fr auto 1fr;
   align-items: center;
   gap: 2rem;
-  padding: 1.5rem 3rem;
+  padding: var(--header-padding-y) var(--header-padding-x);
   max-width: 1600px;
   margin: 0 auto;
 }
@@ -6745,9 +7096,9 @@ body {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 0 3rem 1.5rem 3rem;
+  padding: 0 var(--header-padding-x) var(--page-content-top-padding) var(--header-padding-x);
   max-width: 1600px;
-  margin: -1.5rem auto 2rem auto;
+  margin: 0 auto;
 }
 
 .action-btn {
@@ -6784,13 +7135,13 @@ body {
 
 @media (max-width: 1024px) {
   .field-actions-bar {
-    padding: 0 2rem 1.5rem 2rem;
+    padding: 0 2rem var(--space-4) 2rem;
   }
 }
 
 @media (max-width: 640px) {
   .field-actions-bar {
-    padding: 0 1.5rem 1rem 1.5rem;
+    padding: 0 1.5rem var(--space-3) 1.5rem;
     flex-direction: column;
     gap: 1rem;
     align-items: stretch;

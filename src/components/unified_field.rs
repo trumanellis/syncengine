@@ -11,7 +11,7 @@
 
 use dioxus::prelude::*;
 use syncengine_core::{RealmId, RealmInfo, Task, TaskId};
-use crate::components::cards::QuestCard;
+use crate::components::cards::{QuestCard, VerticalArtifactCard};
 use crate::components::{IntentionCreator, IntentionData};
 
 /// Props for the UnifiedFieldView component
@@ -190,6 +190,9 @@ fn RealmSection(props: RealmSectionProps) -> Element {
     // Intention creator visibility
     let mut show_creator = use_signal(|| false);
 
+    // Selected task for modal display
+    let mut selected_task: Signal<Option<Task>> = use_signal(|| None);
+
     let on_create_intention = move |data: IntentionData| {
         props.on_add_task.call(data);
         show_creator.set(false);
@@ -258,8 +261,8 @@ fn RealmSection(props: RealmSectionProps) -> Element {
                         on_cancel: on_cancel_creator,
                     }
 
-                    // Quest card grid
-                    div { class: "realm-quest-grid",
+                    // Vertical artifact card grid
+                    div { class: "vertical-artifact-grid",
                         if props.tasks.is_empty() {
                             p { class: "empty-task-state",
                                 "No intentions yet in this realm."
@@ -268,26 +271,31 @@ fn RealmSection(props: RealmSectionProps) -> Element {
                             for task in props.tasks.iter() {
                                 {
                                     let task_id_key = task.id.to_string();
-                                    let task_id_for_toggle = task.id.clone();
+                                    let task_for_modal = task.clone();
                                     let task_id_for_delete = task.id.clone();
-                                    let task_for_card = task.clone();
 
                                     rsx! {
                                         div {
                                             key: "{task_id_key}",
-                                            class: "quest-card-wrapper",
+                                            class: "artifact-card-wrapper",
 
-                                            QuestCard {
-                                                quest: task_for_card,
+                                            VerticalArtifactCard {
+                                                id: task.id.to_string(),
+                                                title: task.title.clone(),
+                                                subtitle: task.subtitle.clone(),
+                                                description: task.description.clone(),
+                                                image_blob_id: task.image_blob_id.clone(),
+                                                completed: task.completed,
+                                                involved_peers: task.involved_peers.clone(),
                                                 on_click: move |_| {
-                                                    // Toggle task on card click
-                                                    props.on_toggle_task.call(task_id_for_toggle.clone());
+                                                    // Show modal with full quest card
+                                                    selected_task.set(Some(task_for_modal.clone()));
                                                 }
                                             }
 
                                             // Delete button overlay
                                             button {
-                                                class: "quest-card-delete",
+                                                class: "artifact-card-delete",
                                                 onclick: move |e| {
                                                     e.stop_propagation();
                                                     props.on_delete_task.call(task_id_for_delete.clone());
@@ -296,6 +304,50 @@ fn RealmSection(props: RealmSectionProps) -> Element {
                                                 "aria-label": "Dissolve intention",
                                                 "\u{00D7}" // ×
                                             }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Quest card modal
+            if let Some(task) = selected_task() {
+                {
+                    let task_id_for_toggle = task.id.clone();
+                    rsx! {
+                        div {
+                            class: "quest-modal-overlay",
+                            tabindex: "0",
+                            autofocus: true,
+                            onclick: move |_| selected_task.set(None),
+                            onkeydown: move |e| {
+                                if e.key() == Key::Escape {
+                                    selected_task.set(None);
+                                }
+                            },
+
+                            div {
+                                class: "quest-modal-content",
+                                onclick: move |e| e.stop_propagation(),
+
+                                // Close button
+                                button {
+                                    class: "quest-modal-close",
+                                    onclick: move |_| selected_task.set(None),
+                                    title: "Close (Esc)",
+                                    "\u{00D7}"
+                                }
+
+                                // Full-width horizontal quest card
+                                div { class: "quest-modal-card",
+                                    QuestCard {
+                                        quest: task.clone(),
+                                        on_click: move |_| {
+                                            // Close modal when clicking the card/image
+                                            selected_task.set(None);
                                         }
                                     }
                                 }
