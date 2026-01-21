@@ -240,6 +240,8 @@ impl InstanceManager {
             .arg(&position_str)
             .arg("--total-windows")
             .arg(total.to_string())
+            .arg("--init-profile-name")
+            .arg(&profile)
             .env("SYNCENGINE_DATA_DIR", &data_dir)
             .stdout(Stdio::null())
             .stderr(Stdio::null());
