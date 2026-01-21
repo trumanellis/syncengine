@@ -1716,50 +1716,26 @@ body {
 }
 
 /* === Quest Card Grid === */
+/* Linear scaling: 1 column on narrow mobile, more columns as width increases */
 .realm-quest-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(min(300px, 100%), 1fr));
-  gap: 1.5rem;
+  grid-template-columns: repeat(auto-fill, minmax(min(280px, 100%), 1fr));
+  gap: 1rem;
   padding: 1rem 0;
   margin-left: 0.5rem;
 }
 
-/* Responsive breakpoints for quest cards */
-/* Wide screens: Show 3 columns */
-@media (min-width: 1400px) {
+/* Slightly larger gap on wider screens */
+@media (min-width: 768px) {
   .realm-quest-grid {
-    grid-template-columns: repeat(3, 1fr);
-    gap: 2rem;
-  }
-}
-
-/* Large screens: Show 2 columns */
-@media (min-width: 1025px) and (max-width: 1399px) {
-  .realm-quest-grid {
-    grid-template-columns: repeat(2, 1fr);
     gap: 1.5rem;
-  }
-}
-
-@media (max-width: 1024px) {
-  .realm-quest-grid {
-    grid-template-columns: repeat(auto-fill, minmax(min(280px, 100%), 1fr));
-    gap: 1rem;
   }
 }
 
 @media (max-width: 768px) {
   .realm-quest-grid {
-    grid-template-columns: 1fr;
-    gap: 1rem;
     margin-left: 0;
     padding: 0.5rem 0;
-  }
-}
-
-@media (max-width: 500px) {
-  .realm-quest-grid {
-    gap: 0.75rem;
   }
 }
 
@@ -2456,17 +2432,15 @@ body {
 .card-content {
   display: flex;
   flex-direction: column;
-  padding: var(--spacing-phi-lg);
-  gap: 0.5rem;
+  padding: var(--spacing-phi-md);
+  gap: 0.375rem;
   overflow: hidden;
   min-height: 0;
 }
 
 /* === Card Header === */
 .card-header {
-  border-bottom: 1px solid rgba(212, 175, 55, 0.2);
-  padding-bottom: 0.375rem;
-  margin-bottom: 0.5rem;
+  margin-bottom: 0.25rem;
 }
 
 .card-header__title {
@@ -2537,7 +2511,7 @@ body {
 
 /* === Gallery === */
 .card-gallery-section {
-  margin: var(--spacing-phi-sm) 0;
+  margin: 0.25rem 0;
 }
 
 .card-gallery__title {
@@ -2970,10 +2944,9 @@ body {
 /* === Card Footer === */
 .card-footer {
   display: flex;
-  gap: var(--spacing-phi-md);
+  gap: var(--spacing-phi-sm);
   flex-wrap: wrap;
-  padding-top: var(--spacing-phi-sm);
-  border-top: 1px solid rgba(212, 175, 55, 0.1);
+  margin-top: 0.25rem;
   font-family: var(--font-mono);
   font-size: 0.75rem;
   color: var(--text-muted);
