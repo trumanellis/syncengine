@@ -14,7 +14,7 @@
 //! ## Message Flow
 //!
 //! ```text
-//! Requester (Bob)               Profile Host (Alice)
+//! Requester (Joy)               Profile Host (Love)
 //!   |                               |
 //!   |--- GetProfile --------------->|
 //!   |                               |

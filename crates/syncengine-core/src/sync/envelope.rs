@@ -39,7 +39,7 @@
 //! // Seal (encrypt and sign)
 //! let envelope = SyncEnvelope::seal(
 //!     &msg,
-//!     "did:example:alice",
+//!     "did:example:love",
 //!     &realm_key,
 //!     |data| sign_with_private_key(data),
 //! )?;
@@ -293,7 +293,7 @@ mod tests {
     fn test_envelope_seal_open_roundtrip() {
         let realm_id = RealmId::new();
         let realm_key = RealmCrypto::generate_key();
-        let sender = "did:example:alice";
+        let sender = "did:example:love";
 
         // Create a test message
         let message = SyncMessage::Changes {
@@ -331,7 +331,7 @@ mod tests {
         let realm_id = RealmId::new();
         let realm_key = RealmCrypto::generate_key();
         let wrong_key = RealmCrypto::generate_key();
-        let sender = "did:example:alice";
+        let sender = "did:example:love";
 
         let message = SyncMessage::Announce {
             realm_id,
@@ -357,7 +357,7 @@ mod tests {
     fn test_envelope_tampered_ciphertext_fails() {
         let realm_id = RealmId::new();
         let realm_key = RealmCrypto::generate_key();
-        let sender = "did:example:alice";
+        let sender = "did:example:love";
 
         let message = SyncMessage::SyncRequest { realm_id };
 
@@ -388,7 +388,7 @@ mod tests {
     fn test_envelope_invalid_signature_fails() {
         let realm_id = RealmId::new();
         let realm_key = RealmCrypto::generate_key();
-        let sender = "did:example:alice";
+        let sender = "did:example:love";
 
         let message = SyncMessage::Announce {
             realm_id,
@@ -414,7 +414,7 @@ mod tests {
     fn test_envelope_serialization() {
         let realm_id = RealmId::new();
         let realm_key = RealmCrypto::generate_key();
-        let sender = "did:example:bob";
+        let sender = "did:example:joy";
 
         let message = SyncMessage::SyncResponse {
             realm_id,
@@ -447,7 +447,7 @@ mod tests {
         // Manually create an envelope with unsupported version
         let envelope = SyncEnvelope {
             version: 99, // Unsupported version
-            sender: "did:example:alice".to_string(),
+            sender: "did:example:love".to_string(),
             ciphertext: vec![1, 2, 3],
             nonce: [0u8; NONCE_SIZE],
             signature: vec![0x51, 0x9E, 1, 2, 3],
@@ -469,7 +469,7 @@ mod tests {
     fn test_envelope_different_nonces() {
         let realm_id = RealmId::new();
         let realm_key = RealmCrypto::generate_key();
-        let sender = "did:example:alice";
+        let sender = "did:example:love";
 
         let message = SyncMessage::Changes {
             realm_id,
@@ -528,13 +528,13 @@ mod tests {
     fn test_envelope_accessors() {
         let envelope = SyncEnvelope {
             version: 1,
-            sender: "did:example:carol".to_string(),
+            sender: "did:example:peace".to_string(),
             ciphertext: vec![],
             nonce: [0u8; NONCE_SIZE],
             signature: vec![],
         };
 
-        assert_eq!(envelope.sender(), "did:example:carol");
+        assert_eq!(envelope.sender(), "did:example:peace");
         assert_eq!(envelope.version(), 1);
     }
 
@@ -542,7 +542,7 @@ mod tests {
     fn test_envelope_empty_message() {
         let realm_id = RealmId::new();
         let realm_key = RealmCrypto::generate_key();
-        let sender = "did:example:alice";
+        let sender = "did:example:love";
 
         // Announce with empty heads
         let message = SyncMessage::Announce {
@@ -566,7 +566,7 @@ mod tests {
     fn test_envelope_large_message() {
         let realm_id = RealmId::new();
         let realm_key = RealmCrypto::generate_key();
-        let sender = "did:example:alice";
+        let sender = "did:example:love";
 
         // Large document (100KB)
         let large_doc: Vec<u8> = (0..100_000).map(|i| (i % 256) as u8).collect();

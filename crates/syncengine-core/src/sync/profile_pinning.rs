@@ -370,9 +370,9 @@ mod tests {
 
     #[test]
     fn test_derive_profile_topic_unique_per_peer() {
-        let alice_topic = derive_profile_topic("did:sync:alice");
-        let bob_topic = derive_profile_topic("did:sync:bob");
-        assert_ne!(alice_topic, bob_topic, "Different DIDs should produce different topics");
+        let love_topic = derive_profile_topic("did:sync:love");
+        let joy_topic = derive_profile_topic("did:sync:joy");
+        assert_ne!(love_topic, joy_topic, "Different DIDs should produce different topics");
     }
 
     #[test]
@@ -384,7 +384,7 @@ mod tests {
 
     #[test]
     fn test_announce_message_serialization() {
-        let signed = create_test_signed_profile("Alice");
+        let signed = create_test_signed_profile("Love");
         let msg = ProfileGossipMessage::announce(signed, Some("ticket123".to_string()));
 
         let bytes = msg.to_bytes().unwrap();
@@ -395,7 +395,7 @@ mod tests {
                 signed_profile,
                 avatar_ticket,
             } => {
-                assert_eq!(signed_profile.profile.display_name, "Alice");
+                assert_eq!(signed_profile.profile.display_name, "Love");
                 assert_eq!(avatar_ticket, Some("ticket123".to_string()));
             }
             _ => panic!("Expected Announce message"),
@@ -423,7 +423,7 @@ mod tests {
 
     #[test]
     fn test_response_message_serialization() {
-        let signed = create_test_signed_profile("Bob");
+        let signed = create_test_signed_profile("Joy");
         let msg =
             ProfileGossipMessage::response(Some(signed), Some("ticket456".to_string()), "did:sync:requester");
 
@@ -439,7 +439,7 @@ mod tests {
                 assert!(signed_profile.is_some());
                 assert_eq!(
                     signed_profile.unwrap().profile.display_name,
-                    "Bob"
+                    "Joy"
                 );
                 assert_eq!(avatar_ticket, Some("ticket456".to_string()));
                 assert_eq!(requester_did, "did:sync:requester");
@@ -450,7 +450,7 @@ mod tests {
 
     #[test]
     fn test_message_relevance() {
-        let signed = create_test_signed_profile("Alice");
+        let signed = create_test_signed_profile("Love");
         let announce = ProfileGossipMessage::announce(signed, None);
         let request = ProfileGossipMessage::request("did:sync:target", "did:sync:other");
         let response = ProfileGossipMessage::response(None, None, "did:sync:me");
@@ -471,7 +471,7 @@ mod tests {
         let mut handler = ProfileMessageHandler::new("did:sync:me");
 
         let keypair = HybridKeypair::generate();
-        let profile = UserProfile::new("peer123".to_string(), "Alice".to_string());
+        let profile = UserProfile::new("peer123".to_string(), "Love".to_string());
         let signed = SignedProfile::sign(&profile, &keypair);
         let peer_did = signed.did().to_string();
 
@@ -483,7 +483,7 @@ mod tests {
 
         match action {
             ProfileAction::UpdatePin { signed_profile, .. } => {
-                assert_eq!(signed_profile.profile.display_name, "Alice");
+                assert_eq!(signed_profile.profile.display_name, "Love");
             }
             _ => panic!("Expected UpdatePin action"),
         }
@@ -505,7 +505,7 @@ mod tests {
         let mut handler = ProfileMessageHandler::new("did:sync:me");
 
         let keypair = HybridKeypair::generate();
-        let profile = UserProfile::new("peer123".to_string(), "Alice".to_string());
+        let profile = UserProfile::new("peer123".to_string(), "Love".to_string());
         let mut signed = SignedProfile::sign(&profile, &keypair);
 
         // Tamper with the profile
@@ -554,13 +554,13 @@ mod tests {
     fn test_handler_processes_response_for_us() {
         let handler = ProfileMessageHandler::new("did:sync:me");
 
-        let signed = create_test_signed_profile("Bob");
+        let signed = create_test_signed_profile("Joy");
         let msg = ProfileGossipMessage::response(Some(signed), None, "did:sync:me");
         let action = handler.process_message(&msg);
 
         match action {
             ProfileAction::PinResponse { signed_profile, .. } => {
-                assert_eq!(signed_profile.profile.display_name, "Bob");
+                assert_eq!(signed_profile.profile.display_name, "Joy");
             }
             _ => panic!("Expected PinResponse action"),
         }
@@ -570,7 +570,7 @@ mod tests {
     fn test_handler_ignores_response_for_others() {
         let handler = ProfileMessageHandler::new("did:sync:me");
 
-        let signed = create_test_signed_profile("Bob");
+        let signed = create_test_signed_profile("Joy");
         let msg = ProfileGossipMessage::response(Some(signed), None, "did:sync:other");
         let action = handler.process_message(&msg);
 

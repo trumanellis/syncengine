@@ -219,6 +219,14 @@ pub struct SyncEngine {
     /// Flag indicating whether networking was explicitly started via `start_networking()`.
     /// Used to prevent auto-sync in `open_realm` when the user intends to work offline.
     networking_requested: bool,
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Packet Event Logging (for Indra's Network visualization)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// In-memory buffer for packet events (per-peer, for UI visualization).
+    /// Used to display packet flow in the network page.
+    packet_event_buffer: Arc<crate::sync::PacketEventBuffer>,
 }
 
 impl SyncEngine {
@@ -258,6 +266,9 @@ impl SyncEngine {
         // Initialize mirror store for profile packet storage
         let mirror_store = MirrorStore::new(storage.db_handle())?;
 
+        // Initialize packet event buffer for UI visualization
+        let packet_event_buffer = crate::sync::PacketEventBuffer::with_defaults();
+
         let mut engine = Self {
             storage,
             peer_registry,
@@ -282,6 +293,7 @@ impl SyncEngine {
             mirror_store: Some(mirror_store),
             profile_topic_tracker: ProfileTopicTracker::new(),
             networking_requested: false,
+            packet_event_buffer,
         };
 
         // Initialize the Private realm if it doesn't exist
@@ -704,23 +716,32 @@ impl SyncEngine {
                 // Global packets are signed but not encrypted
                 PacketEnvelope::create_global(keys, &payload, sequence, prev_hash)?
             }
-            PacketAddress::Individual(_recipient) => {
-                // Individual packet for direct messaging
-                // Security model: The 1:1 contact topic is private (derived from shared
-                // secrets during contact exchange), so we rely on topic-level privacy
-                // rather than sealed box encryption. The packet is still signed for
-                // authenticity. This matches the Group packet approach.
-                PacketEnvelope::create_global(keys, &payload, sequence, prev_hash)?
+            PacketAddress::Individual(recipient) => {
+                // Individual packet for direct messaging - E2E encrypted
+                // Uses sealed box encryption with hybrid (X25519 + ML-KEM) keys
+                // If recipient has no encryption keys, sending fails (no cleartext fallback)
+                // Include ourselves as a recipient so we can decrypt our own sent messages
+                let recipient_keys = self.get_recipient_public_keys(recipient)?;
+                let sender_keys = keys.public_bundle();
+                let recipients = vec![recipient_keys, sender_keys];
+                PacketEnvelope::create(keys, &payload, &recipients, sequence, prev_hash)?
             }
-            PacketAddress::List(_recipients) => {
-                // Multi-recipient packet
-                // Same security model as Individual - rely on topic-level privacy
-                // Each recipient receives via their 1:1 contact topic
-                PacketEnvelope::create_global(keys, &payload, sequence, prev_hash)?
+            PacketAddress::List(recipients_dids) => {
+                // Multi-recipient packet - E2E encrypted for all recipients
+                // Each recipient can decrypt with their own keys
+                // Include ourselves as a recipient so we can decrypt our own sent messages
+                let mut recipient_keys: Vec<_> = recipients_dids
+                    .iter()
+                    .map(|r| self.get_recipient_public_keys(r))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let sender_keys = keys.public_bundle();
+                recipient_keys.push(sender_keys);
+                PacketEnvelope::create(keys, &payload, &recipient_keys, sequence, prev_hash)?
             }
             PacketAddress::Group(_realm_id) => {
                 // Group packet for realm members (encrypted with realm key)
                 // For now, treat as global within the realm
+                // TODO: Implement realm-key encryption for group messages
                 PacketEnvelope::create_global(keys, &payload, sequence, prev_hash)?
             }
         };
@@ -859,6 +880,66 @@ impl SyncEngine {
             }
         }
 
+        // Record outgoing packet event for UI visualization (Indra's Network)
+        let my_did = self.profile_did()
+            .map(|d| d.as_str().to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+
+        // Get destination info from address
+        let (destination_did, destination_name) = match address {
+            PacketAddress::Individual(did) => {
+                let name = self.storage.load_peer_by_did(did.as_str())
+                    .ok()
+                    .flatten()
+                    .map(|p| p.display_name())
+                    .unwrap_or_else(|| format!("{}...", &did.as_str()[..16.min(did.as_str().len())]));
+                (did.as_str().to_string(), name)
+            }
+            PacketAddress::List(dids) => {
+                if let Some(first) = dids.first() {
+                    let name = self.storage.load_peer_by_did(first.as_str())
+                        .ok()
+                        .flatten()
+                        .map(|p| p.display_name())
+                        .unwrap_or_else(|| format!("{}...", &first.as_str()[..16.min(first.as_str().len())]));
+                    (first.as_str().to_string(), format!("{} +{}", name, dids.len().saturating_sub(1)))
+                } else {
+                    ("unknown".to_string(), "Unknown".to_string())
+                }
+            }
+            PacketAddress::Global => ("global".to_string(), "Everyone".to_string()),
+            PacketAddress::Group(realm_id) => (realm_id.to_string(), "Realm".to_string()),
+        };
+
+        // Content preview for outgoing packets
+        // Note: The envelope is encrypted, so we'd need to cache plaintext at creation time.
+        // For now, just show a sent indicator. The UI can show the actual content
+        // from the conversation view if needed.
+        let content_preview = "[sent]".to_string();
+
+        let event = crate::sync::PacketEvent {
+            id: crate::sync::PacketEvent::make_id(&my_did, sequence),
+            timestamp: chrono::Utc::now().timestamp_millis(),
+            direction: crate::sync::PacketDirection::Outgoing,
+            sequence,
+            author_did: my_did.clone(),
+            author_name: "Me".to_string(),
+            relay_did: None,
+            relay_name: None,
+            destination_did: destination_did.clone(),
+            destination_name,
+            decryption_status: crate::sync::DecryptionStatus::Decrypted,
+            content_preview,
+            is_delivered: false,
+            peer_did: destination_did.clone(),
+        };
+        info!(
+            peer_did = %destination_did,
+            sequence,
+            "Recording OUTGOING packet event"
+        );
+        self.packet_event_buffer.record(event);
+
         Ok(())
     }
 
@@ -892,16 +973,37 @@ impl SyncEngine {
     /// Helper to get recipient's public keys for sealed boxes.
     ///
     /// This looks up the recipient's ProfilePublicKeys from stored contacts.
+    /// Returns an error if:
+    /// - No contact found for the recipient DID
+    /// - Contact exists but has no encryption keys (legacy contact)
+    /// - Encryption keys are malformed
     fn get_recipient_public_keys(
         &self,
-        _recipient: &Did,
+        recipient: &Did,
     ) -> Result<crate::profile::ProfilePublicKeys, SyncError> {
-        // TODO: Look up recipient's ProfilePublicKeys from contact storage
-        // For now, return an error indicating we need to implement contact key storage
-        Err(SyncError::Identity(
-            "Recipient public key lookup not yet implemented. \
-             Contact key exchange must complete first.".to_string()
-        ))
+        // Look up contact by DID
+        let contact = self.storage.load_contact(recipient.as_ref())?
+            .ok_or_else(|| SyncError::Identity(format!(
+                "No contact found for recipient: {}. \
+                 Contact exchange must complete before sending E2E encrypted messages.",
+                recipient
+            )))?;
+
+        // Extract encryption keys from contact
+        let enc_keys_bytes = contact.encryption_keys
+            .ok_or_else(|| SyncError::Identity(format!(
+                "Contact {} does not have encryption keys. \
+                 This is a legacy contact that predates E2E encryption support. \
+                 Re-exchanging contact will enable encrypted messaging.",
+                recipient
+            )))?;
+
+        // Deserialize ProfilePublicKeys
+        crate::profile::ProfilePublicKeys::from_bytes(&enc_keys_bytes)
+            .map_err(|e| SyncError::Identity(format!(
+                "Failed to parse encryption keys for {}: {}",
+                recipient, e
+            )))
     }
 
     /// Handle an incoming packet from a peer.
@@ -1850,6 +1952,7 @@ impl SyncEngine {
             Arc::new(self.storage.clone()),
             self.contact_event_tx.clone(),
             active_topics,
+            Some(self.packet_event_buffer.clone()),
         ));
 
         // Start the auto-accept task for our own invites
@@ -3567,7 +3670,7 @@ impl SyncEngine {
 
         // Send an announce message to establish bidirectional communication
         // This allows the inviter to learn our address and send messages back to us
-        // by forcing Bob to send a message first, which establishes the QUIC connection
+        // by forcing Joy to send a message first, which establishes the QUIC connection
         let heads = if let Some(state) = self.realms.get_mut(&realm_id) {
             state
                 .doc
@@ -4669,6 +4772,200 @@ impl SyncEngine {
 
         // Subscribe to events
         Ok(manager.subscribe_events())
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Packet Event API (for Indra's Network visualization)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// Get packet events for a specific peer.
+    ///
+    /// Returns the recent packet events associated with this peer,
+    /// useful for displaying packet flow in the network visualization.
+    ///
+    /// # Arguments
+    ///
+    /// * `peer_did` - The peer's decentralized identifier
+    ///
+    /// # Returns
+    ///
+    /// A vector of [`PacketEvent`] in chronological order (oldest first).
+    pub fn get_packet_events_for_peer(&self, peer_did: &str) -> Vec<crate::sync::PacketEvent> {
+        let events = self.packet_event_buffer.get_events_for_peer(peer_did);
+        info!(
+            peer_did = %peer_did,
+            event_count = events.len(),
+            total_in_buffer = self.packet_event_buffer.total_event_count(),
+            "Getting packet events for peer"
+        );
+        events
+    }
+
+    /// Get all packet events for all peers.
+    ///
+    /// Returns a map of peer DID → events for the network visualization.
+    pub fn get_all_packet_events(
+        &self,
+    ) -> std::collections::HashMap<String, Vec<crate::sync::PacketEvent>> {
+        self.packet_event_buffer.get_all_events()
+    }
+
+    /// Subscribe to real-time packet events.
+    ///
+    /// Returns a receiver that will receive all new packet events as they occur.
+    /// Useful for updating the UI in real-time as packets flow through the network.
+    pub fn subscribe_packet_events(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<crate::sync::PacketEvent> {
+        self.packet_event_buffer.subscribe()
+    }
+
+    /// Record a packet event (internal use).
+    ///
+    /// This is called when packets are sent or received to log them
+    /// for the network visualization.
+    pub(crate) fn record_packet_event(&self, event: crate::sync::PacketEvent) {
+        self.packet_event_buffer.record(event);
+    }
+
+    /// Get the packet event buffer (for sharing with other components).
+    pub(crate) fn packet_event_buffer(&self) -> Arc<crate::sync::PacketEventBuffer> {
+        self.packet_event_buffer.clone()
+    }
+
+    /// Load historical packet events from storage into the in-memory buffer.
+    ///
+    /// This method populates the packet event buffer with packets that were
+    /// stored in MirrorStore (received) and ProfileLog (sent) from previous
+    /// sessions. Call this on startup to show historical packets in the
+    /// network visualization.
+    ///
+    /// # Returns
+    ///
+    /// The number of events loaded into the buffer.
+    pub fn load_historical_packet_events(&self) -> Result<usize, SyncError> {
+        let mut loaded_count = 0;
+
+        // Get our DID for identifying sent messages
+        let my_did = self.profile_did()
+            .ok_or_else(|| SyncError::Identity("Profile keys not initialized".to_string()))?;
+        let my_did_str = my_did.as_str().to_string();
+
+        // Get profile keys for decryption
+        let profile_keys = self.storage.load_profile_keys()?;
+
+        // Get all contacts
+        let contacts = self.list_peer_contacts()?;
+
+        for contact in &contacts {
+            let contact_did = match &contact.did {
+                Some(did) => did.clone(),
+                None => continue,
+            };
+            let contact_name = contact.display_name();
+
+            // Parse contact DID
+            let did = match Did::parse(&contact_did) {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+
+            // Load received packets from MirrorStore for this contact
+            if let Ok(received_packets) = self.mirror_packets_all(&did) {
+                for envelope in received_packets {
+                    let sender_did = envelope.sender.as_str().to_string();
+
+                    // Determine decryption status and content preview
+                    let (decryption_status, content_preview) = if envelope.is_global() {
+                        let preview = match envelope.decode_global_payload() {
+                            Ok(PacketPayload::DirectMessage { content, .. }) => {
+                                crate::sync::PacketEvent::preview_content(&content)
+                            }
+                            Ok(_) => "[profile update]".to_string(),
+                            Err(_) => "[global]".to_string(),
+                        };
+                        (crate::sync::DecryptionStatus::Global, preview)
+                    } else if let Some(ref keys) = profile_keys {
+                        match envelope.decrypt_for_recipient(keys) {
+                            Ok(payload) => {
+                                let preview = match payload {
+                                    PacketPayload::DirectMessage { content, .. } => {
+                                        crate::sync::PacketEvent::preview_content(&content)
+                                    }
+                                    _ => "[packet]".to_string(),
+                                };
+                                (crate::sync::DecryptionStatus::Decrypted, preview)
+                            }
+                            Err(_) => {
+                                (crate::sync::DecryptionStatus::CannotDecrypt {
+                                    reason: "not recipient".to_string()
+                                }, "[encrypted]".to_string())
+                            }
+                        }
+                    } else {
+                        (crate::sync::DecryptionStatus::NotAttempted, "[encrypted]".to_string())
+                    };
+
+                    let event = crate::sync::PacketEvent {
+                        id: crate::sync::PacketEvent::make_id(&sender_did, envelope.sequence),
+                        timestamp: chrono::Utc::now().timestamp_millis(), // Historical, use now
+                        direction: crate::sync::PacketDirection::Incoming,
+                        sequence: envelope.sequence,
+                        author_did: sender_did,
+                        author_name: contact_name.clone(),
+                        relay_did: None,
+                        relay_name: None,
+                        destination_did: my_did_str.clone(),
+                        destination_name: "Me".to_string(),
+                        decryption_status,
+                        content_preview,
+                        is_delivered: false,
+                        peer_did: contact_did.clone(),
+                    };
+                    self.packet_event_buffer.record(event);
+                    loaded_count += 1;
+                }
+            }
+
+            // Load sent packets from ProfileLog for this contact
+            if let Some(ref log) = self.profile_log {
+                for entry in log.entries_ordered() {
+                    // Check if this packet is addressed to this contact
+                    if let Some(payload) = self.decrypt_packet(&entry.envelope) {
+                        if let PacketPayload::DirectMessage { ref recipient, content, .. } = payload {
+                            if recipient == &did {
+                                let event = crate::sync::PacketEvent {
+                                    id: crate::sync::PacketEvent::make_id(&my_did_str, entry.envelope.sequence),
+                                    timestamp: chrono::Utc::now().timestamp_millis(),
+                                    direction: crate::sync::PacketDirection::Outgoing,
+                                    sequence: entry.envelope.sequence,
+                                    author_did: my_did_str.clone(),
+                                    author_name: "Me".to_string(),
+                                    relay_did: None,
+                                    relay_name: None,
+                                    destination_did: contact_did.clone(),
+                                    destination_name: contact_name.clone(),
+                                    decryption_status: crate::sync::DecryptionStatus::Decrypted,
+                                    content_preview: crate::sync::PacketEvent::preview_content(&content),
+                                    is_delivered: false,
+                                    peer_did: contact_did.clone(),
+                                };
+                                self.packet_event_buffer.record(event);
+                                loaded_count += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        info!(
+            loaded_count,
+            contact_count = contacts.len(),
+            "Loaded historical packet events from storage"
+        );
+
+        Ok(loaded_count)
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -6428,10 +6725,10 @@ mod tests {
     /// Test that two engines can sync tasks via invite flow
     ///
     /// This is the critical user flow:
-    /// 1. Alice creates a realm and generates an invite
-    /// 2. Bob joins via the invite
-    /// 3. Alice adds a task
-    /// 4. Bob should see Alice's task (after sync propagates)
+    /// 1. Love creates a realm and generates an invite
+    /// 2. Joy joins via the invite
+    /// 3. Love adds a task
+    /// 4. Joy should see Love's task (after sync propagates)
     #[tokio::test]
     async fn test_two_engines_sync_tasks_via_invite() {
         use crate::types::{PinRelationship, SignedProfile, UserProfile};
@@ -6439,35 +6736,35 @@ mod tests {
 
         let _ = tracing_subscriber::fmt::try_init();
 
-        // Create Alice's engine
-        let temp_dir_alice = TempDir::new().unwrap();
-        let mut alice = SyncEngine::new(temp_dir_alice.path()).await.unwrap();
-        alice.init_identity().unwrap(); // Required for signing sync messages
+        // Create Love's engine
+        let temp_dir_love = TempDir::new().unwrap();
+        let mut love = SyncEngine::new(temp_dir_love.path()).await.unwrap();
+        love.init_identity().unwrap(); // Required for signing sync messages
 
-        // Create Bob's engine
-        let temp_dir_bob = TempDir::new().unwrap();
-        let mut bob = SyncEngine::new(temp_dir_bob.path()).await.unwrap();
-        bob.init_identity().unwrap(); // Required for signing sync messages
+        // Create Joy's engine
+        let temp_dir_joy = TempDir::new().unwrap();
+        let mut joy = SyncEngine::new(temp_dir_joy.path()).await.unwrap();
+        joy.init_identity().unwrap(); // Required for signing sync messages
 
         // CRITICAL: Exchange and pin profiles so signature verification works.
         // In production, this happens via contact exchange. For tests, we do it manually.
         {
             // Create signed profiles for both engines
-            let alice_keypair = alice.identity.as_ref().unwrap();
-            let alice_profile = UserProfile::new("alice_peer".to_string(), "Alice".to_string());
-            let alice_signed = SignedProfile::sign(&alice_profile, alice_keypair);
+            let love_keypair = love.identity.as_ref().unwrap();
+            let love_profile = UserProfile::new("love_peer".to_string(), "Love".to_string());
+            let love_signed = SignedProfile::sign(&love_profile, love_keypair);
 
-            let bob_keypair = bob.identity.as_ref().unwrap();
-            let bob_profile = UserProfile::new("bob_peer".to_string(), "Bob".to_string());
-            let bob_signed = SignedProfile::sign(&bob_profile, bob_keypair);
+            let joy_keypair = joy.identity.as_ref().unwrap();
+            let joy_profile = UserProfile::new("joy_peer".to_string(), "Joy".to_string());
+            let joy_signed = SignedProfile::sign(&joy_profile, joy_keypair);
 
-            // Pin each other's profiles (Alice knows Bob, Bob knows Alice)
-            alice
-                .pin_profile(bob_signed.clone(), PinRelationship::Contact)
+            // Pin each other's profiles (Love knows Joy, Joy knows Love)
+            love
+                .pin_profile(joy_signed.clone(), PinRelationship::Contact)
                 .unwrap();
-            bob.pin_profile(alice_signed.clone(), PinRelationship::Contact)
+            joy.pin_profile(love_signed.clone(), PinRelationship::Contact)
                 .unwrap();
-            debug!("Exchanged and pinned profiles between Alice and Bob");
+            debug!("Exchanged and pinned profiles between Love and Joy");
         }
 
         // CRITICAL: Start networking on BOTH engines and exchange addresses BEFORE
@@ -6475,14 +6772,14 @@ mod tests {
         // working p2p_integration tests. The iroh-gossip layer seems to require
         // peer addresses to be in the static discovery BEFORE topic subscription
         // for message delivery to work properly.
-        alice.start_networking().await.unwrap();
-        bob.start_networking().await.unwrap();
+        love.start_networking().await.unwrap();
+        joy.start_networking().await.unwrap();
 
         // Exchange peer addresses bidirectionally
-        if let (Some(alice_addr), Some(bob_addr)) = (alice.endpoint_addr(), bob.endpoint_addr()) {
+        if let (Some(love_addr), Some(joy_addr)) = (love.endpoint_addr(), joy.endpoint_addr()) {
             debug!("Adding bidirectional peer addresses before gossip subscription");
-            alice.add_peer_addr(bob_addr);
-            bob.add_peer_addr(alice_addr);
+            love.add_peer_addr(joy_addr);
+            joy.add_peer_addr(love_addr);
         }
 
         // Small delay to let discovery propagate
@@ -6491,33 +6788,33 @@ mod tests {
         // CRITICAL: Subscribe to events BEFORE any sync operations start.
         // This avoids the race condition where PeerConnected events fire
         // before we start listening for them.
-        let mut alice_events = alice.subscribe_events();
-        let mut bob_events = bob.subscribe_events();
+        let mut love_events = love.subscribe_events();
+        let mut joy_events = joy.subscribe_events();
 
-        // Alice creates a realm
-        let realm_id = alice.create_realm("Shared Tasks").await.unwrap();
+        // Love creates a realm
+        let realm_id = love.create_realm("Shared Tasks").await.unwrap();
 
-        // Alice generates an invite (this should auto-start sync!)
-        let invite_str = alice.create_invite(&realm_id).await.unwrap();
+        // Love generates an invite (this should auto-start sync!)
+        let invite_str = love.create_invite(&realm_id).await.unwrap();
         debug!(
-            "Alice generated invite: {}...",
+            "Love generated invite: {}...",
             &invite_str[..50.min(invite_str.len())]
         );
 
-        // Verify Alice is now syncing
+        // Verify Love is now syncing
         assert!(
-            alice.is_realm_syncing(&realm_id),
-            "Alice should be syncing after generating invite"
+            love.is_realm_syncing(&realm_id),
+            "Love should be syncing after generating invite"
         );
 
-        // Bob joins via invite
-        let joined_realm_id = bob.join_realm(&invite_str).await.unwrap();
-        assert_eq!(joined_realm_id, realm_id, "Bob should join the same realm");
+        // Joy joins via invite
+        let joined_realm_id = joy.join_realm(&invite_str).await.unwrap();
+        assert_eq!(joined_realm_id, realm_id, "Joy should join the same realm");
 
-        // Verify Bob is syncing
+        // Verify Joy is syncing
         assert!(
-            bob.is_realm_syncing(&realm_id),
-            "Bob should be syncing after joining"
+            joy.is_realm_syncing(&realm_id),
+            "Joy should be syncing after joining"
         );
 
         // CRITICAL: Wait for peers to connect before sending any messages.
@@ -6553,16 +6850,16 @@ mod tests {
         }
 
         // Wait for connections using the pre-made subscriptions
-        let alice_connected =
-            wait_for_peer_connected(&mut alice_events, &realm_id, Duration::from_secs(10)).await;
-        let bob_connected =
-            wait_for_peer_connected(&mut bob_events, &realm_id, Duration::from_secs(10)).await;
+        let love_connected =
+            wait_for_peer_connected(&mut love_events, &realm_id, Duration::from_secs(10)).await;
+        let joy_connected =
+            wait_for_peer_connected(&mut joy_events, &realm_id, Duration::from_secs(10)).await;
 
-        debug!(alice_connected, bob_connected, "Peer connection status");
+        debug!(love_connected, joy_connected, "Peer connection status");
 
-        // At least one side should see a connection (typically Bob sees Alice first since he used Alice as bootstrap)
+        // At least one side should see a connection (typically Joy sees Love first since he used Love as bootstrap)
         assert!(
-            alice_connected || bob_connected,
+            love_connected || joy_connected,
             "At least one peer should have connected within 10 seconds"
         );
 
@@ -6571,39 +6868,39 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(500)).await;
 
         // Process any pending BroadcastRequests from NeighborUp events
-        alice.process_pending_sync();
-        bob.process_pending_sync();
+        love.process_pending_sync();
+        joy.process_pending_sync();
 
         // Additional stabilization - let any triggered broadcasts complete
         tokio::time::sleep(Duration::from_millis(200)).await;
 
-        // Alice adds a task (this should broadcast via sync)
-        debug!("Alice adding task...");
-        let _task_id = alice.add_task(&realm_id, "Alice's task").await.unwrap();
-        debug!("Alice added task, waiting for sync to Bob...");
+        // Love adds a task (this should broadcast via sync)
+        debug!("Love adding task...");
+        let _task_id = love.add_task(&realm_id, "Love's task").await.unwrap();
+        debug!("Love added task, waiting for sync to Joy...");
 
-        // Wait for sync to propagate to Bob (up to 5 seconds)
+        // Wait for sync to propagate to Joy (up to 5 seconds)
         let mut synced = false;
         for i in 0..50 {
             tokio::time::sleep(Duration::from_millis(100)).await;
             // Process any pending sync messages
-            let processed = bob.process_pending_sync();
+            let processed = joy.process_pending_sync();
             if processed > 0 {
                 debug!(
-                    "Bob processed {} sync messages at iteration {}",
+                    "Joy processed {} sync messages at iteration {}",
                     processed, i
                 );
             }
-            let bob_tasks = bob.list_tasks(&realm_id).unwrap();
+            let joy_tasks = joy.list_tasks(&realm_id).unwrap();
             debug!(
                 iteration = i,
                 processed,
-                task_count = bob_tasks.len(),
-                "Checking Bob's tasks"
+                task_count = joy_tasks.len(),
+                "Checking Joy's tasks"
             );
-            if !bob_tasks.is_empty() {
-                debug!("Bob received task after {}ms", (i + 1) * 100);
-                assert_eq!(bob_tasks[0].title, "Alice's task");
+            if !joy_tasks.is_empty() {
+                debug!("Joy received task after {}ms", (i + 1) * 100);
+                assert_eq!(joy_tasks[0].title, "Love's task");
                 synced = true;
                 break;
             }
@@ -6611,12 +6908,12 @@ mod tests {
 
         assert!(
             synced,
-            "Bob should have received Alice's task within 5 seconds"
+            "Joy should have received Love's task within 5 seconds"
         );
 
         // Cleanup
-        alice.shutdown().await.unwrap();
-        bob.shutdown().await.unwrap();
+        love.shutdown().await.unwrap();
+        joy.shutdown().await.unwrap();
     }
 
     /// Regression test for sync persistence bug
@@ -6969,47 +7266,47 @@ mod tests {
 
         let _ = tracing_subscriber::fmt::try_init();
 
-        // Create Alice's engine
-        let temp_dir_alice = TempDir::new().unwrap();
-        let mut alice = SyncEngine::new(temp_dir_alice.path()).await.unwrap();
-        alice.init_identity().unwrap();
+        // Create Love's engine
+        let temp_dir_love = TempDir::new().unwrap();
+        let mut love = SyncEngine::new(temp_dir_love.path()).await.unwrap();
+        love.init_identity().unwrap();
 
-        // Create Bob's engine
-        let temp_dir_bob = TempDir::new().unwrap();
-        let mut bob = SyncEngine::new(temp_dir_bob.path()).await.unwrap();
-        bob.init_identity().unwrap();
+        // Create Joy's engine
+        let temp_dir_joy = TempDir::new().unwrap();
+        let mut joy = SyncEngine::new(temp_dir_joy.path()).await.unwrap();
+        joy.init_identity().unwrap();
 
         // Start networking on both
-        alice.start_networking().await.unwrap();
-        bob.start_networking().await.unwrap();
+        love.start_networking().await.unwrap();
+        joy.start_networking().await.unwrap();
 
         // Exchange peer addresses bidirectionally
-        if let (Some(alice_addr), Some(bob_addr)) = (alice.endpoint_addr(), bob.endpoint_addr()) {
-            alice.add_peer_addr(bob_addr);
-            bob.add_peer_addr(alice_addr);
+        if let (Some(love_addr), Some(joy_addr)) = (love.endpoint_addr(), joy.endpoint_addr()) {
+            love.add_peer_addr(joy_addr);
+            joy.add_peer_addr(love_addr);
         }
 
         // Small delay to let discovery propagate
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         // Subscribe to events before sync starts
-        let mut alice_events = alice.subscribe_events();
-        let mut bob_events = bob.subscribe_events();
+        let mut love_events = love.subscribe_events();
+        let mut joy_events = joy.subscribe_events();
 
-        // Alice creates a realm and generates an invite
-        let realm_id = alice.create_realm("Peer Count Test").await.unwrap();
-        let invite_str = alice.create_invite(&realm_id).await.unwrap();
+        // Love creates a realm and generates an invite
+        let realm_id = love.create_realm("Peer Count Test").await.unwrap();
+        let invite_str = love.create_invite(&realm_id).await.unwrap();
 
-        // Verify Alice is syncing (but peer_count should be 0 initially)
-        let alice_status_initial = alice.sync_status(&realm_id);
-        info!(?alice_status_initial, "Alice initial sync status");
+        // Verify Love is syncing (but peer_count should be 0 initially)
+        let love_status_initial = love.sync_status(&realm_id);
+        info!(?love_status_initial, "Love initial sync status");
         assert!(
-            matches!(alice_status_initial, SyncStatus::Syncing { .. }),
-            "Alice should be in Syncing state"
+            matches!(love_status_initial, SyncStatus::Syncing { .. }),
+            "Love should be in Syncing state"
         );
 
-        // Bob joins via invite
-        let _joined_realm_id = bob.join_realm(&invite_str).await.unwrap();
+        // Joy joins via invite
+        let _joined_realm_id = joy.join_realm(&invite_str).await.unwrap();
 
         // Wait for PeerConnected events (using existing helper pattern)
         async fn wait_for_peer(
@@ -7038,16 +7335,16 @@ mod tests {
         }
 
         // Wait for at least one peer connection
-        let alice_connected = wait_for_peer(&mut alice_events, &realm_id).await;
-        let bob_connected = wait_for_peer(&mut bob_events, &realm_id).await;
+        let love_connected = wait_for_peer(&mut love_events, &realm_id).await;
+        let joy_connected = wait_for_peer(&mut joy_events, &realm_id).await;
 
         debug!(
-            alice_connected,
-            bob_connected, "Peer connection events received"
+            love_connected,
+            joy_connected, "Peer connection events received"
         );
 
         assert!(
-            alice_connected || bob_connected,
+            love_connected || joy_connected,
             "At least one peer should have connected"
         );
 
@@ -7055,42 +7352,42 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(200)).await;
 
         // THE CRITICAL ASSERTION: After peers connect, sync_status should report peer_count >= 1
-        let alice_status = alice.sync_status(&realm_id);
-        let bob_status = bob.sync_status(&realm_id);
+        let love_status = love.sync_status(&realm_id);
+        let joy_status = joy.sync_status(&realm_id);
 
         info!(
-            ?alice_status,
-            ?bob_status,
+            ?love_status,
+            ?joy_status,
             "Final sync status after peer connection"
         );
 
-        // Check Alice's peer count
-        match alice_status {
+        // Check Love's peer count
+        match love_status {
             SyncStatus::Syncing { peer_count } => {
                 assert!(
                     peer_count >= 1,
-                    "Alice should report at least 1 peer, but got peer_count={}",
+                    "Love should report at least 1 peer, but got peer_count={}",
                     peer_count
                 );
             }
-            other => panic!("Alice should be Syncing, but got {:?}", other),
+            other => panic!("Love should be Syncing, but got {:?}", other),
         }
 
-        // Check Bob's peer count
-        match bob_status {
+        // Check Joy's peer count
+        match joy_status {
             SyncStatus::Syncing { peer_count } => {
                 assert!(
                     peer_count >= 1,
-                    "Bob should report at least 1 peer, but got peer_count={}",
+                    "Joy should report at least 1 peer, but got peer_count={}",
                     peer_count
                 );
             }
-            other => panic!("Bob should be Syncing, but got {:?}", other),
+            other => panic!("Joy should be Syncing, but got {:?}", other),
         }
 
         // Cleanup
-        alice.shutdown().await.unwrap();
-        bob.shutdown().await.unwrap();
+        love.shutdown().await.unwrap();
+        joy.shutdown().await.unwrap();
     }
 
     /// Test that offline changes sync correctly after restart
@@ -7111,63 +7408,63 @@ mod tests {
         let _ = tracing_subscriber::fmt::try_init();
 
         // Use persistent directories
-        let temp_dir_alice = TempDir::new().unwrap();
-        let temp_dir_bob = TempDir::new().unwrap();
-        let alice_path = temp_dir_alice.path().to_path_buf();
-        let bob_path = temp_dir_bob.path().to_path_buf();
+        let temp_dir_love = TempDir::new().unwrap();
+        let temp_dir_joy = TempDir::new().unwrap();
+        let love_path = temp_dir_love.path().to_path_buf();
+        let joy_path = temp_dir_joy.path().to_path_buf();
 
         // === Phase 1: Initial sync setup ===
         let realm_id = {
-            let mut alice = SyncEngine::new(&alice_path).await.unwrap();
-            alice.init_identity().unwrap();
+            let mut love = SyncEngine::new(&love_path).await.unwrap();
+            love.init_identity().unwrap();
 
-            let mut bob = SyncEngine::new(&bob_path).await.unwrap();
-            bob.init_identity().unwrap();
+            let mut joy = SyncEngine::new(&joy_path).await.unwrap();
+            joy.init_identity().unwrap();
 
             // CRITICAL: Exchange and pin profiles so signature verification works across restarts
             {
-                let alice_keypair = alice.identity.as_ref().unwrap();
-                let alice_profile = UserProfile::new("alice_offline".to_string(), "Alice".to_string());
-                let alice_signed = SignedProfile::sign(&alice_profile, alice_keypair);
+                let love_keypair = love.identity.as_ref().unwrap();
+                let love_profile = UserProfile::new("love_offline".to_string(), "Love".to_string());
+                let love_signed = SignedProfile::sign(&love_profile, love_keypair);
 
-                let bob_keypair = bob.identity.as_ref().unwrap();
-                let bob_profile = UserProfile::new("bob_offline".to_string(), "Bob".to_string());
-                let bob_signed = SignedProfile::sign(&bob_profile, bob_keypair);
+                let joy_keypair = joy.identity.as_ref().unwrap();
+                let joy_profile = UserProfile::new("joy_offline".to_string(), "Joy".to_string());
+                let joy_signed = SignedProfile::sign(&joy_profile, joy_keypair);
 
-                alice
-                    .pin_profile(bob_signed.clone(), PinRelationship::Contact)
+                love
+                    .pin_profile(joy_signed.clone(), PinRelationship::Contact)
                     .unwrap();
-                bob.pin_profile(alice_signed.clone(), PinRelationship::Contact)
+                joy.pin_profile(love_signed.clone(), PinRelationship::Contact)
                     .unwrap();
-                debug!("Exchanged and pinned profiles between Alice and Bob");
+                debug!("Exchanged and pinned profiles between Love and Joy");
             }
 
             // Start networking
-            alice.start_networking().await.unwrap();
-            bob.start_networking().await.unwrap();
+            love.start_networking().await.unwrap();
+            joy.start_networking().await.unwrap();
 
             // Exchange addresses
-            if let (Some(alice_addr), Some(bob_addr)) = (alice.endpoint_addr(), bob.endpoint_addr())
+            if let (Some(love_addr), Some(joy_addr)) = (love.endpoint_addr(), joy.endpoint_addr())
             {
-                alice.add_peer_addr(bob_addr);
-                bob.add_peer_addr(alice_addr);
+                love.add_peer_addr(joy_addr);
+                joy.add_peer_addr(love_addr);
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
 
             // Subscribe to events
-            let mut alice_events = alice.subscribe_events();
+            let mut love_events = love.subscribe_events();
 
             // Create realm and invite
-            let realm_id = alice.create_realm("Offline Sync Test").await.unwrap();
-            let invite_str = alice.create_invite(&realm_id).await.unwrap();
+            let realm_id = love.create_realm("Offline Sync Test").await.unwrap();
+            let invite_str = love.create_invite(&realm_id).await.unwrap();
 
-            // Bob joins
-            let _joined = bob.join_realm(&invite_str).await.unwrap();
+            // Joy joins
+            let _joined = joy.join_realm(&invite_str).await.unwrap();
 
             // Wait for connection
             let connected = tokio::time::timeout(Duration::from_secs(10), async {
                 loop {
-                    match alice_events.recv().await {
+                    match love_events.recv().await {
                         Ok(SyncEvent::PeerConnected { realm_id: r, .. }) if r == realm_id => {
                             return true;
                         }
@@ -7181,20 +7478,20 @@ mod tests {
 
             assert!(connected, "Initial connection should succeed");
 
-            // Alice adds initial task and waits for sync
-            alice
+            // Love adds initial task and waits for sync
+            love
                 .add_task(&realm_id, "Initial shared task")
                 .await
                 .unwrap();
             tokio::time::sleep(Duration::from_millis(500)).await;
-            bob.process_pending_sync();
+            joy.process_pending_sync();
 
-            let bob_tasks = bob.list_tasks(&realm_id).unwrap();
-            assert!(!bob_tasks.is_empty(), "Bob should have initial task");
+            let joy_tasks = joy.list_tasks(&realm_id).unwrap();
+            assert!(!joy_tasks.is_empty(), "Joy should have initial task");
 
             // Shutdown both
-            alice.shutdown().await.unwrap();
-            bob.shutdown().await.unwrap();
+            love.shutdown().await.unwrap();
+            joy.shutdown().await.unwrap();
 
             realm_id
         };
@@ -7202,41 +7499,41 @@ mod tests {
         info!(?realm_id, "Phase 1 complete - both engines shutdown");
 
         // === Phase 2: Offline changes ===
-        // Alice adds tasks while offline (no networking)
+        // Love adds tasks while offline (no networking)
         {
-            let mut alice = SyncEngine::new(&alice_path).await.unwrap();
-            alice.init_identity().unwrap();
-            alice.open_realm(&realm_id).await.unwrap();
+            let mut love = SyncEngine::new(&love_path).await.unwrap();
+            love.init_identity().unwrap();
+            love.open_realm(&realm_id).await.unwrap();
 
-            alice
-                .add_task(&realm_id, "Alice offline task 1")
+            love
+                .add_task(&realm_id, "Love offline task 1")
                 .await
                 .unwrap();
-            alice
-                .add_task(&realm_id, "Alice offline task 2")
+            love
+                .add_task(&realm_id, "Love offline task 2")
                 .await
                 .unwrap();
 
-            let alice_tasks = alice.list_tasks(&realm_id).unwrap();
-            info!(count = alice_tasks.len(), "Alice offline tasks");
+            let love_tasks = love.list_tasks(&realm_id).unwrap();
+            info!(count = love_tasks.len(), "Love offline tasks");
 
             // Shutdown without starting networking
-            alice.shutdown().await.unwrap();
+            love.shutdown().await.unwrap();
         }
 
-        // Bob adds tasks while offline
+        // Joy adds tasks while offline
         {
-            let mut bob = SyncEngine::new(&bob_path).await.unwrap();
-            bob.init_identity().unwrap();
-            bob.open_realm(&realm_id).await.unwrap();
+            let mut joy = SyncEngine::new(&joy_path).await.unwrap();
+            joy.init_identity().unwrap();
+            joy.open_realm(&realm_id).await.unwrap();
 
-            bob.add_task(&realm_id, "Bob offline task 1").await.unwrap();
-            bob.add_task(&realm_id, "Bob offline task 2").await.unwrap();
+            joy.add_task(&realm_id, "Joy offline task 1").await.unwrap();
+            joy.add_task(&realm_id, "Joy offline task 2").await.unwrap();
 
-            let bob_tasks = bob.list_tasks(&realm_id).unwrap();
-            info!(count = bob_tasks.len(), "Bob offline tasks");
+            let joy_tasks = joy.list_tasks(&realm_id).unwrap();
+            info!(count = joy_tasks.len(), "Joy offline tasks");
 
-            bob.shutdown().await.unwrap();
+            joy.shutdown().await.unwrap();
         }
 
         info!("Phase 2 complete - both added offline tasks");
@@ -7245,122 +7542,122 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         // === Phase 3: Restart and sync ===
-        let mut alice = SyncEngine::new(&alice_path).await.unwrap();
-        alice.init_identity().unwrap();
+        let mut love = SyncEngine::new(&love_path).await.unwrap();
+        love.init_identity().unwrap();
 
-        let mut bob = SyncEngine::new(&bob_path).await.unwrap();
-        bob.init_identity().unwrap();
+        let mut joy = SyncEngine::new(&joy_path).await.unwrap();
+        joy.init_identity().unwrap();
 
         // Start networking
-        alice.start_networking().await.unwrap();
-        bob.start_networking().await.unwrap();
+        love.start_networking().await.unwrap();
+        joy.start_networking().await.unwrap();
 
         // Exchange addresses AND update bootstrap_peers in storage
         // This simulates what happens when users re-exchange invites after restart
         // (The iroh endpoint has a new node ID after restart, so old saved addresses are stale)
-        if let (Some(alice_addr), Some(bob_addr)) = (alice.endpoint_addr(), bob.endpoint_addr()) {
-            alice.add_peer_addr(bob_addr.clone());
-            bob.add_peer_addr(alice_addr.clone());
+        if let (Some(love_addr), Some(joy_addr)) = (love.endpoint_addr(), joy.endpoint_addr()) {
+            love.add_peer_addr(joy_addr.clone());
+            joy.add_peer_addr(love_addr.clone());
 
-            // Update Alice's realm with Bob's fresh address as bootstrap peer
-            if let Ok(Some(mut alice_realm_info)) = alice.storage.load_realm(&realm_id) {
-                alice_realm_info.bootstrap_peers =
-                    vec![NodeAddrBytes::from_endpoint_addr(&bob_addr)];
-                alice.storage.save_realm(&alice_realm_info).unwrap();
+            // Update Love's realm with Joy's fresh address as bootstrap peer
+            if let Ok(Some(mut love_realm_info)) = love.storage.load_realm(&realm_id) {
+                love_realm_info.bootstrap_peers =
+                    vec![NodeAddrBytes::from_endpoint_addr(&joy_addr)];
+                love.storage.save_realm(&love_realm_info).unwrap();
             }
 
-            // Update Bob's realm with Alice's fresh address as bootstrap peer
-            if let Ok(Some(mut bob_realm_info)) = bob.storage.load_realm(&realm_id) {
-                bob_realm_info.bootstrap_peers =
-                    vec![NodeAddrBytes::from_endpoint_addr(&alice_addr)];
-                bob.storage.save_realm(&bob_realm_info).unwrap();
+            // Update Joy's realm with Love's fresh address as bootstrap peer
+            if let Ok(Some(mut joy_realm_info)) = joy.storage.load_realm(&realm_id) {
+                joy_realm_info.bootstrap_peers =
+                    vec![NodeAddrBytes::from_endpoint_addr(&love_addr)];
+                joy.storage.save_realm(&joy_realm_info).unwrap();
             }
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         // Open realms (should auto-start sync for shared realms)
-        alice.open_realm(&realm_id).await.unwrap();
-        bob.open_realm(&realm_id).await.unwrap();
+        love.open_realm(&realm_id).await.unwrap();
+        joy.open_realm(&realm_id).await.unwrap();
 
         // Wait for sync to complete
         let mut synced = false;
         for i in 0..100 {
             tokio::time::sleep(Duration::from_millis(100)).await;
-            alice.process_pending_sync();
-            bob.process_pending_sync();
+            love.process_pending_sync();
+            joy.process_pending_sync();
 
-            let alice_tasks = alice.list_tasks(&realm_id).unwrap();
-            let bob_tasks = bob.list_tasks(&realm_id).unwrap();
+            let love_tasks = love.list_tasks(&realm_id).unwrap();
+            let joy_tasks = joy.list_tasks(&realm_id).unwrap();
 
             debug!(
                 iteration = i,
-                alice_count = alice_tasks.len(),
-                bob_count = bob_tasks.len(),
+                love_count = love_tasks.len(),
+                joy_count = joy_tasks.len(),
                 "Checking sync progress"
             );
 
             // Both should have 5 tasks:
             // 1. Initial shared task
-            // 2. Alice offline task 1
-            // 3. Alice offline task 2
-            // 4. Bob offline task 1
-            // 5. Bob offline task 2
-            if alice_tasks.len() >= 5 && bob_tasks.len() >= 5 {
+            // 2. Love offline task 1
+            // 3. Love offline task 2
+            // 4. Joy offline task 1
+            // 5. Joy offline task 2
+            if love_tasks.len() >= 5 && joy_tasks.len() >= 5 {
                 synced = true;
                 break;
             }
         }
 
-        let alice_tasks = alice.list_tasks(&realm_id).unwrap();
-        let bob_tasks = bob.list_tasks(&realm_id).unwrap();
+        let love_tasks = love.list_tasks(&realm_id).unwrap();
+        let joy_tasks = joy.list_tasks(&realm_id).unwrap();
 
         info!(
-            alice_count = alice_tasks.len(),
-            bob_count = bob_tasks.len(),
+            love_count = love_tasks.len(),
+            joy_count = joy_tasks.len(),
             "Final task counts"
         );
 
         // Log actual task titles for debugging
-        for (i, task) in alice_tasks.iter().enumerate() {
-            debug!(i, title = %task.title, "Alice task");
+        for (i, task) in love_tasks.iter().enumerate() {
+            debug!(i, title = %task.title, "Love task");
         }
-        for (i, task) in bob_tasks.iter().enumerate() {
-            debug!(i, title = %task.title, "Bob task");
+        for (i, task) in joy_tasks.iter().enumerate() {
+            debug!(i, title = %task.title, "Joy task");
         }
 
         assert!(
             synced,
-            "Both should have all 5 tasks. Alice has {}, Bob has {}",
-            alice_tasks.len(),
-            bob_tasks.len()
+            "Both should have all 5 tasks. Love has {}, Joy has {}",
+            love_tasks.len(),
+            joy_tasks.len()
         );
 
         // Verify specific tasks exist on both
-        let alice_titles: std::collections::HashSet<_> =
-            alice_tasks.iter().map(|t| t.title.as_str()).collect();
-        let bob_titles: std::collections::HashSet<_> =
-            bob_tasks.iter().map(|t| t.title.as_str()).collect();
+        let love_titles: std::collections::HashSet<_> =
+            love_tasks.iter().map(|t| t.title.as_str()).collect();
+        let joy_titles: std::collections::HashSet<_> =
+            joy_tasks.iter().map(|t| t.title.as_str()).collect();
 
         assert!(
-            alice_titles.contains("Alice offline task 1"),
-            "Alice should have her offline task 1"
+            love_titles.contains("Love offline task 1"),
+            "Love should have her offline task 1"
         );
         assert!(
-            alice_titles.contains("Bob offline task 1"),
-            "Alice should have Bob's offline task 1"
+            love_titles.contains("Joy offline task 1"),
+            "Love should have Joy's offline task 1"
         );
         assert!(
-            bob_titles.contains("Alice offline task 1"),
-            "Bob should have Alice's offline task 1"
+            joy_titles.contains("Love offline task 1"),
+            "Joy should have Love's offline task 1"
         );
         assert!(
-            bob_titles.contains("Bob offline task 1"),
-            "Bob should have his offline task 1"
+            joy_titles.contains("Joy offline task 1"),
+            "Joy should have his offline task 1"
         );
 
         // Cleanup
-        alice.shutdown().await.unwrap();
-        bob.shutdown().await.unwrap();
+        love.shutdown().await.unwrap();
+        joy.shutdown().await.unwrap();
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -7801,6 +8098,7 @@ mod tests {
             last_seen: 0,
             status: crate::types::contact::ContactStatus::Offline,
             is_favorite: false,
+            encryption_keys: None,
         };
         engine.storage.save_contact(&contact_info).unwrap();
 
@@ -7889,6 +8187,7 @@ mod tests {
             last_seen: 0,
             status: crate::types::contact::ContactStatus::Offline,
             is_favorite: false,
+            encryption_keys: None,
         };
         engine.storage.save_contact(&contact_info).unwrap();
 
@@ -7951,6 +8250,7 @@ mod tests {
                 last_seen: 0,
                 status: crate::types::contact::ContactStatus::Offline,
                 is_favorite: false,
+                encryption_keys: None,
             };
             engine.storage.save_contact(&contact_info).unwrap();
         }
@@ -8040,9 +8340,13 @@ mod tests {
     /// If this test PASSES: the bug is in either:
     ///   - The UI layer (Dioxus state management), OR
     ///   - Network-related code paths (contact manager, broadcast)
+    ///
+    /// Note: This test sets up a contact with encryption keys to enable E2E encryption.
     #[tokio::test]
     async fn test_created_packet_appears_in_conversation() {
-        use crate::profile::{PacketAddress, PacketPayload};
+        use crate::profile::{PacketAddress, PacketPayload, ProfileKeys};
+        use crate::types::contact::{ContactInfo, ContactStatus, ProfileSnapshot};
+        use crate::invite::NodeAddrBytes;
 
         let (mut engine, _temp) = create_test_engine().await;
 
@@ -8050,11 +8354,35 @@ mod tests {
         engine.init_identity().unwrap();
         engine.init_profile_keys().unwrap();
 
-        // Use a valid DID format for the test contact
-        let contact_did_str = "did:sync:zTestContactABC123XYZ";
-        let contact_did = Did::parse(contact_did_str).unwrap();
+        // Generate ProfileKeys for the contact to enable E2E encryption
+        let contact_profile_keys = ProfileKeys::generate();
+        let contact_pubkeys = contact_profile_keys.public_bundle();
+        let contact_did_str = contact_pubkeys.did().to_string();
 
-        // Create a DirectMessage payload
+        // Set up the contact with encryption keys
+        let contact = ContactInfo {
+            peer_did: contact_did_str.clone(),
+            peer_endpoint_id: [0u8; 32],
+            profile: ProfileSnapshot {
+                display_name: "Test Contact".to_string(),
+                subtitle: None,
+                avatar_blob_id: None,
+                bio: String::new(),
+            },
+            node_addr: NodeAddrBytes::new([0u8; 32]),
+            contact_topic: [1u8; 32],
+            contact_key: [2u8; 32],
+            accepted_at: 0,
+            last_seen: 0,
+            status: ContactStatus::Offline,
+            is_favorite: false,
+            encryption_keys: Some(contact_pubkeys.to_bytes()),
+        };
+        engine.storage.save_contact(&contact).unwrap();
+
+        let contact_did = Did::parse(&contact_did_str).unwrap();
+
+        // Create an E2E encrypted DirectMessage payload
         let content = "Hello from integration test!";
         let payload = PacketPayload::DirectMessage {
             content: content.to_string(),
@@ -8062,7 +8390,7 @@ mod tests {
         };
         let address = PacketAddress::Individual(contact_did);
 
-        // Create the packet (stores it in our log)
+        // Create the packet (stores it in our log with E2E encryption)
         let seq_result = engine.create_packet(payload, address);
         assert!(
             seq_result.is_ok(),
@@ -8070,7 +8398,7 @@ mod tests {
             seq_result.err()
         );
         let seq = seq_result.unwrap();
-        println!("Created packet with sequence: {}", seq);
+        println!("Created E2E encrypted packet with sequence: {}", seq);
 
         // Verify profile_log has the packet
         let log_count = engine
@@ -8085,7 +8413,7 @@ mod tests {
         );
 
         // Get the conversation - THIS IS THE KEY TEST
-        let conversation_result = engine.get_conversation(contact_did_str);
+        let conversation_result = engine.get_conversation(&contact_did_str);
         assert!(
             conversation_result.is_ok(),
             "get_conversation should succeed: {:?}",
@@ -8118,18 +8446,46 @@ mod tests {
     /// Test that multiple messages to the same contact all appear in conversation.
     ///
     /// This catches potential issues with sequence handling or duplicate filtering.
+    /// Note: This test sets up a contact with encryption keys to enable E2E encryption.
     #[tokio::test]
     async fn test_multiple_messages_appear_in_conversation() {
-        use crate::profile::{PacketAddress, PacketPayload};
+        use crate::profile::{PacketAddress, PacketPayload, ProfileKeys};
+        use crate::types::contact::{ContactInfo, ContactStatus, ProfileSnapshot};
+        use crate::invite::NodeAddrBytes;
 
         let (mut engine, _temp) = create_test_engine().await;
         engine.init_identity().unwrap();
         engine.init_profile_keys().unwrap();
 
-        let contact_did_str = "did:sync:zTestContactABC123XYZ";
-        let contact_did = Did::parse(contact_did_str).unwrap();
+        // Generate ProfileKeys for the contact to enable E2E encryption
+        let contact_profile_keys = ProfileKeys::generate();
+        let contact_pubkeys = contact_profile_keys.public_bundle();
+        let contact_did_str = contact_pubkeys.did().to_string();
 
-        // Send multiple messages
+        // Set up the contact with encryption keys
+        let contact = ContactInfo {
+            peer_did: contact_did_str.clone(),
+            peer_endpoint_id: [0u8; 32],
+            profile: ProfileSnapshot {
+                display_name: "Test Contact".to_string(),
+                subtitle: None,
+                avatar_blob_id: None,
+                bio: String::new(),
+            },
+            node_addr: NodeAddrBytes::new([0u8; 32]),
+            contact_topic: [1u8; 32],
+            contact_key: [2u8; 32],
+            accepted_at: 0,
+            last_seen: 0,
+            status: ContactStatus::Offline,
+            is_favorite: false,
+            encryption_keys: Some(contact_pubkeys.to_bytes()),
+        };
+        engine.storage.save_contact(&contact).unwrap();
+
+        let contact_did = Did::parse(&contact_did_str).unwrap();
+
+        // Send multiple E2E encrypted messages
         let messages = ["First message", "Second message", "Third message"];
         for msg in &messages {
             let payload = PacketPayload::DirectMessage {
@@ -8141,7 +8497,7 @@ mod tests {
         }
 
         // Verify all messages appear
-        let conversation = engine.get_conversation(contact_did_str).unwrap();
+        let conversation = engine.get_conversation(&contact_did_str).unwrap();
         assert_eq!(
             conversation.len(),
             3,
@@ -8159,27 +8515,78 @@ mod tests {
     /// Test that messages to different contacts are properly separated.
     ///
     /// This ensures the recipient filtering in get_conversation works correctly.
+    /// Note: This test sets up contacts with encryption keys to enable E2E encryption.
     #[tokio::test]
     async fn test_messages_separated_by_contact() {
-        use crate::profile::{PacketAddress, PacketPayload};
+        use crate::profile::{PacketAddress, PacketPayload, ProfileKeys};
+        use crate::types::contact::{ContactInfo, ContactStatus, ProfileSnapshot};
+        use crate::invite::NodeAddrBytes;
 
         let (mut engine, _temp) = create_test_engine().await;
         engine.init_identity().unwrap();
         engine.init_profile_keys().unwrap();
 
-        let contact1 = "did:sync:zContact1ABC";
-        let contact2 = "did:sync:zContact2XYZ";
-        let did1 = Did::parse(contact1).unwrap();
-        let did2 = Did::parse(contact2).unwrap();
+        // Generate profile keys for contacts to enable E2E encryption
+        let contact1_keys = ProfileKeys::generate();
+        let contact1_pubkeys = contact1_keys.public_bundle();
+        let contact1_did = contact1_pubkeys.did().to_string();
 
-        // Send message to contact 1
+        let contact2_keys = ProfileKeys::generate();
+        let contact2_pubkeys = contact2_keys.public_bundle();
+        let contact2_did = contact2_pubkeys.did().to_string();
+
+        // Create contacts with encryption keys
+        let contact1 = ContactInfo {
+            peer_did: contact1_did.clone(),
+            peer_endpoint_id: [1u8; 32],
+            profile: ProfileSnapshot {
+                display_name: "Contact 1".to_string(),
+                subtitle: None,
+                avatar_blob_id: None,
+                bio: String::new(),
+            },
+            node_addr: NodeAddrBytes::new([1u8; 32]),
+            contact_topic: [10u8; 32],
+            contact_key: [11u8; 32],
+            accepted_at: 0,
+            last_seen: 0,
+            status: ContactStatus::Offline,
+            is_favorite: false,
+            encryption_keys: Some(contact1_pubkeys.to_bytes()),
+        };
+        engine.storage.save_contact(&contact1).unwrap();
+
+        let contact2 = ContactInfo {
+            peer_did: contact2_did.clone(),
+            peer_endpoint_id: [2u8; 32],
+            profile: ProfileSnapshot {
+                display_name: "Contact 2".to_string(),
+                subtitle: None,
+                avatar_blob_id: None,
+                bio: String::new(),
+            },
+            node_addr: NodeAddrBytes::new([2u8; 32]),
+            contact_topic: [20u8; 32],
+            contact_key: [21u8; 32],
+            accepted_at: 0,
+            last_seen: 0,
+            status: ContactStatus::Offline,
+            is_favorite: false,
+            encryption_keys: Some(contact2_pubkeys.to_bytes()),
+        };
+        engine.storage.save_contact(&contact2).unwrap();
+
+        let did1 = Did::parse(&contact1_did).unwrap();
+        let did2 = Did::parse(&contact2_did).unwrap();
+
+        // Send E2E encrypted message to contact 1
         let payload1 = PacketPayload::DirectMessage {
             content: "Hello Contact 1".to_string(),
             recipient: did1.clone(),
         };
         engine.create_packet(payload1, PacketAddress::Individual(did1)).unwrap();
 
-        // Send message to contact 2
+        // Send E2E encrypted message to contact 2
         let payload2 = PacketPayload::DirectMessage {
             content: "Hello Contact 2".to_string(),
             recipient: did2.clone(),
@@ -8187,12 +8594,12 @@ mod tests {
         engine.create_packet(payload2, PacketAddress::Individual(did2)).unwrap();
 
         // Verify contact 1's conversation only has their message
-        let convo1 = engine.get_conversation(contact1).unwrap();
+        let convo1 = engine.get_conversation(&contact1_did).unwrap();
         assert_eq!(convo1.len(), 1, "Contact 1 should have exactly 1 message");
         assert_eq!(convo1.messages()[0].content, "Hello Contact 1");
 
         // Verify contact 2's conversation only has their message
-        let convo2 = engine.get_conversation(contact2).unwrap();
+        let convo2 = engine.get_conversation(&contact2_did).unwrap();
         assert_eq!(convo2.len(), 1, "Contact 2 should have exactly 1 message");
         assert_eq!(convo2.messages()[0].content, "Hello Contact 2");
     }
@@ -8210,7 +8617,7 @@ mod tests {
 
         // Create a contact's keypair and profile
         let contact_keypair = HybridKeypair::generate();
-        let contact_profile = UserProfile::new("peer_alice".to_string(), "Alice".to_string());
+        let contact_profile = UserProfile::new("peer_love".to_string(), "Love".to_string());
         let signed_profile = SignedProfile::sign(&contact_profile, &contact_keypair);
         let contact_did = signed_profile.did().to_string();
 
@@ -8267,7 +8674,7 @@ mod tests {
 
         // Create a contact's keypair and profile
         let contact_keypair = HybridKeypair::generate();
-        let contact_profile = UserProfile::new("peer_bob".to_string(), "Bob".to_string());
+        let contact_profile = UserProfile::new("peer_joy".to_string(), "Joy".to_string());
         let signed_profile = SignedProfile::sign(&contact_profile, &contact_keypair);
         let contact_did = signed_profile.did().to_string();
 
@@ -8299,7 +8706,7 @@ mod tests {
 
         // Create a contact's keypair and profile
         let contact_keypair = HybridKeypair::generate();
-        let contact_profile = UserProfile::new("peer_carol".to_string(), "Carol".to_string());
+        let contact_profile = UserProfile::new("peer_peace".to_string(), "Peace".to_string());
         let signed_profile = SignedProfile::sign(&contact_profile, &contact_keypair);
         let contact_did = signed_profile.did().to_string();
 
@@ -8364,6 +8771,158 @@ mod tests {
         assert!(
             !verify_fn(&contact_did, test_data, &garbage),
             "Garbage signature should be rejected"
+        );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // E2E Encryption Key Lookup Tests
+    // ═══════════════════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    async fn test_get_recipient_public_keys_no_contact() {
+        let (engine, _temp) = create_test_engine().await;
+
+        let unknown_did = Did::parse("did:sync:zUnknownContact123").unwrap();
+        let result = engine.get_recipient_public_keys(&unknown_did);
+
+        assert!(result.is_err(), "Should fail for unknown contact");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("No contact found"),
+            "Error should indicate no contact: {}",
+            err_msg
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_recipient_public_keys_legacy_contact_no_keys() {
+        use crate::types::contact::{ContactInfo, ContactStatus, ProfileSnapshot};
+        use crate::invite::NodeAddrBytes;
+
+        let (engine, _temp) = create_test_engine().await;
+
+        // Create a legacy contact without encryption keys
+        let peer_did = "did:sync:zLegacyContact456";
+        let legacy_contact = ContactInfo {
+            peer_did: peer_did.to_string(),
+            peer_endpoint_id: [0u8; 32],
+            profile: ProfileSnapshot {
+                display_name: "Legacy Contact".to_string(),
+                subtitle: None,
+                avatar_blob_id: None,
+                bio: String::new(),
+            },
+            node_addr: NodeAddrBytes::new([0u8; 32]),
+            contact_topic: [1u8; 32],
+            contact_key: [2u8; 32],
+            accepted_at: 0,
+            last_seen: 0,
+            status: ContactStatus::Offline,
+            is_favorite: false,
+            encryption_keys: None, // Legacy contact - no encryption keys
+        };
+        engine.storage.save_contact(&legacy_contact).unwrap();
+
+        let did = Did::parse(peer_did).unwrap();
+        let result = engine.get_recipient_public_keys(&did);
+
+        assert!(result.is_err(), "Should fail for legacy contact without keys");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("does not have encryption keys"),
+            "Error should indicate missing encryption keys: {}",
+            err_msg
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_recipient_public_keys_with_valid_keys() {
+        use crate::types::contact::{ContactInfo, ContactStatus, ProfileSnapshot};
+        use crate::invite::NodeAddrBytes;
+        use crate::profile::ProfileKeys;
+
+        let (engine, _temp) = create_test_engine().await;
+
+        // Generate real ProfileKeys to get valid encryption keys
+        let contact_profile_keys = ProfileKeys::generate();
+        let public_keys = contact_profile_keys.public_bundle();
+        let enc_keys_bytes = public_keys.to_bytes();
+
+        // Create a contact with encryption keys
+        let peer_did = public_keys.did().to_string();
+        let contact = ContactInfo {
+            peer_did: peer_did.clone(),
+            peer_endpoint_id: [0u8; 32],
+            profile: ProfileSnapshot {
+                display_name: "Encrypted Contact".to_string(),
+                subtitle: None,
+                avatar_blob_id: None,
+                bio: String::new(),
+            },
+            node_addr: NodeAddrBytes::new([0u8; 32]),
+            contact_topic: [1u8; 32],
+            contact_key: [2u8; 32],
+            accepted_at: 0,
+            last_seen: 0,
+            status: ContactStatus::Offline,
+            is_favorite: false,
+            encryption_keys: Some(enc_keys_bytes),
+        };
+        engine.storage.save_contact(&contact).unwrap();
+
+        let did = Did::parse(&peer_did).unwrap();
+        let result = engine.get_recipient_public_keys(&did);
+
+        assert!(result.is_ok(), "Should succeed for contact with valid keys");
+        let retrieved_keys = result.unwrap();
+
+        // Verify the retrieved keys match the original
+        assert_eq!(
+            retrieved_keys.did().to_string(),
+            public_keys.did().to_string(),
+            "Retrieved keys should have matching DID"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_recipient_public_keys_malformed_keys() {
+        use crate::types::contact::{ContactInfo, ContactStatus, ProfileSnapshot};
+        use crate::invite::NodeAddrBytes;
+
+        let (engine, _temp) = create_test_engine().await;
+
+        // Create a contact with malformed encryption keys
+        // Note: DID identifier must be valid base58 (excludes 0, O, I, lowercase l)
+        let peer_did = "did:sync:zBadKeyDataContact789";
+        let contact = ContactInfo {
+            peer_did: peer_did.to_string(),
+            peer_endpoint_id: [0u8; 32],
+            profile: ProfileSnapshot {
+                display_name: "Malformed Contact".to_string(),
+                subtitle: None,
+                avatar_blob_id: None,
+                bio: String::new(),
+            },
+            node_addr: NodeAddrBytes::new([0u8; 32]),
+            contact_topic: [1u8; 32],
+            contact_key: [2u8; 32],
+            accepted_at: 0,
+            last_seen: 0,
+            status: ContactStatus::Offline,
+            is_favorite: false,
+            encryption_keys: Some(vec![0xDE, 0xAD, 0xBE, 0xEF]), // Invalid key data
+        };
+        engine.storage.save_contact(&contact).unwrap();
+
+        let did = Did::parse(peer_did).unwrap();
+        let result = engine.get_recipient_public_keys(&did);
+
+        assert!(result.is_err(), "Should fail for malformed keys");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("Failed to parse encryption keys"),
+            "Error should indicate parsing failure: {}",
+            err_msg
         );
     }
 }

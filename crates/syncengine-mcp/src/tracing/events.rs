@@ -217,12 +217,12 @@ mod tests {
         let store = TraceStore::new();
         let trace_id = [1u8; 16];
 
-        let event = MessageEvent::sent(trace_id, "alice".into(), "Hello");
+        let event = MessageEvent::sent(trace_id, "love".into(), "Hello");
         store.record_event(event);
 
         let events = store.get_events(&trace_id);
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].node_id, "alice");
+        assert_eq!(events[0].node_id, "love");
     }
 
     #[test]
@@ -230,9 +230,9 @@ mod tests {
         let store = TraceStore::new();
         let trace_id = [1u8; 16];
 
-        store.record_event(MessageEvent::sent(trace_id, "alice".into(), "Hello"));
-        store.record_event(MessageEvent::received(trace_id, "bob".into(), "alice".into()));
-        store.record_event(MessageEvent::received(trace_id, "carol".into(), "alice".into()));
+        store.record_event(MessageEvent::sent(trace_id, "love".into(), "Hello"));
+        store.record_event(MessageEvent::received(trace_id, "joy".into(), "love".into()));
+        store.record_event(MessageEvent::received(trace_id, "peace".into(), "love".into()));
 
         let received = store.get_events_by_type(&trace_id, MessageEventType::Received);
         assert_eq!(received.len(), 2);
@@ -265,7 +265,7 @@ mod tests {
         let store = TraceStore::new();
         let trace_id = [1u8; 16];
 
-        store.record_event(MessageEvent::sent(trace_id, "alice".into(), "Hello"));
+        store.record_event(MessageEvent::sent(trace_id, "love".into(), "Hello"));
         assert_eq!(store.trace_count(), 1);
 
         store.clear_trace(&trace_id);

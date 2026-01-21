@@ -68,8 +68,9 @@ pub use types::peer::{ContactDetails, Peer, PeerSource, PeerStatus};
 pub use realm::RealmDoc;
 pub use storage::{PinnerInfo, PinningConfig, Storage};
 pub use sync::{
-    ContactEvent, GossipMessage, GossipSync, NetworkDebugInfo, SyncEnvelope, SyncEvent,
-    SyncManager, SyncMessage, SyncStatus, TopicHandle, WireMessage, ENVELOPE_VERSION,
+    ContactEvent, DecryptionStatus, GossipMessage, GossipSync, NetworkDebugInfo,
+    PacketDirection, PacketEvent, PacketEventBuffer, PacketEventBufferConfig, SyncEnvelope,
+    SyncEvent, SyncManager, SyncMessage, SyncStatus, TopicHandle, WireMessage, ENVELOPE_VERSION,
 };
 pub use types::*;
 

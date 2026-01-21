@@ -23,7 +23,7 @@
 //! let cap = Capability::RealmParticipant {
 //!     realm_id: RealmId::new(),
 //!     realm_key: [0u8; 32],
-//!     granted_by: "did:sync:zAlice".to_string(),
+//!     granted_by: "did:sync:zLove".to_string(),
 //!     can_invite: true,
 //! };
 //!
@@ -340,13 +340,13 @@ mod tests {
     #[test]
     fn test_read_profile_capability() {
         let cap = Capability::read_profile(
-            "did:sync:zBob".to_string(),
-            "did:sync:zAlice".to_string(),
+            "did:sync:zJoy".to_string(),
+            "did:sync:zLove".to_string(),
             None,
         );
 
         assert_eq!(cap.type_name(), "ReadProfile");
-        assert_eq!(cap.granted_by(), Some("did:sync:zAlice"));
+        assert_eq!(cap.granted_by(), Some("did:sync:zLove"));
         assert!(!cap.is_expired());
         assert!(cap.expires_at().is_none());
     }
@@ -356,8 +356,8 @@ mod tests {
         // Expired capability
         let expired = Capability::ReadProfile {
             id: CapabilityId::new(),
-            target_did: "did:sync:zBob".to_string(),
-            granted_by: "did:sync:zAlice".to_string(),
+            target_did: "did:sync:zJoy".to_string(),
+            granted_by: "did:sync:zLove".to_string(),
             expires_at: Some(chrono::Utc::now().timestamp() - 100),
         };
         assert!(expired.is_expired());
@@ -365,8 +365,8 @@ mod tests {
         // Valid capability
         let valid = Capability::ReadProfile {
             id: CapabilityId::new(),
-            target_did: "did:sync:zBob".to_string(),
-            granted_by: "did:sync:zAlice".to_string(),
+            target_did: "did:sync:zJoy".to_string(),
+            granted_by: "did:sync:zLove".to_string(),
             expires_at: Some(chrono::Utc::now().timestamp() + 3600),
         };
         assert!(!valid.is_expired());
@@ -380,12 +380,12 @@ mod tests {
         let cap = Capability::realm_participant(
             realm_id.clone(),
             realm_key,
-            "did:sync:zAlice".to_string(),
+            "did:sync:zLove".to_string(),
             true,
         );
 
         assert_eq!(cap.type_name(), "RealmParticipant");
-        assert_eq!(cap.granted_by(), Some("did:sync:zAlice"));
+        assert_eq!(cap.granted_by(), Some("did:sync:zLove"));
 
         if let Capability::RealmParticipant { realm_id: r, can_invite, .. } = &cap {
             assert_eq!(r, &realm_id);
@@ -400,7 +400,7 @@ mod tests {
         let topic = [1u8; 32];
         let key = [2u8; 32];
 
-        let cap = Capability::contact_channel("did:sync:zBob".to_string(), topic, key);
+        let cap = Capability::contact_channel("did:sync:zJoy".to_string(), topic, key);
 
         assert_eq!(cap.type_name(), "ContactChannel");
         assert!(cap.granted_by().is_none()); // Bilateral, no single granter
@@ -413,7 +413,7 @@ mod tests {
             ..
         } = &cap
         {
-            assert_eq!(peer_did, "did:sync:zBob");
+            assert_eq!(peer_did, "did:sync:zJoy");
             assert_eq!(t, &topic);
             assert_eq!(k, &key);
             assert!(*established_at > 0);
@@ -426,23 +426,23 @@ mod tests {
     fn test_blob_access_capability() {
         let cap = Capability::blob_access(
             "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi".to_string(),
-            "did:sync:zAlice".to_string(),
+            "did:sync:zLove".to_string(),
         );
 
         assert_eq!(cap.type_name(), "BlobAccess");
-        assert_eq!(cap.granted_by(), Some("did:sync:zAlice"));
+        assert_eq!(cap.granted_by(), Some("did:sync:zLove"));
     }
 
     #[test]
     fn test_capability_display() {
         let cap = Capability::read_profile(
-            "did:sync:zBobVeryLongIdentifier".to_string(),
-            "did:sync:zAlice".to_string(),
+            "did:sync:zJoyVeryLongIdentifier".to_string(),
+            "did:sync:zLove".to_string(),
             None,
         );
         let display = format!("{}", cap);
         assert!(display.contains("ReadProfile"));
-        assert!(display.contains("did:sync:zBobVeryLon")); // Truncated
+        assert!(display.contains("did:sync:zJoyVeryLon")); // Truncated
     }
 
     #[test]
@@ -450,7 +450,7 @@ mod tests {
         let cap = Capability::realm_participant(
             RealmId::new(),
             [0u8; 32],
-            "did:sync:zAlice".to_string(),
+            "did:sync:zLove".to_string(),
             true,
         );
 
@@ -466,14 +466,14 @@ mod tests {
         let id = CapabilityId::new();
         let cap1 = Capability::ReadProfile {
             id: id.clone(),
-            target_did: "did:sync:zBob".to_string(),
-            granted_by: "did:sync:zAlice".to_string(),
+            target_did: "did:sync:zJoy".to_string(),
+            granted_by: "did:sync:zLove".to_string(),
             expires_at: None,
         };
         let cap2 = Capability::ReadProfile {
             id: id.clone(),
-            target_did: "did:sync:zBob".to_string(),
-            granted_by: "did:sync:zAlice".to_string(),
+            target_did: "did:sync:zJoy".to_string(),
+            granted_by: "did:sync:zLove".to_string(),
             expires_at: None,
         };
 
@@ -481,8 +481,8 @@ mod tests {
 
         // Different IDs means different capabilities
         let cap3 = Capability::read_profile(
-            "did:sync:zBob".to_string(),
-            "did:sync:zAlice".to_string(),
+            "did:sync:zJoy".to_string(),
+            "did:sync:zLove".to_string(),
             None,
         );
         assert_ne!(cap1, cap3);
@@ -493,20 +493,20 @@ mod tests {
         let cap = Capability::realm_participant(
             RealmId::new(),
             [0u8; 32],
-            "did:sync:zAlice".to_string(),
+            "did:sync:zLove".to_string(),
             true,
         );
 
         let delegated = DelegatedCapability {
             capability: cap,
-            delegated_from: "did:sync:zAlice".to_string(),
-            delegated_to: "did:sync:zBob".to_string(),
+            delegated_from: "did:sync:zLove".to_string(),
+            delegated_to: "did:sync:zJoy".to_string(),
             restrictions: vec!["no-invite".to_string()],
             proof: vec![1, 2, 3, 4],
         };
 
-        assert_eq!(delegated.delegated_from, "did:sync:zAlice");
-        assert_eq!(delegated.delegated_to, "did:sync:zBob");
+        assert_eq!(delegated.delegated_from, "did:sync:zLove");
+        assert_eq!(delegated.delegated_to, "did:sync:zJoy");
         assert!(delegated.restrictions.contains(&"no-invite".to_string()));
     }
 }

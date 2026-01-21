@@ -137,18 +137,19 @@ mod tests {
             last_seen: (accepted_at + 100) as u64,
             status: ContactStatus::Offline,
             is_favorite: false,
+            encryption_keys: None,
         }
     }
 
     #[test]
     fn test_pinner_info_from_contact() {
-        let contact = create_test_contact("did:sync:alice", "Alice", 1000);
+        let contact = create_test_contact("did:sync:love", "Love", 1000);
         let pinner = PinnerInfo::from_contact(&contact);
 
-        assert_eq!(pinner.pinner_did, "did:sync:alice");
+        assert_eq!(pinner.pinner_did, "did:sync:love");
         assert_eq!(pinner.pinned_at, 1000);
         assert_eq!(pinner.relationship, "contact");
-        assert_eq!(pinner.display_name, Some("Alice".to_string()));
+        assert_eq!(pinner.display_name, Some("Love".to_string()));
         assert!(pinner.is_contact());
         assert!(!pinner.is_realm_member());
     }
@@ -158,8 +159,8 @@ mod tests {
         let storage = create_test_storage();
 
         // Add some contacts
-        let contact1 = create_test_contact("did:sync:alice", "Alice", 100);
-        let contact2 = create_test_contact("did:sync:bob", "Bob", 200);
+        let contact1 = create_test_contact("did:sync:love", "Love", 100);
+        let contact2 = create_test_contact("did:sync:joy", "Joy", 200);
         let contact3 = create_test_contact("did:sync:charlie", "Charlie", 150);
 
         storage.save_contact(&contact1).unwrap();
@@ -171,9 +172,9 @@ mod tests {
         assert_eq!(pinners.len(), 3);
 
         // Should be sorted by pinned_at (accepted_at) descending
-        assert_eq!(pinners[0].pinner_did, "did:sync:bob"); // 200
+        assert_eq!(pinners[0].pinner_did, "did:sync:joy"); // 200
         assert_eq!(pinners[1].pinner_did, "did:sync:charlie"); // 150
-        assert_eq!(pinners[2].pinner_did, "did:sync:alice"); // 100
+        assert_eq!(pinners[2].pinner_did, "did:sync:love"); // 100
     }
 
     #[test]
@@ -184,8 +185,8 @@ mod tests {
         assert_eq!(storage.count_pinners().unwrap(), 0);
 
         // Add contacts
-        let contact1 = create_test_contact("did:sync:alice", "Alice", 100);
-        let contact2 = create_test_contact("did:sync:bob", "Bob", 200);
+        let contact1 = create_test_contact("did:sync:love", "Love", 100);
+        let contact2 = create_test_contact("did:sync:joy", "Joy", 200);
 
         storage.save_contact(&contact1).unwrap();
         assert_eq!(storage.count_pinners().unwrap(), 1);

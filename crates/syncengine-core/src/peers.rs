@@ -388,10 +388,10 @@ mod tests {
     fn test_peer_info_with_nickname() {
         let endpoint_id = create_test_public_key();
         let peer = PeerInfo::new(endpoint_id, PeerSource::FromInvite)
-            .with_nickname("Alice")
+            .with_nickname("Love")
             .with_status(PeerStatus::Online);
 
-        assert_eq!(peer.nickname, Some("Alice".to_string()));
+        assert_eq!(peer.nickname, Some("Love".to_string()));
         assert_eq!(peer.status, PeerStatus::Online);
     }
 
@@ -454,13 +454,13 @@ mod tests {
 
         // Update peer with new status
         peer.status = PeerStatus::Online;
-        peer.nickname = Some("Bob".to_string());
+        peer.nickname = Some("Joy".to_string());
         registry.add_or_update(&peer).unwrap();
 
         // Verify update
         let retrieved = registry.get(&endpoint_id).unwrap().unwrap();
         assert_eq!(retrieved.status, PeerStatus::Online);
-        assert_eq!(retrieved.nickname, Some("Bob".to_string()));
+        assert_eq!(retrieved.nickname, Some("Joy".to_string()));
     }
 
     #[test]
@@ -609,7 +609,7 @@ mod tests {
             let db = Database::create(&db_path).unwrap();
             let registry = PeerRegistry::new(Arc::new(RwLock::new(db))).unwrap();
             let peer = PeerInfo::new(endpoint_id, PeerSource::FromInvite)
-                .with_nickname("Alice")
+                .with_nickname("Love")
                 .with_status(PeerStatus::Online);
             registry.add_or_update(&peer).unwrap();
         }
@@ -621,7 +621,7 @@ mod tests {
             let retrieved = registry.get(&endpoint_id).unwrap();
             assert!(retrieved.is_some());
             let retrieved = retrieved.unwrap();
-            assert_eq!(retrieved.nickname, Some("Alice".to_string()));
+            assert_eq!(retrieved.nickname, Some("Love".to_string()));
             assert_eq!(retrieved.status, PeerStatus::Online);
         }
     }

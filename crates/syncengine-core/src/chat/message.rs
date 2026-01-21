@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 /// let message = ChatMessage {
 ///     id: "did:sync:abc123:42".to_string(),
 ///     sender_did: "did:sync:abc123".to_string(),
-///     sender_name: Some("Alice".to_string()),
+///     sender_name: Some("Love".to_string()),
 ///     content: "Hello!".to_string(),
 ///     timestamp: 1705123456789,
 ///     sequence: 42,
@@ -125,7 +125,7 @@ mod tests {
     fn test_chat_message_creation() {
         let msg = ChatMessage::new(
             "did:sync:abc123".to_string(),
-            Some("Alice".to_string()),
+            Some("Love".to_string()),
             "Hello, world!".to_string(),
             1705123456789,
             42,
@@ -134,7 +134,7 @@ mod tests {
 
         assert_eq!(msg.id, "did:sync:abc123:42");
         assert_eq!(msg.sender_did, "did:sync:abc123");
-        assert_eq!(msg.sender_name, Some("Alice".to_string()));
+        assert_eq!(msg.sender_name, Some("Love".to_string()));
         assert_eq!(msg.content, "Hello, world!");
         assert_eq!(msg.timestamp, 1705123456789);
         assert_eq!(msg.sequence, 42);
@@ -145,13 +145,13 @@ mod tests {
     fn test_display_sender_with_name() {
         let msg = ChatMessage::new(
             "did:sync:abc123".to_string(),
-            Some("Alice".to_string()),
+            Some("Love".to_string()),
             "Hi".to_string(),
             0,
             0,
             false,
         );
-        assert_eq!(msg.display_sender(), "Alice");
+        assert_eq!(msg.display_sender(), "Love");
     }
 
     #[test]

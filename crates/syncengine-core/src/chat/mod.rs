@@ -200,12 +200,12 @@ mod tests {
         let recipient_keys = ProfileKeys::generate();
         let (envelope, payload) = create_test_dm_envelope(&keys, "Hello!", recipient_keys.did(), 1);
 
-        let msg = extract_chat_message(&envelope, &payload, "other_did", Some("Alice".to_string()));
+        let msg = extract_chat_message(&envelope, &payload, "other_did", Some("Love".to_string()));
 
         assert!(msg.is_some());
         let msg = msg.unwrap();
         assert_eq!(msg.content, "Hello!");
-        assert_eq!(msg.sender_name, Some("Alice".to_string()));
+        assert_eq!(msg.sender_name, Some("Love".to_string()));
         assert_eq!(msg.sequence, 1);
         assert!(!msg.is_mine);
     }

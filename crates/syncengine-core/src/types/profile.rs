@@ -20,7 +20,7 @@ pub struct UserProfile {
     /// Optional subtitle (e.g., role, tagline)
     pub subtitle: Option<String>,
 
-    /// Custom short link (e.g., "alice" → sync.local/alice)
+    /// Custom short link (e.g., "love" → sync.local/love)
     pub profile_link: Option<String>,
 
     /// Iroh blob hash for avatar image
@@ -88,9 +88,9 @@ mod tests {
 
     #[test]
     fn test_new_profile() {
-        let profile = UserProfile::new("test-peer-id".to_string(), "Alice".to_string());
+        let profile = UserProfile::new("test-peer-id".to_string(), "Love".to_string());
         assert_eq!(profile.peer_id, "test-peer-id");
-        assert_eq!(profile.display_name, "Alice");
+        assert_eq!(profile.display_name, "Love");
         assert!(profile.created_at > 0);
         assert_eq!(profile.created_at, profile.updated_at);
     }
@@ -132,7 +132,7 @@ mod tests {
 /// use syncengine_core::types::{UserProfile, SignedProfile};
 ///
 /// let keypair = HybridKeypair::generate();
-/// let profile = UserProfile::new("peer123".to_string(), "Alice".to_string());
+/// let profile = UserProfile::new("peer123".to_string(), "Love".to_string());
 /// let signed = SignedProfile::sign(&profile, &keypair);
 ///
 /// // Later, verify the profile
@@ -357,19 +357,19 @@ mod signed_profile_tests {
     #[test]
     fn test_sign_and_verify_profile() {
         let keypair = HybridKeypair::generate();
-        let profile = UserProfile::new("peer123".to_string(), "Alice".to_string());
+        let profile = UserProfile::new("peer123".to_string(), "Love".to_string());
 
         let signed = SignedProfile::sign(&profile, &keypair);
 
         // Verify should succeed
         assert!(signed.verify());
-        assert_eq!(signed.profile.display_name, "Alice");
+        assert_eq!(signed.profile.display_name, "Love");
     }
 
     #[test]
     fn test_modified_profile_fails_verification() {
         let keypair = HybridKeypair::generate();
-        let profile = UserProfile::new("peer123".to_string(), "Alice".to_string());
+        let profile = UserProfile::new("peer123".to_string(), "Love".to_string());
 
         let mut signed = SignedProfile::sign(&profile, &keypair);
 
@@ -384,7 +384,7 @@ mod signed_profile_tests {
     fn test_wrong_key_fails_verification() {
         let keypair1 = HybridKeypair::generate();
         let keypair2 = HybridKeypair::generate();
-        let profile = UserProfile::new("peer123".to_string(), "Alice".to_string());
+        let profile = UserProfile::new("peer123".to_string(), "Love".to_string());
 
         // Sign with keypair1 but replace public key with keypair2's
         let mut signed = SignedProfile::sign(&profile, &keypair1);
@@ -397,7 +397,7 @@ mod signed_profile_tests {
     #[test]
     fn test_signed_profile_serialization_roundtrip() {
         let keypair = HybridKeypair::generate();
-        let profile = UserProfile::new("peer123".to_string(), "Alice".to_string());
+        let profile = UserProfile::new("peer123".to_string(), "Love".to_string());
         let signed = SignedProfile::sign(&profile, &keypair);
 
         // Serialize and deserialize
@@ -407,13 +407,13 @@ mod signed_profile_tests {
 
         // Should still verify after roundtrip
         assert!(recovered.verify());
-        assert_eq!(recovered.profile.display_name, "Alice");
+        assert_eq!(recovered.profile.display_name, "Love");
     }
 
     #[test]
     fn test_signed_profile_did() {
         let keypair = HybridKeypair::generate();
-        let profile = UserProfile::new("peer123".to_string(), "Alice".to_string());
+        let profile = UserProfile::new("peer123".to_string(), "Love".to_string());
         let signed = SignedProfile::sign(&profile, &keypair);
 
         let did = signed.did();
@@ -434,7 +434,7 @@ mod profile_pin_tests {
 
     #[test]
     fn test_profile_pin_creation() {
-        let signed = create_test_signed_profile("Alice");
+        let signed = create_test_signed_profile("Love");
         let pin = ProfilePin::new(
             "did:sync:test123".to_string(),
             signed,
@@ -470,7 +470,7 @@ mod profile_pin_tests {
     #[test]
     fn test_profile_pin_update() {
         let keypair = HybridKeypair::generate();
-        let profile1 = UserProfile::new("peer123".to_string(), "Alice".to_string());
+        let profile1 = UserProfile::new("peer123".to_string(), "Love".to_string());
         let signed1 = SignedProfile::sign(&profile1, &keypair);
 
         let mut pin = ProfilePin::new(
@@ -485,19 +485,19 @@ mod profile_pin_tests {
         std::thread::sleep(std::time::Duration::from_millis(10));
 
         // Update with new profile
-        let mut profile2 = UserProfile::new("peer123".to_string(), "Alice Updated".to_string());
+        let mut profile2 = UserProfile::new("peer123".to_string(), "Love Updated".to_string());
         profile2.touch();
         let signed2 = SignedProfile::sign(&profile2, &keypair);
 
         assert!(pin.update_profile(signed2));
-        assert_eq!(pin.signed_profile.profile.display_name, "Alice Updated");
+        assert_eq!(pin.signed_profile.profile.display_name, "Love Updated");
         assert!(pin.last_updated >= original_updated);
     }
 
     #[test]
     fn test_profile_pin_rejects_invalid_signature() {
         let keypair = HybridKeypair::generate();
-        let profile = UserProfile::new("peer123".to_string(), "Alice".to_string());
+        let profile = UserProfile::new("peer123".to_string(), "Love".to_string());
         let signed = SignedProfile::sign(&profile, &keypair);
 
         let mut pin = ProfilePin::new(
@@ -508,14 +508,14 @@ mod profile_pin_tests {
 
         // Create an invalid signed profile (modified after signing)
         let keypair2 = HybridKeypair::generate();
-        let profile2 = UserProfile::new("peer456".to_string(), "Bob".to_string());
+        let profile2 = UserProfile::new("peer456".to_string(), "Joy".to_string());
         let mut invalid_signed = SignedProfile::sign(&profile2, &keypair2);
         invalid_signed.profile.display_name = "Tampered".to_string();
 
         // Update should fail
         assert!(!pin.update_profile(invalid_signed));
         // Original profile should be preserved
-        assert_eq!(pin.signed_profile.profile.display_name, "Alice");
+        assert_eq!(pin.signed_profile.profile.display_name, "Love");
     }
 
     #[test]
@@ -531,7 +531,7 @@ mod profile_pin_tests {
 
     #[test]
     fn test_profile_pin_serialization_roundtrip() {
-        let signed = create_test_signed_profile("Alice");
+        let signed = create_test_signed_profile("Love");
         let pin = ProfilePin::new(
             "did:sync:test".to_string(),
             signed,

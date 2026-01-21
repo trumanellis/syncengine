@@ -1,9 +1,12 @@
 //! Peer Status Dropdown Component
 //!
 //! Shows connected peers with status and message capability.
+//! Also displays the Packet Event Log for Indra's Network visualization.
 
 use dioxus::prelude::*;
-use syncengine_core::{Peer, PeerStatus};
+use syncengine_core::{PacketEvent, Peer, PeerStatus};
+
+use crate::components::PacketEventLog;
 
 /// Format timestamp as relative time string
 fn format_relative_time(timestamp: u64) -> String {
@@ -33,6 +36,9 @@ pub struct PeerStatusDropdownProps {
     pub on_sync: EventHandler<()>,
     /// Callback when Message button is clicked for a peer
     pub on_message: EventHandler<(String, String)>, // (did, name)
+    /// All packet events for Indra's Network visualization
+    #[props(default = Vec::new())]
+    pub packet_events: Vec<PacketEvent>,
 }
 
 /// Peer Status Dropdown
@@ -133,6 +139,15 @@ pub fn PeerStatusDropdown(props: PeerStatusDropdownProps) -> Element {
                             }
                         }
                     }
+                }
+            }
+
+            // Packet Event Log section (Indra's Network visualization)
+            div { class: "peer-dropdown-packet-log",
+                PacketEventLog {
+                    peer_did: "all".to_string(),
+                    events: props.packet_events.clone(),
+                    expanded: false,
                 }
             }
 

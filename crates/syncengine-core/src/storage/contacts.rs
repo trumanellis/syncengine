@@ -317,6 +317,7 @@ mod tests {
             last_seen: chrono::Utc::now().timestamp() as u64,
             status: ContactStatus::Offline,
             is_favorite: false,
+            encryption_keys: None,
         }
     }
 
@@ -334,6 +335,7 @@ mod tests {
             node_addr: NodeAddrBytes::new([0u8; 32]),
             state,
             created_at: chrono::Utc::now().timestamp(),
+            encryption_keys: None,
         }
     }
 
@@ -343,15 +345,15 @@ mod tests {
         let db_path = temp_dir.path().join("test.db");
         let storage = Storage::new(&db_path).unwrap();
 
-        let contact = create_test_contact("did:sync:alice", "Alice");
+        let contact = create_test_contact("did:sync:love", "Love");
 
         // Save
         storage.save_contact(&contact).unwrap();
 
         // Load
-        let loaded = storage.load_contact("did:sync:alice").unwrap();
+        let loaded = storage.load_contact("did:sync:love").unwrap();
         assert!(loaded.is_some());
-        assert_eq!(loaded.unwrap().profile.display_name, "Alice");
+        assert_eq!(loaded.unwrap().profile.display_name, "Love");
     }
 
     #[test]
@@ -370,17 +372,17 @@ mod tests {
         let db_path = temp_dir.path().join("test.db");
         let storage = Storage::new(&db_path).unwrap();
 
-        let contact = create_test_contact("did:sync:bob", "Bob");
+        let contact = create_test_contact("did:sync:joy", "Joy");
         storage.save_contact(&contact).unwrap();
 
         // Verify it exists
-        assert!(storage.load_contact("did:sync:bob").unwrap().is_some());
+        assert!(storage.load_contact("did:sync:joy").unwrap().is_some());
 
         // Delete
-        storage.delete_contact("did:sync:bob").unwrap();
+        storage.delete_contact("did:sync:joy").unwrap();
 
         // Verify it's gone
-        assert!(storage.load_contact("did:sync:bob").unwrap().is_none());
+        assert!(storage.load_contact("did:sync:joy").unwrap().is_none());
     }
 
     #[test]
@@ -390,8 +392,8 @@ mod tests {
         let storage = Storage::new(&db_path).unwrap();
 
         // Create multiple contacts
-        let contact1 = create_test_contact("did:sync:alice", "Alice");
-        let contact2 = create_test_contact("did:sync:bob", "Bob");
+        let contact1 = create_test_contact("did:sync:love", "Love");
+        let contact2 = create_test_contact("did:sync:joy", "Joy");
         let contact3 = create_test_contact("did:sync:charlie", "Charlie");
 
         storage.save_contact(&contact1).unwrap();
@@ -406,8 +408,8 @@ mod tests {
             .iter()
             .map(|c| c.profile.display_name.clone())
             .collect();
-        assert!(names.contains(&"Alice".to_string()));
-        assert!(names.contains(&"Bob".to_string()));
+        assert!(names.contains(&"Love".to_string()));
+        assert!(names.contains(&"Joy".to_string()));
         assert!(names.contains(&"Charlie".to_string()));
     }
 

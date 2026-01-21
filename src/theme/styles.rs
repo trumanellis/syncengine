@@ -6456,8 +6456,9 @@ body {
   top: 60px;
   right: var(--space-4);
   z-index: 1000;
-  width: 320px;
-  max-width: calc(100vw - var(--space-8));
+  width: fit-content;
+  min-width: 280px;
+  max-width: min(400px, calc(100vw - var(--space-8)));
   max-height: calc(100vh - 140px);
   background: var(--void-black);
   border: 1px solid var(--moss);
@@ -6604,6 +6605,18 @@ body {
 .peer-message-btn:hover {
   border-color: var(--cyan);
   color: var(--cyan);
+}
+
+/* Packet log section inside dropdown */
+.peer-dropdown-packet-log {
+  border-top: 1px solid var(--void-border);
+  padding: var(--space-2) var(--space-4);
+}
+
+.peer-dropdown-packet-log .packet-event-log {
+  margin-top: 0;
+  border-top: none;
+  padding-top: 0;
 }
 
 .peer-dropdown-footer {
@@ -7334,6 +7347,148 @@ body {
 
 .scroll-anchor {
   height: 1px;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Packet Event Log - Indra's Network Visualization
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.packet-event-log {
+  margin-top: var(--space-2);
+  border-top: 1px solid var(--void-border);
+  padding-top: var(--space-2);
+}
+
+.packet-log-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  cursor: pointer;
+  padding: var(--space-1) var(--space-2);
+  border-radius: 4px;
+  transition: background var(--transition-fast);
+}
+
+.packet-log-header:hover {
+  background: var(--void-lighter);
+}
+
+.packet-log-toggle {
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+  width: 12px;
+}
+
+.packet-log-title {
+  font-size: var(--text-xs);
+  font-family: var(--font-mono);
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.packet-log-count {
+  font-size: var(--text-xs);
+  color: var(--text-dim);
+}
+
+.packet-log-events {
+  max-height: 200px;
+  overflow-y: auto;
+  padding: var(--space-2) 0;
+}
+
+.packet-log-empty {
+  font-size: var(--text-xs);
+  color: var(--text-dim);
+  text-align: center;
+  padding: var(--space-3);
+  font-style: italic;
+}
+
+.packet-event-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-2);
+  font-size: var(--text-xs);
+  font-family: var(--font-mono);
+  border-radius: 4px;
+  transition: background var(--transition-fast);
+}
+
+.packet-event-row:hover {
+  background: var(--void-lighter);
+}
+
+.packet-event-row.delivered {
+  text-decoration: line-through;
+  opacity: 0.6;
+}
+
+/* Path coloring based on direction */
+.packet-event-row.incoming .packet-path {
+  color: var(--cyan);
+}
+
+.packet-event-row.outgoing .packet-path {
+  color: var(--gold);
+}
+
+.packet-path {
+  flex: 1;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.packet-content {
+  flex: 0 0 120px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.packet-decrypt {
+  width: 16px;
+  text-align: center;
+  font-weight: bold;
+}
+
+.packet-decrypt.decrypt-success {
+  color: var(--moss-glow);
+}
+
+.packet-decrypt.decrypt-global {
+  color: var(--cyan);
+}
+
+.packet-decrypt.decrypt-fail {
+  color: var(--text-dim);
+}
+
+.packet-decrypt.decrypt-pending {
+  color: var(--text-muted);
+}
+
+.packet-time {
+  flex: 0 0 40px;
+  text-align: right;
+  color: var(--text-dim);
+}
+
+.packet-indicator {
+  font-size: var(--text-xs);
+  font-family: var(--font-mono);
+  color: var(--text-dim);
+  margin-left: var(--space-2);
+}
+
+.packet-indicator .packet-pending {
+  color: var(--gold);
 }
 
 "#;

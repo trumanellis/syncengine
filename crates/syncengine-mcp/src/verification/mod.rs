@@ -321,18 +321,18 @@ mod tests {
     #[test]
     fn test_divergence_detection() {
         let mut heads_per_node = HashMap::new();
-        heads_per_node.insert("alice".into(), vec!["head1".into(), "head2".into()]);
-        heads_per_node.insert("bob".into(), vec!["head1".into(), "head3".into()]);
-        heads_per_node.insert("carol".into(), vec!["head1".into(), "head2".into()]);
+        heads_per_node.insert("love".into(), vec!["head1".into(), "head2".into()]);
+        heads_per_node.insert("joy".into(), vec!["head1".into(), "head3".into()]);
+        heads_per_node.insert("peace".into(), vec!["head1".into(), "head2".into()]);
 
         let mut task_counts = HashMap::new();
-        task_counts.insert("alice".into(), 5);
-        task_counts.insert("bob".into(), 4);
-        task_counts.insert("carol".into(), 5);
+        task_counts.insert("love".into(), 5);
+        task_counts.insert("joy".into(), 4);
+        task_counts.insert("peace".into(), 5);
 
         let divergence = DeliveryVerifier::compute_divergence(&heads_per_node, &task_counts);
 
-        // Alice and Carol should be in one group, Bob in another
+        // Love and Peace should be in one group, Joy in another
         assert_eq!(divergence.state_groups.len(), 2);
 
         // Common ancestor should be head1
@@ -342,8 +342,8 @@ mod tests {
     #[test]
     fn test_in_sync_detection() {
         let mut heads_per_node: HashMap<String, Vec<String>> = HashMap::new();
-        heads_per_node.insert("alice".to_string(), vec!["head1".to_string()]);
-        heads_per_node.insert("bob".to_string(), vec!["head1".to_string()]);
+        heads_per_node.insert("love".to_string(), vec!["head1".to_string()]);
+        heads_per_node.insert("joy".to_string(), vec!["head1".to_string()]);
 
         let all_heads: Vec<&Vec<String>> = heads_per_node.values().collect();
         let in_sync = all_heads.iter().all(|h| *h == all_heads[0]);

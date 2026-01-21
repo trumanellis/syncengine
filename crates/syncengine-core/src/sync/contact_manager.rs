@@ -12,11 +12,11 @@
 //! ┌─────────────────────────────────────────────────────────────────┐
 //! │  Contact Exchange Protocol                                      │
 //! │                                                                  │
-//! │  1. Alice generates invite → "sync-contact:{base58}"            │
-//! │  2. Bob decodes invite → verifies signature, checks expiry      │
-//! │  3. Bob sends ContactRequest → saves as OutgoingPending         │
-//! │  4. Alice receives request → saves as IncomingPending           │
-//! │  5. Alice accepts → both finalize connection                    │
+//! │  1. Love generates invite → "sync-contact:{base58}"            │
+//! │  2. Joy decodes invite → verifies signature, checks expiry      │
+//! │  3. Joy sends ContactRequest → saves as OutgoingPending         │
+//! │  4. Love receives request → saves as IncomingPending           │
+//! │  5. Love accepts → both finalize connection                    │
 //! │  6. Subscribe to 1:1 gossip topic                               │
 //! │  7. Save to contacts table with shared keys                     │
 //! └─────────────────────────────────────────────────────────────────┘
@@ -94,6 +94,8 @@ pub struct ContactManager {
     /// receives a ContactAccept, it adds the sender here so we can send messages.
     /// When we accept a contact, we also add the sender here via subscribe_contact_topic().
     active_topics: ActiveContactTopics,
+    /// Packet event buffer for UI visualization (Indra's Network)
+    packet_event_buffer: Option<Arc<crate::sync::PacketEventBuffer>>,
 }
 
 impl ContactManager {
@@ -107,6 +109,7 @@ impl ContactManager {
     /// * `storage` - Storage for persistence
     /// * `event_tx` - Event broadcast channel (shared with ContactProtocolHandler)
     /// * `active_topics` - Shared map of contact topic senders (shared with ContactProtocolHandler)
+    /// * `packet_event_buffer` - Optional buffer for packet event visualization
     pub fn new(
         gossip_sync: Arc<GossipSync>,
         keypair: Arc<HybridKeypair>,
@@ -114,6 +117,7 @@ impl ContactManager {
         storage: Arc<Storage>,
         event_tx: broadcast::Sender<ContactEvent>,
         active_topics: ActiveContactTopics,
+        packet_event_buffer: Option<Arc<crate::sync::PacketEventBuffer>>,
     ) -> Self {
         // Note: Incoming contact messages are handled by ContactProtocolHandler
         // registered with the Router in GossipSync. No listener task needed here.
@@ -127,6 +131,7 @@ impl ContactManager {
             storage,
             event_tx,
             active_topics,
+            packet_event_buffer,
         }
     }
 
@@ -521,6 +526,7 @@ impl ContactManager {
 
         // Save as pending (OutgoingPending)
         // Note: signed_profile is None for outgoing requests - we'll get it from the accept response
+        // Note: encryption_keys is None initially - we'll get it from the ContactAccept response
         let pending = PendingContact {
             invite_id: invite.invite_id,
             peer_did: invite.inviter_did.clone(),
@@ -529,6 +535,7 @@ impl ContactManager {
             node_addr: invite.node_addr.clone(),
             state: ContactState::OutgoingPending,
             created_at: chrono::Utc::now().timestamp(),
+            encryption_keys: None, // Will be populated from ContactAccept
         };
 
         self.storage.save_pending(&pending)?;
@@ -707,6 +714,7 @@ impl ContactManager {
             last_seen: chrono::Utc::now().timestamp() as u64,
             status: ContactStatus::Online, // Online since we just communicated
             is_favorite: false,
+            encryption_keys: pending.encryption_keys.clone(),
         };
 
         // Save to contacts table (legacy)
@@ -1017,6 +1025,7 @@ impl ContactManager {
             sender_for_listener,
             receiver,
             self.event_tx.clone(),
+            self.packet_event_buffer.clone(),
         );
 
         info!(
@@ -1042,6 +1051,7 @@ impl ContactManager {
         sender: crate::sync::TopicSender,
         mut receiver: crate::sync::TopicReceiver,
         event_tx: broadcast::Sender<ContactEvent>,
+        packet_event_buffer: Option<Arc<crate::sync::PacketEventBuffer>>,
     ) {
         tokio::spawn(async move {
             use crate::sync::TopicEvent;
@@ -1159,6 +1169,7 @@ impl ContactManager {
                         Ok(crate::sync::ProfileGossipMessage::Packet { envelope }) => {
                             // Direct message packet received via 1:1 contact topic
                             let sender_did = envelope.sender.to_string();
+                            let delivered_from = msg.from.to_string();
 
                             // DIAGNOSTIC: Log at info level with raw byte comparison
                             // This helps identify subtle DID format mismatches
@@ -1170,9 +1181,88 @@ impl ContactManager {
                                 sender_did_bytes = ?sender_did.as_bytes(),
                                 peer_did_bytes = ?peer_did.as_bytes(),
                                 sequence = envelope.sequence,
+                                delivered_from = %delivered_from,
                                 did_match = (sender_did == peer_did),
                                 "PARSED PACKET - checking DID match"
                             );
+
+                            // Record packet event for UI visualization (Indra's Network)
+                            if let Some(ref buffer) = packet_event_buffer {
+                                // Get peer display name from storage
+                                let author_name = storage.load_peer_by_did(&sender_did)
+                                    .ok()
+                                    .flatten()
+                                    .map(|p| p.display_name())
+                                    .unwrap_or_else(|| format!("{}...", &sender_did[..16.min(sender_did.len())]));
+
+                                // Get recipients from envelope (if any)
+                                let recipients = envelope.recipients();
+                                let destination_did = recipients.first()
+                                    .map(|d| d.as_str().to_string())
+                                    .unwrap_or_else(|| "unknown".to_string());
+                                let destination_name = if destination_did == "unknown" {
+                                    "Unknown".to_string()
+                                } else {
+                                    storage.load_peer_by_did(&destination_did)
+                                        .ok()
+                                        .flatten()
+                                        .map(|p| p.display_name())
+                                        .unwrap_or_else(|| "Me".to_string())
+                                };
+
+                                // Determine decryption status based on packet type
+                                let (decryption_status, content_preview) = if envelope.is_global() {
+                                    // Global packet - not encrypted
+                                    let preview = match envelope.decode_global_payload() {
+                                        Ok(crate::profile::PacketPayload::DirectMessage { content, .. }) => {
+                                            crate::sync::PacketEvent::preview_content(&content)
+                                        }
+                                        Ok(_) => "[profile update]".to_string(),
+                                        Err(_) => "[global]".to_string(),
+                                    };
+                                    (crate::sync::DecryptionStatus::Global, preview)
+                                } else {
+                                    // Sealed packet - attempt to decrypt if we have keys
+                                    if let Ok(Some(keys)) = storage.load_profile_keys() {
+                                        match envelope.decrypt_for_recipient(&keys) {
+                                            Ok(payload) => {
+                                                let preview = match payload {
+                                                    crate::profile::PacketPayload::DirectMessage { content, .. } => {
+                                                        crate::sync::PacketEvent::preview_content(&content)
+                                                    }
+                                                    _ => "[packet]".to_string(),
+                                                };
+                                                (crate::sync::DecryptionStatus::Decrypted, preview)
+                                            }
+                                            Err(_) => {
+                                                // Cannot decrypt - not intended for us
+                                                (crate::sync::DecryptionStatus::CannotDecrypt { reason: "not recipient".to_string() }, "[encrypted]".to_string())
+                                            }
+                                        }
+                                    } else {
+                                        // No keys available
+                                        (crate::sync::DecryptionStatus::NotAttempted, "[encrypted]".to_string())
+                                    }
+                                };
+
+                                let event = crate::sync::PacketEvent {
+                                    id: crate::sync::PacketEvent::make_id(&sender_did, envelope.sequence),
+                                    timestamp: chrono::Utc::now().timestamp_millis(),
+                                    direction: crate::sync::PacketDirection::Incoming,
+                                    sequence: envelope.sequence,
+                                    author_did: sender_did.clone(),
+                                    author_name,
+                                    relay_did: None, // TODO: Detect relay from msg.from vs expected node
+                                    relay_name: None,
+                                    destination_did,
+                                    destination_name,
+                                    decryption_status,
+                                    content_preview,
+                                    is_delivered: false,
+                                    peer_did: peer_did.clone(),
+                                };
+                                buffer.record(event);
+                            }
 
                             // Only process packets from the expected peer (the contact)
                             if sender_did == peer_did {
@@ -1636,6 +1726,19 @@ impl ContactManager {
 
         let requester_pubkey = self.keypair.public_key().to_bytes();
 
+        // Load our encryption keys (ProfilePublicKeys) for E2E encryption
+        let requester_encryption_keys = match self.storage.load_profile_keys() {
+            Ok(Some(profile_keys)) => Some(profile_keys.public_bundle().to_bytes()),
+            Ok(None) => {
+                warn!("No profile keys available - contact will not support E2E encryption");
+                None
+            }
+            Err(e) => {
+                warn!(error = %e, "Failed to load profile keys - contact will not support E2E encryption");
+                None
+            }
+        };
+
         // Load our full profile and sign it
         let user_profile = match self.storage.load_profile(&self.did.to_string()) {
             Ok(Some(profile)) => profile,
@@ -1658,6 +1761,10 @@ impl ContactManager {
             .map_err(|e| SyncError::Serialization(format!("Failed to serialize signed profile: {}", e)))?;
         data_to_sign.extend_from_slice(&profile_bytes);
         data_to_sign.extend_from_slice(&our_node_addr_bytes);
+        // Include encryption keys in signature if present
+        if let Some(ref enc_keys) = requester_encryption_keys {
+            data_to_sign.extend_from_slice(enc_keys);
+        }
 
         let signature = self.keypair.sign(&data_to_sign);
         let requester_signature = signature.to_bytes();
@@ -1668,6 +1775,7 @@ impl ContactManager {
             requester_pubkey,
             requester_signed_profile: signed_profile,
             requester_node_addr: our_node_addr_bytes,
+            requester_encryption_keys,
             requester_signature,
         };
 
@@ -1739,6 +1847,19 @@ impl ContactManager {
         let accepter_did = self.did.to_string();
         let accepter_pubkey = self.keypair.public_key().to_bytes();
 
+        // Load our encryption keys (ProfilePublicKeys) for E2E encryption
+        let accepter_encryption_keys = match self.storage.load_profile_keys() {
+            Ok(Some(profile_keys)) => Some(profile_keys.public_bundle().to_bytes()),
+            Ok(None) => {
+                warn!("No profile keys available - contact will not support E2E encryption");
+                None
+            }
+            Err(e) => {
+                warn!(error = %e, "Failed to load profile keys - contact will not support E2E encryption");
+                None
+            }
+        };
+
         // Load our full profile and sign it
         let user_profile = match self.storage.load_profile(&self.did.to_string()) {
             Ok(Some(profile)) => profile,
@@ -1766,6 +1887,10 @@ impl ContactManager {
             .map_err(|e| SyncError::Serialization(format!("Failed to serialize signed profile: {}", e)))?;
         data_to_sign.extend_from_slice(&profile_bytes);
         data_to_sign.extend_from_slice(&accepter_node_addr);
+        // Include encryption keys in signature if present
+        if let Some(ref enc_keys) = accepter_encryption_keys {
+            data_to_sign.extend_from_slice(enc_keys);
+        }
 
         // Sign with our hybrid keypair
         let sig = self.keypair.sign(&data_to_sign);
@@ -1777,6 +1902,7 @@ impl ContactManager {
             accepter_pubkey,
             accepter_signed_profile: signed_profile,
             accepter_node_addr,
+            accepter_encryption_keys,
             signature,
         };
 
@@ -1940,7 +2066,7 @@ mod tests {
         // Create empty active_topics for testing (normally shared with ContactProtocolHandler)
         let active_topics = Arc::new(RwLock::new(HashMap::new()));
 
-        let manager = ContactManager::new(gossip_sync, keypair, did, storage, event_tx, active_topics);
+        let manager = ContactManager::new(gossip_sync, keypair, did, storage, event_tx, active_topics, None);
 
         (manager, temp_dir)
     }
@@ -1957,7 +2083,7 @@ mod tests {
     #[tokio::test]
     async fn test_generate_and_decode_invite() {
         let (manager, _temp) = create_test_manager().await;
-        let profile = create_test_profile("Alice");
+        let profile = create_test_profile("Love");
 
         // Generate invite
         let invite_code = manager.generate_invite(profile.clone(), 24).unwrap();
@@ -1966,7 +2092,7 @@ mod tests {
         // Decode invite
         let decoded = manager.decode_invite(&invite_code).unwrap();
         assert_eq!(decoded.version, 2);
-        assert_eq!(decoded.display_name, "Alice");
+        assert_eq!(decoded.display_name, "Love");
         assert!(!decoded.is_expired());
     }
 
@@ -1976,7 +2102,7 @@ mod tests {
 
         // Create a profile with realistic data
         let profile = ProfileSnapshot {
-            display_name: "Alice Wonderland".to_string(),
+            display_name: "Love Wonderland".to_string(),
             subtitle: Some("Software Engineer".to_string()),
             avatar_blob_id: Some("bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi".to_string()),
             bio: "Building decentralized systems and exploring the future of peer-to-peer technology. Passionate about privacy, security, and user empowerment.".to_string(),
@@ -2017,7 +2143,7 @@ mod tests {
         // Decode to verify it works
         let decoded = manager.decode_invite(&invite_code).unwrap();
         assert_eq!(decoded.version, 2);
-        assert_eq!(decoded.display_name, "Alice Wonderland");
+        assert_eq!(decoded.display_name, "Love Wonderland");
     }
 
     #[tokio::test]
@@ -2049,7 +2175,7 @@ mod tests {
             invite_id,
             inviter_did: "did:sync:fake_peer".to_string(),
             inviter_pubkey: vec![0u8; 32],
-            profile_snapshot: create_test_profile("Bob"),
+            profile_snapshot: create_test_profile("Joy"),
             node_addr: NodeAddrBytes::new([0u8; 32]),
             created_at: chrono::Utc::now().timestamp(),
             expires_at: chrono::Utc::now().timestamp() + 86400,
@@ -2065,6 +2191,7 @@ mod tests {
             node_addr: fake_invite.node_addr.clone(),
             state: ContactState::OutgoingPending,
             created_at: chrono::Utc::now().timestamp(),
+            encryption_keys: None,
         };
 
         // Save to storage (what send_contact_request does, without network operation)
@@ -2077,7 +2204,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(loaded.state, ContactState::OutgoingPending);
-        assert_eq!(loaded.profile.display_name, "Bob");
+        assert_eq!(loaded.profile.display_name, "Joy");
         assert_eq!(loaded.peer_did, "did:sync:fake_peer");
     }
 
@@ -2095,6 +2222,7 @@ mod tests {
             node_addr: NodeAddrBytes::new([0u8; 32]),
             state: ContactState::IncomingPending,
             created_at: chrono::Utc::now().timestamp(),
+            encryption_keys: None,
         };
 
         manager.storage.save_pending(&pending).unwrap();
@@ -2122,6 +2250,7 @@ mod tests {
             last_seen: chrono::Utc::now().timestamp() as u64,
             status: ContactStatus::Offline,
             is_favorite: false,
+            encryption_keys: pending.encryption_keys.clone(),
         };
 
         // 3. Save contact to storage
@@ -2155,6 +2284,7 @@ mod tests {
             node_addr: NodeAddrBytes::new([0u8; 32]),
             state: ContactState::IncomingPending,
             created_at: chrono::Utc::now().timestamp(),
+            encryption_keys: None,
         };
 
         manager.storage.save_pending(&pending).unwrap();
@@ -2171,8 +2301,8 @@ mod tests {
 
     #[test]
     fn test_derive_contact_topic_deterministic() {
-        let did1 = "did:sync:alice";
-        let did2 = "did:sync:bob";
+        let did1 = "did:sync:love";
+        let did2 = "did:sync:joy";
 
         let topic1 = ContactManager::derive_contact_topic(did1, did2);
         let topic2 = ContactManager::derive_contact_topic(did2, did1);
@@ -2183,8 +2313,8 @@ mod tests {
 
     #[test]
     fn test_derive_contact_key_deterministic() {
-        let did1 = "did:sync:alice";
-        let did2 = "did:sync:bob";
+        let did1 = "did:sync:love";
+        let did2 = "did:sync:joy";
 
         let key1 = ContactManager::derive_contact_key(did1, did2);
         let key2 = ContactManager::derive_contact_key(did2, did1);
@@ -2195,8 +2325,8 @@ mod tests {
 
     #[test]
     fn test_derive_contact_topic_different_pairs() {
-        let topic1 = ContactManager::derive_contact_topic("did:sync:alice", "did:sync:bob");
-        let topic2 = ContactManager::derive_contact_topic("did:sync:alice", "did:sync:charlie");
+        let topic1 = ContactManager::derive_contact_topic("did:sync:love", "did:sync:joy");
+        let topic2 = ContactManager::derive_contact_topic("did:sync:love", "did:sync:charlie");
 
         // Different peer pairs should produce different topics
         assert_ne!(topic1, topic2);

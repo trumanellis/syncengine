@@ -240,12 +240,12 @@ mod tests {
         let realm_id = RealmId::new();
         let trace = MessageTrace::new(
             trace_id,
-            "alice".into(),
+            "love".into(),
             realm_id,
             "Hello".into(),
         );
 
-        assert_eq!(trace.source_node, "alice");
+        assert_eq!(trace.source_node, "love");
         assert_eq!(trace.status(), TraceStatus::InProgress);
         assert!(!trace.is_complete());
     }
@@ -256,20 +256,20 @@ mod tests {
         let realm_id = RealmId::new();
         let mut trace = MessageTrace::new(
             trace_id,
-            "alice".into(),
+            "love".into(),
             realm_id,
             "Hello".into(),
         );
 
         trace.add_hop(TraceHop {
-            node_id: "bob".into(),
+            node_id: "joy".into(),
             event_type: MessageEventType::Received,
             timestamp: Utc::now(),
-            from_peer: Some("alice".into()),
+            from_peer: Some("love".into()),
         });
 
         assert_eq!(trace.hops.len(), 1);
-        assert_eq!(trace.received_by(), vec!["bob".to_string()]);
+        assert_eq!(trace.received_by(), vec!["joy".to_string()]);
     }
 
     #[test]
@@ -278,7 +278,7 @@ mod tests {
         let realm_id = RealmId::new();
         let mut trace = MessageTrace::new(
             trace_id,
-            "alice".into(),
+            "love".into(),
             realm_id,
             "Hello".into(),
         );

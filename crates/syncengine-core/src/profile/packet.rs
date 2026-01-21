@@ -668,7 +668,7 @@ mod tests {
         // Test all payload variants can be serialized
         let payloads = vec![
             PacketPayload::ProfileUpdate {
-                display_name: Some("Alice".to_string()),
+                display_name: Some("Love".to_string()),
                 bio: Some("Hello".to_string()),
                 avatar_blob_id: None,
             },

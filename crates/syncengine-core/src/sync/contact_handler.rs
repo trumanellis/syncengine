@@ -128,6 +128,7 @@ impl ContactProtocolHandler {
                 requester_pubkey,
                 requester_signed_profile,
                 requester_node_addr,
+                requester_encryption_keys,
                 requester_signature,
             } => {
                 // Verify signature
@@ -166,6 +167,10 @@ impl ContactProtocolHandler {
                     .map_err(|e| SyncError::Serialization(format!("Failed to serialize signed profile: {}", e)))?;
                 data_to_verify.extend_from_slice(&profile_bytes);
                 data_to_verify.extend_from_slice(&requester_node_addr);
+                // Include encryption keys in signature verification if present
+                if let Some(ref enc_keys) = requester_encryption_keys {
+                    data_to_verify.extend_from_slice(enc_keys);
+                }
 
                 // Verify message signature
                 let signature = HybridSignature::from_bytes(&requester_signature)
@@ -217,6 +222,7 @@ impl ContactProtocolHandler {
                     node_addr,
                     state: ContactState::IncomingPending,
                     created_at: chrono::Utc::now().timestamp(),
+                    encryption_keys: requester_encryption_keys,
                 };
 
                 storage.save_pending(&pending)?;
@@ -242,6 +248,7 @@ impl ContactProtocolHandler {
                 accepter_pubkey,
                 accepter_signed_profile,
                 accepter_node_addr,
+                accepter_encryption_keys,
                 signature,
             } => {
                 // Verify signature
@@ -283,6 +290,10 @@ impl ContactProtocolHandler {
                     .map_err(|e| SyncError::Serialization(format!("Failed to serialize signed profile: {}", e)))?;
                 data_to_verify.extend_from_slice(&profile_bytes);
                 data_to_verify.extend_from_slice(&accepter_node_addr);
+                // Include encryption keys in signature verification if present
+                if let Some(ref enc_keys) = accepter_encryption_keys {
+                    data_to_verify.extend_from_slice(enc_keys);
+                }
 
                 // Verify message signature
                 let sig = HybridSignature::from_bytes(&signature)
@@ -334,6 +345,7 @@ impl ContactProtocolHandler {
                             last_seen: chrono::Utc::now().timestamp() as u64,
                             status: ContactStatus::Online, // Online since we just received their message
                             is_favorite: false,
+                            encryption_keys: accepter_encryption_keys.clone(),
                         };
 
                         // Save to legacy contacts table

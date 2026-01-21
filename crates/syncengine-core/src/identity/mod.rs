@@ -101,18 +101,18 @@ mod tests {
     #[test]
     fn test_cross_verification() {
         // Create two identities
-        let alice = HybridKeypair::generate();
-        let bob = HybridKeypair::generate();
+        let love = HybridKeypair::generate();
+        let joy = HybridKeypair::generate();
 
-        let message = b"Message from Alice to Bob";
+        let message = b"Message from Love to Joy";
 
-        // Alice signs
-        let alice_signature = alice.sign(message);
+        // Love signs
+        let love_signature = love.sign(message);
 
-        // Bob should be able to verify Alice's signature using Alice's public key
-        assert!(alice.public_key().verify(message, &alice_signature));
+        // Joy should be able to verify Love's signature using Love's public key
+        assert!(love.public_key().verify(message, &love_signature));
 
-        // Bob's public key should NOT verify Alice's signature
-        assert!(!bob.public_key().verify(message, &alice_signature));
+        // Joy's public key should NOT verify Love's signature
+        assert!(!joy.public_key().verify(message, &love_signature));
     }
 }

@@ -228,15 +228,15 @@ mod tests {
     #[test]
     fn test_save_and_load_pinned_profile() {
         let storage = create_test_storage();
-        let pin = create_test_pin("did:sync:alice", "Alice", PinRelationship::Contact);
+        let pin = create_test_pin("did:sync:love", "Love", PinRelationship::Contact);
 
         storage.save_pinned_profile(&pin).unwrap();
 
-        let loaded = storage.load_pinned_profile("did:sync:alice").unwrap();
+        let loaded = storage.load_pinned_profile("did:sync:love").unwrap();
         assert!(loaded.is_some());
         let loaded = loaded.unwrap();
-        assert_eq!(loaded.did, "did:sync:alice");
-        assert_eq!(loaded.signed_profile.profile.display_name, "Alice");
+        assert_eq!(loaded.did, "did:sync:love");
+        assert_eq!(loaded.signed_profile.profile.display_name, "Love");
     }
 
     #[test]
@@ -249,21 +249,21 @@ mod tests {
     #[test]
     fn test_delete_pinned_profile() {
         let storage = create_test_storage();
-        let pin = create_test_pin("did:sync:bob", "Bob", PinRelationship::Contact);
+        let pin = create_test_pin("did:sync:joy", "Joy", PinRelationship::Contact);
 
         storage.save_pinned_profile(&pin).unwrap();
-        assert!(storage.load_pinned_profile("did:sync:bob").unwrap().is_some());
+        assert!(storage.load_pinned_profile("did:sync:joy").unwrap().is_some());
 
-        storage.delete_pinned_profile("did:sync:bob").unwrap();
-        assert!(storage.load_pinned_profile("did:sync:bob").unwrap().is_none());
+        storage.delete_pinned_profile("did:sync:joy").unwrap();
+        assert!(storage.load_pinned_profile("did:sync:joy").unwrap().is_none());
     }
 
     #[test]
     fn test_list_pinned_profiles() {
         let storage = create_test_storage();
 
-        let pin1 = create_test_pin("did:sync:alice", "Alice", PinRelationship::Contact);
-        let pin2 = create_test_pin("did:sync:bob", "Bob", PinRelationship::Contact);
+        let pin1 = create_test_pin("did:sync:love", "Love", PinRelationship::Contact);
+        let pin2 = create_test_pin("did:sync:joy", "Joy", PinRelationship::Contact);
         let pin3 = create_test_pin("did:sync:charlie", "Charlie", PinRelationship::Manual);
 
         storage.save_pinned_profile(&pin1).unwrap();
@@ -279,8 +279,8 @@ mod tests {
         let storage = create_test_storage();
         let realm_id = RealmId::new();
 
-        let pin1 = create_test_pin("did:sync:alice", "Alice", PinRelationship::Contact);
-        let pin2 = create_test_pin("did:sync:bob", "Bob", PinRelationship::Contact);
+        let pin1 = create_test_pin("did:sync:love", "Love", PinRelationship::Contact);
+        let pin2 = create_test_pin("did:sync:joy", "Joy", PinRelationship::Contact);
         let pin3 = create_test_pin(
             "did:sync:charlie",
             "Charlie",
@@ -319,7 +319,7 @@ mod tests {
         let storage = create_test_storage();
 
         let own_pin = create_test_pin("did:sync:me", "Me", PinRelationship::Own);
-        let contact_pin = create_test_pin("did:sync:alice", "Alice", PinRelationship::Contact);
+        let contact_pin = create_test_pin("did:sync:love", "Love", PinRelationship::Contact);
 
         storage.save_pinned_profile(&own_pin).unwrap();
         storage.save_pinned_profile(&contact_pin).unwrap();
@@ -338,8 +338,8 @@ mod tests {
         };
 
         // Add 2 pins to fill the limit
-        let pin1 = create_test_pin("did:sync:alice", "Alice", PinRelationship::Contact);
-        let pin2 = create_test_pin("did:sync:bob", "Bob", PinRelationship::Manual);
+        let pin1 = create_test_pin("did:sync:love", "Love", PinRelationship::Contact);
+        let pin2 = create_test_pin("did:sync:joy", "Joy", PinRelationship::Manual);
 
         storage
             .save_pinned_profile_with_limits(&pin1, &config)
@@ -357,15 +357,15 @@ mod tests {
             .unwrap();
 
         assert_eq!(evicted.len(), 1);
-        assert_eq!(evicted[0], "did:sync:bob"); // Manual was evicted
+        assert_eq!(evicted[0], "did:sync:joy"); // Manual was evicted
 
-        // Bob should be gone, Alice and Charlie should remain
+        // Joy should be gone, Love and Charlie should remain
         assert!(storage
-            .load_pinned_profile("did:sync:bob")
+            .load_pinned_profile("did:sync:joy")
             .unwrap()
             .is_none());
         assert!(storage
-            .load_pinned_profile("did:sync:alice")
+            .load_pinned_profile("did:sync:love")
             .unwrap()
             .is_some());
         assert!(storage
@@ -389,7 +389,7 @@ mod tests {
             .unwrap();
 
         // Add a contact (counts against limit)
-        let contact_pin = create_test_pin("did:sync:alice", "Alice", PinRelationship::Contact);
+        let contact_pin = create_test_pin("did:sync:love", "Love", PinRelationship::Contact);
         let evicted = storage
             .save_pinned_profile_with_limits(&contact_pin, &config)
             .unwrap();
@@ -403,7 +403,7 @@ mod tests {
         let storage = create_test_storage();
 
         let own_pin = create_test_pin("did:sync:me", "Me", PinRelationship::Own);
-        let contact_pin = create_test_pin("did:sync:alice", "Alice", PinRelationship::Contact);
+        let contact_pin = create_test_pin("did:sync:love", "Love", PinRelationship::Contact);
 
         storage.save_pinned_profile(&own_pin).unwrap();
         storage.save_pinned_profile(&contact_pin).unwrap();
@@ -417,13 +417,13 @@ mod tests {
     fn test_overwrite_pinned_profile() {
         let storage = create_test_storage();
 
-        let pin1 = create_test_pin("did:sync:alice", "Alice v1", PinRelationship::Contact);
+        let pin1 = create_test_pin("did:sync:love", "Love v1", PinRelationship::Contact);
         storage.save_pinned_profile(&pin1).unwrap();
 
-        let pin2 = create_test_pin("did:sync:alice", "Alice v2", PinRelationship::Contact);
+        let pin2 = create_test_pin("did:sync:love", "Love v2", PinRelationship::Contact);
         storage.save_pinned_profile(&pin2).unwrap();
 
-        let loaded = storage.load_pinned_profile("did:sync:alice").unwrap().unwrap();
-        assert_eq!(loaded.signed_profile.profile.display_name, "Alice v2");
+        let loaded = storage.load_pinned_profile("did:sync:love").unwrap().unwrap();
+        assert_eq!(loaded.signed_profile.profile.display_name, "Love v2");
     }
 }

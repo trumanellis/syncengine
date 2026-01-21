@@ -454,18 +454,18 @@ mod tests {
         assert!(name.starts_with("peer_"));
 
         // With nickname
-        let peer = peer.with_nickname("Alice");
-        assert_eq!(peer.display_name(), "Alice");
+        let peer = peer.with_nickname("Love");
+        assert_eq!(peer.display_name(), "Love");
 
         // With profile (takes precedence)
         let profile = ProfileSnapshot {
-            display_name: "Alice Wonderland".to_string(),
+            display_name: "Love Wonderland".to_string(),
             subtitle: None,
             avatar_blob_id: None,
             bio: String::new(),
         };
         let peer = peer.with_profile(profile);
-        assert_eq!(peer.display_name(), "Alice Wonderland");
+        assert_eq!(peer.display_name(), "Love Wonderland");
     }
 
     #[test]
@@ -475,12 +475,12 @@ mod tests {
 
         let peer = Peer::new(endpoint_id, PeerSource::FromInvite)
             .with_did("did:sync:test123")
-            .with_nickname("Bob")
+            .with_nickname("Joy")
             .with_contact_info(contact_details)
             .with_status(PeerStatus::Online);
 
         assert_eq!(peer.did, Some("did:sync:test123".to_string()));
-        assert_eq!(peer.nickname, Some("Bob".to_string()));
+        assert_eq!(peer.nickname, Some("Joy".to_string()));
         assert!(peer.is_contact());
         assert_eq!(peer.status, PeerStatus::Online);
     }

@@ -15,7 +15,7 @@ use super::message::ChatMessage;
 /// ```ignore
 /// let conversation = Conversation::new(
 ///     "did:sync:friend123".to_string(),
-///     Some("Alice".to_string()),
+///     Some("Love".to_string()),
 /// );
 ///
 /// // Add messages
@@ -318,9 +318,9 @@ mod tests {
     fn test_display_name_with_name() {
         let convo = Conversation::new(
             "did:sync:friend".to_string(),
-            Some("Alice".to_string()),
+            Some("Love".to_string()),
         );
-        assert_eq!(convo.display_name(), "Alice");
+        assert_eq!(convo.display_name(), "Love");
     }
 
     #[test]

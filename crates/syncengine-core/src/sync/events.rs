@@ -203,3 +203,102 @@ mod tests {
         assert_eq!(event.realm_id(), None);
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Packet Event Types - For Indra's Network Visualization
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Direction of a packet relative to our node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PacketDirection {
+    /// We received this packet from the network
+    Incoming,
+    /// We sent this packet to the network
+    Outgoing,
+}
+
+/// Status of our ability to decrypt a packet's payload.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DecryptionStatus {
+    /// Successfully decrypted - we are a recipient
+    Decrypted,
+    /// Global packet - not encrypted (public broadcast)
+    Global,
+    /// Cannot decrypt - encrypted for someone else (we're relaying)
+    CannotDecrypt {
+        /// Why we can't decrypt (e.g., "Not addressed to us")
+        reason: String,
+    },
+    /// Decryption not attempted (e.g., profile keys not loaded)
+    NotAttempted,
+}
+
+/// A packet event for visualization in Indra's Network.
+///
+/// Tracks the path of a packet: Author → (optional Relay) → Destination
+///
+/// This is used to visualize the relay behavior:
+/// - Direct messages: Author → Destination
+/// - Relayed messages: Author → Relay → Destination (relay can't decrypt)
+#[derive(Debug, Clone, PartialEq)]
+pub struct PacketEvent {
+    /// Unique identifier: "{sender_did}:{sequence}"
+    pub id: String,
+
+    /// When the event was recorded (Unix millis)
+    pub timestamp: i64,
+
+    /// Whether this packet is incoming or outgoing
+    pub direction: PacketDirection,
+
+    /// Packet sequence number (from the sender's log)
+    pub sequence: u64,
+
+    // ─── Packet Path: Author → Relay → Destination ───
+
+    /// Original packet creator's DID
+    pub author_did: String,
+    /// Display name of author ("Me" if we sent it)
+    pub author_name: String,
+
+    /// Mutual peer who relayed this packet (if any)
+    pub relay_did: Option<String>,
+    /// Display name of relay peer
+    pub relay_name: Option<String>,
+
+    /// Intended recipient's DID
+    pub destination_did: String,
+    /// Display name of destination
+    pub destination_name: String,
+
+    // ─── Decryption & Content ───
+
+    /// Can we read this packet's content?
+    pub decryption_status: DecryptionStatus,
+    /// First ~20 chars of message OR "[encrypted]"
+    pub content_preview: String,
+
+    /// Has this packet reached its final destination?
+    /// (Used for strikethrough in UI)
+    pub is_delivered: bool,
+
+    /// DID of the peer whose log we're showing this in
+    /// (Used for UI filtering)
+    pub peer_did: String,
+}
+
+impl PacketEvent {
+    /// Create a unique ID for this event.
+    pub fn make_id(sender_did: &str, sequence: u64) -> String {
+        format!("{}:{}", sender_did, sequence)
+    }
+
+    /// Get a content preview from decrypted text.
+    pub fn preview_content(content: &str) -> String {
+        if content.len() > 20 {
+            format!("{}...", &content[..17])
+        } else {
+            content.to_string()
+        }
+    }
+}

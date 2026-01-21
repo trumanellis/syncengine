@@ -17,7 +17,7 @@
 //! ## Message Flow
 //!
 //! ```text
-//! Inviter (Alice)                Requester (Bob)
+//! Inviter (Love)                Requester (Joy)
 //!   |                               |
 //!   |--- Generate Invite ---------->|
 //!   |                               |
@@ -80,6 +80,10 @@ pub enum ContactMessage {
         requester_signed_profile: SignedProfile,
         /// Requester's network address for future connections
         requester_node_addr: Vec<u8>, // NodeAddrBytes serialized
+        /// Requester's ProfilePublicKeys (X25519 + ML-KEM) for E2E encryption
+        /// Serialized via ProfilePublicKeys::to_bytes()
+        #[serde(default)]
+        requester_encryption_keys: Option<Vec<u8>>,
         /// Signature over all above fields (HybridSignature)
         requester_signature: Vec<u8>,
     },
@@ -100,6 +104,10 @@ pub enum ContactMessage {
         accepter_signed_profile: SignedProfile,
         /// Accepter's network address for future connections
         accepter_node_addr: Vec<u8>, // NodeAddrBytes serialized
+        /// Accepter's ProfilePublicKeys (X25519 + ML-KEM) for E2E encryption
+        /// Serialized via ProfilePublicKeys::to_bytes()
+        #[serde(default)]
+        accepter_encryption_keys: Option<Vec<u8>>,
         /// Signature over all above fields (HybridSignature)
         signature: Vec<u8>,
         // NOTE: contact_topic and contact_key are derived locally, not transmitted
@@ -142,8 +150,8 @@ impl ContactMessage {
 /// # Example
 ///
 /// ```ignore
-/// let topic = derive_contact_topic("did:alice", "did:bob");
-/// // Both Alice and Bob will derive the same topic
+/// let topic = derive_contact_topic("did:love", "did:joy");
+/// // Both Love and Joy will derive the same topic
 /// ```
 pub fn derive_contact_topic(did1: &str, did2: &str) -> [u8; 32] {
     // Sort DIDs lexicographically for deterministic order
@@ -177,8 +185,8 @@ pub fn derive_contact_topic(did1: &str, did2: &str) -> [u8; 32] {
 /// # Example
 ///
 /// ```ignore
-/// let key = derive_contact_key("did:alice", "did:bob");
-/// // Both Alice and Bob will derive the same key
+/// let key = derive_contact_key("did:love", "did:joy");
+/// // Both Love and Joy will derive the same key
 /// ```
 pub fn derive_contact_key(did1: &str, did2: &str) -> [u8; 32] {
     // Sort DIDs lexicographically for deterministic order
@@ -212,12 +220,12 @@ mod tests {
 
     #[test]
     fn test_derive_contact_topic_deterministic() {
-        let alice_did = "did:key:alice123";
-        let bob_did = "did:key:bob456";
+        let love_did = "did:key:love123";
+        let joy_did = "did:key:joy456";
 
         // Derive topic in both orders
-        let topic_ab = derive_contact_topic(alice_did, bob_did);
-        let topic_ba = derive_contact_topic(bob_did, alice_did);
+        let topic_ab = derive_contact_topic(love_did, joy_did);
+        let topic_ba = derive_contact_topic(joy_did, love_did);
 
         // Should be identical regardless of order
         assert_eq!(
@@ -231,28 +239,28 @@ mod tests {
 
     #[test]
     fn test_derive_contact_topic_different_peers() {
-        let alice_did = "did:key:alice123";
-        let bob_did = "did:key:bob456";
+        let love_did = "did:key:love123";
+        let joy_did = "did:key:joy456";
         let charlie_did = "did:key:charlie789";
 
-        let topic_alice_bob = derive_contact_topic(alice_did, bob_did);
-        let topic_alice_charlie = derive_contact_topic(alice_did, charlie_did);
+        let topic_love_joy = derive_contact_topic(love_did, joy_did);
+        let topic_love_charlie = derive_contact_topic(love_did, charlie_did);
 
         // Different peer pairs should produce different topics
         assert_ne!(
-            topic_alice_bob, topic_alice_charlie,
+            topic_love_joy, topic_love_charlie,
             "Different peer pairs must produce unique topics"
         );
     }
 
     #[test]
     fn test_derive_contact_key_deterministic() {
-        let alice_did = "did:key:alice123";
-        let bob_did = "did:key:bob456";
+        let love_did = "did:key:love123";
+        let joy_did = "did:key:joy456";
 
         // Derive key in both orders
-        let key_ab = derive_contact_key(alice_did, bob_did);
-        let key_ba = derive_contact_key(bob_did, alice_did);
+        let key_ab = derive_contact_key(love_did, joy_did);
+        let key_ba = derive_contact_key(joy_did, love_did);
 
         // Should be identical regardless of order
         assert_eq!(key_ab, key_ba, "Key derivation must be order-independent");
@@ -263,27 +271,27 @@ mod tests {
 
     #[test]
     fn test_derive_contact_key_different_peers() {
-        let alice_did = "did:key:alice123";
-        let bob_did = "did:key:bob456";
+        let love_did = "did:key:love123";
+        let joy_did = "did:key:joy456";
         let charlie_did = "did:key:charlie789";
 
-        let key_alice_bob = derive_contact_key(alice_did, bob_did);
-        let key_alice_charlie = derive_contact_key(alice_did, charlie_did);
+        let key_love_joy = derive_contact_key(love_did, joy_did);
+        let key_love_charlie = derive_contact_key(love_did, charlie_did);
 
         // Different peer pairs should produce different keys
         assert_ne!(
-            key_alice_bob, key_alice_charlie,
+            key_love_joy, key_love_charlie,
             "Different peer pairs must produce unique keys"
         );
     }
 
     #[test]
     fn test_topic_and_key_are_different() {
-        let alice_did = "did:key:alice123";
-        let bob_did = "did:key:bob456";
+        let love_did = "did:key:love123";
+        let joy_did = "did:key:joy456";
 
-        let topic = derive_contact_topic(alice_did, bob_did);
-        let key = derive_contact_key(alice_did, bob_did);
+        let topic = derive_contact_topic(love_did, joy_did);
+        let key = derive_contact_key(love_did, joy_did);
 
         // Topic and key should be different (different domain separators)
         assert_ne!(
@@ -294,14 +302,15 @@ mod tests {
 
     #[test]
     fn test_contact_request_serialization() {
-        let signed_profile = create_test_signed_profile("Alice");
+        let signed_profile = create_test_signed_profile("Love");
 
         let msg = ContactMessage::ContactRequest {
             invite_id: [42u8; 16],
-            requester_did: "did:key:alice123".to_string(),
+            requester_did: "did:key:love123".to_string(),
             requester_pubkey: vec![9, 10, 11, 12],
             requester_signed_profile: signed_profile,
             requester_node_addr: vec![1, 2, 3, 4],
+            requester_encryption_keys: Some(vec![0xAB; 32]), // Mock encryption keys
             requester_signature: vec![5, 6, 7, 8],
         };
 
@@ -314,7 +323,7 @@ mod tests {
         // Verify the decoded message can be accessed correctly
         if let ContactMessage::ContactRequest { requester_signed_profile, .. } = &decoded {
             assert!(requester_signed_profile.verify(), "SignedProfile should verify after round-trip");
-            assert_eq!(requester_signed_profile.profile.display_name, "Alice");
+            assert_eq!(requester_signed_profile.profile.display_name, "Love");
         } else {
             panic!("Expected ContactRequest");
         }
@@ -322,14 +331,15 @@ mod tests {
 
     #[test]
     fn test_contact_accept_serialization() {
-        let signed_profile = create_test_signed_profile("Alice");
+        let signed_profile = create_test_signed_profile("Love");
 
         let msg = ContactMessage::ContactAccept {
             invite_id: [99u8; 16],
-            accepter_did: "did:sync:zAlice123".to_string(),
+            accepter_did: "did:sync:zLove123".to_string(),
             accepter_pubkey: vec![1, 2, 3, 4],
             accepter_signed_profile: signed_profile,
             accepter_node_addr: vec![5, 6, 7, 8],
+            accepter_encryption_keys: Some(vec![0xCD; 32]), // Mock encryption keys
             signature: vec![9, 10, 11, 12],
         };
 
@@ -339,7 +349,7 @@ mod tests {
         // Verify the decoded message can be accessed correctly
         if let ContactMessage::ContactAccept { accepter_signed_profile, .. } = &decoded {
             assert!(accepter_signed_profile.verify(), "SignedProfile should verify after round-trip");
-            assert_eq!(accepter_signed_profile.profile.display_name, "Alice");
+            assert_eq!(accepter_signed_profile.profile.display_name, "Love");
         } else {
             panic!("Expected ContactAccept");
         }
@@ -413,7 +423,7 @@ mod tests {
 
     #[test]
     fn test_derive_with_one_empty_did() {
-        let did = "did:key:alice123";
+        let did = "did:key:love123";
 
         let topic1 = derive_contact_topic(did, "");
         let topic2 = derive_contact_topic("", did);
@@ -440,6 +450,7 @@ mod tests {
             requester_pubkey: vec![],
             requester_signed_profile: signed_profile.clone(),
             requester_node_addr: vec![],
+            requester_encryption_keys: None,
             requester_signature: vec![],
         };
 
@@ -449,6 +460,7 @@ mod tests {
             accepter_pubkey: vec![],
             accepter_signed_profile: signed_profile,
             accepter_node_addr: vec![],
+            accepter_encryption_keys: None,
             signature: vec![],
         };
 

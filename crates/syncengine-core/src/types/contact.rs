@@ -199,6 +199,10 @@ pub struct ContactInfo {
     pub status: ContactStatus,
     /// Priority for auto-connect on startup
     pub is_favorite: bool,
+    /// Serialized ProfilePublicKeys for E2E encryption (X25519 + ML-KEM)
+    /// Obtained during contact exchange. None for legacy contacts.
+    #[serde(default)]
+    pub encryption_keys: Option<Vec<u8>>,
 }
 
 impl ContactInfo {
@@ -260,6 +264,10 @@ pub struct PendingContact {
     pub state: ContactState,
     /// Unix timestamp when request was created
     pub created_at: i64,
+    /// Peer's ProfilePublicKeys (X25519 + ML-KEM) for E2E encryption
+    /// Obtained from ContactRequest/ContactAccept message. None for legacy contacts.
+    #[serde(default)]
+    pub encryption_keys: Option<Vec<u8>>,
 }
 
 impl PendingContact {
@@ -399,6 +407,7 @@ mod tests {
             last_seen: (chrono::Utc::now().timestamp() - 60) as u64, // 1 minute ago
             status: ContactStatus::Online,
             is_favorite: false,
+            encryption_keys: None,
         };
 
         assert!(contact.is_recently_active());
@@ -423,6 +432,7 @@ mod tests {
             node_addr: NodeAddrBytes::new([0u8; 32]),
             state: ContactState::OutgoingPending,
             created_at: chrono::Utc::now().timestamp(),
+            encryption_keys: None,
         };
 
         assert!(!pending.is_stale());

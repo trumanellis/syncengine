@@ -94,7 +94,7 @@ mod tests {
         let db_path = temp_dir.path().join("test.db");
         let storage = Storage::new(&db_path).unwrap();
 
-        let profile = UserProfile::new("peer123".to_string(), "Alice".to_string());
+        let profile = UserProfile::new("peer123".to_string(), "Love".to_string());
 
         // Save
         storage.save_profile(&profile).unwrap();
@@ -102,7 +102,7 @@ mod tests {
         // Load
         let loaded = storage.load_profile("peer123").unwrap();
         assert!(loaded.is_some());
-        assert_eq!(loaded.unwrap().display_name, "Alice");
+        assert_eq!(loaded.unwrap().display_name, "Love");
     }
 
     #[test]
@@ -121,7 +121,7 @@ mod tests {
         let db_path = temp_dir.path().join("test.db");
         let storage = Storage::new(&db_path).unwrap();
 
-        let profile = UserProfile::new("peer456".to_string(), "Bob".to_string());
+        let profile = UserProfile::new("peer456".to_string(), "Joy".to_string());
         storage.save_profile(&profile).unwrap();
 
         // Verify it exists
@@ -141,8 +141,8 @@ mod tests {
         let storage = Storage::new(&db_path).unwrap();
 
         // Create multiple profiles
-        let profile1 = UserProfile::new("peer1".to_string(), "Alice".to_string());
-        let profile2 = UserProfile::new("peer2".to_string(), "Bob".to_string());
+        let profile1 = UserProfile::new("peer1".to_string(), "Love".to_string());
+        let profile2 = UserProfile::new("peer2".to_string(), "Joy".to_string());
         let profile3 = UserProfile::new("peer3".to_string(), "Charlie".to_string());
 
         storage.save_profile(&profile1).unwrap();
@@ -154,8 +154,8 @@ mod tests {
         assert_eq!(profiles.len(), 3);
 
         let names: Vec<String> = profiles.iter().map(|p| p.display_name.clone()).collect();
-        assert!(names.contains(&"Alice".to_string()));
-        assert!(names.contains(&"Bob".to_string()));
+        assert!(names.contains(&"Love".to_string()));
+        assert!(names.contains(&"Joy".to_string()));
         assert!(names.contains(&"Charlie".to_string()));
     }
 

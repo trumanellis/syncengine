@@ -389,7 +389,7 @@ mod tests {
         
         let endpoint_id = create_test_public_key();
         let peer = create_test_peer(endpoint_id)
-            .with_nickname("Alice")
+            .with_nickname("Love")
             .with_status(PeerStatus::Online);
 
         // Save
@@ -399,7 +399,7 @@ mod tests {
         let loaded = storage.load_peer(&endpoint_id).unwrap();
         assert!(loaded.is_some());
         let loaded = loaded.unwrap();
-        assert_eq!(loaded.nickname, Some("Alice".to_string()));
+        assert_eq!(loaded.nickname, Some("Love".to_string()));
         assert_eq!(loaded.status, PeerStatus::Online);
     }
 
@@ -410,13 +410,13 @@ mod tests {
         let storage = Storage::new(&db_path).unwrap();
         
         let endpoint_id = create_test_public_key();
-        let peer = create_test_peer(endpoint_id).with_did("did:sync:alice123");
+        let peer = create_test_peer(endpoint_id).with_did("did:sync:love123");
 
         // Save
         storage.save_peer(&peer).unwrap();
 
         // Load by DID
-        let loaded = storage.load_peer_by_did("did:sync:alice123").unwrap();
+        let loaded = storage.load_peer_by_did("did:sync:love123").unwrap();
         assert!(loaded.is_some());
         assert_eq!(loaded.unwrap().endpoint_id, *endpoint_id.as_bytes());
 
@@ -574,10 +574,10 @@ mod tests {
     #[test]
     fn test_contact_info_to_peer_conversion() {
         let contact = ContactInfo {
-            peer_did: "did:sync:alice".to_string(),
+            peer_did: "did:sync:love".to_string(),
             peer_endpoint_id: [1u8; 32],
             profile: ProfileSnapshot {
-                display_name: "Alice".to_string(),
+                display_name: "Love".to_string(),
                 subtitle: Some("Explorer".to_string()),
                 avatar_blob_id: None,
                 bio: "Test bio".to_string(),
@@ -589,14 +589,15 @@ mod tests {
             last_seen: 1234567900,
             status: crate::types::contact::ContactStatus::Online,
             is_favorite: true,
+            encryption_keys: None,
         };
 
         let peer = Storage::contact_info_to_peer(&contact);
 
         assert_eq!(peer.endpoint_id, [1u8; 32]);
-        assert_eq!(peer.did, Some("did:sync:alice".to_string()));
+        assert_eq!(peer.did, Some("did:sync:love".to_string()));
         assert!(peer.profile.is_some());
-        assert_eq!(peer.profile.as_ref().unwrap().display_name, "Alice");
+        assert_eq!(peer.profile.as_ref().unwrap().display_name, "Love");
         assert!(peer.is_contact());
         assert!(peer.is_favorite());
         assert_eq!(peer.status, PeerStatus::Online);

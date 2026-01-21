@@ -17,9 +17,9 @@
 //!
 //! ## Test Scenarios
 //!
-//! 1. **Initial propagation**: Alice changes name -> Bob sees it
-//! 2. **Post-restart propagation**: After restart, Alice changes name -> Bob sees it
-//! 3. **Bidirectional**: Both Alice and Bob update profiles, both see changes
+//! 1. **Initial propagation**: Love changes name -> Joy sees it
+//! 2. **Post-restart propagation**: After restart, Love changes name -> Joy sees it
+//! 3. **Bidirectional**: Both Love and Joy update profiles, both see changes
 //!
 //! ## Key Assertions
 //!
@@ -115,10 +115,10 @@ async fn wait_for_profile_update(
 /// Test that profile updates propagate to contacts after initial exchange
 ///
 /// ## Test Flow:
-/// 1. Alice and Bob exchange contacts (both start with "Anonymous User")
-/// 2. Alice updates her display name to "Alice"
-/// 3. Alice broadcasts her profile via announce_profile()
-/// 4. Verify Bob's Peer table shows "Alice" for Alice's DID
+/// 1. Love and Joy exchange contacts (both start with "Anonymous User")
+/// 2. Love updates her display name to "Love"
+/// 3. Love broadcasts her profile via announce_profile()
+/// 4. Verify Joy's Peer table shows "Love" for Love's DID
 ///
 /// ## What This Tests:
 /// - Profile sync initialization during contact exchange
@@ -127,8 +127,8 @@ async fn wait_for_profile_update(
 ///
 /// ## Known Issue (2024-01)
 /// Per-peer profile topic subscriptions close immediately because the gossip mesh
-/// doesn't form between peers. The bootstrap peer (Alice) is subscribed to her own
-/// topic, but Bob's subscription to that topic closes before connectivity is established.
+/// doesn't form between peers. The bootstrap peer (Love) is subscribed to her own
+/// topic, but Joy's subscription to that topic closes before connectivity is established.
 /// This test will pass once the gossip mesh formation issue is resolved.
 #[tokio::test]
 async fn test_profile_update_propagates_to_contact() {
@@ -139,66 +139,66 @@ async fn test_profile_update_propagates_to_contact() {
 
     println!("\n=== Test: Profile Update Propagates to Contact ===\n");
 
-    // Setup Alice
-    let ctx_alice = TestContext::new().expect("Failed to create Alice context");
-    let mut alice = ctx_alice.create_engine().await.expect("Failed to create Alice engine");
-    alice.init_identity().unwrap();
-    alice.start_networking().await.unwrap();
-    // Initialize profile sync (subscribes Alice to her own profile topic)
-    alice.startup_sync().await.ok();
+    // Setup Love
+    let ctx_love = TestContext::new().expect("Failed to create Love context");
+    let mut love = ctx_love.create_engine().await.expect("Failed to create Love engine");
+    love.init_identity().unwrap();
+    love.start_networking().await.unwrap();
+    // Initialize profile sync (subscribes Love to her own profile topic)
+    love.startup_sync().await.ok();
     sleep(Duration::from_millis(500)).await;
 
-    // Setup Bob
-    let ctx_bob = TestContext::new().expect("Failed to create Bob context");
-    let mut bob = ctx_bob.create_engine().await.expect("Failed to create Bob engine");
-    bob.init_identity().unwrap();
-    bob.start_networking().await.unwrap();
-    // Initialize profile sync for Bob too
-    bob.startup_sync().await.ok();
+    // Setup Joy
+    let ctx_joy = TestContext::new().expect("Failed to create Joy context");
+    let mut joy = ctx_joy.create_engine().await.expect("Failed to create Joy engine");
+    joy.init_identity().unwrap();
+    joy.start_networking().await.unwrap();
+    // Initialize profile sync for Joy too
+    joy.startup_sync().await.ok();
     sleep(Duration::from_millis(500)).await;
 
-    let alice_did = alice.did().unwrap().to_string();
-    let bob_did = bob.did().unwrap().to_string();
+    let love_did = love.did().unwrap().to_string();
+    let joy_did = joy.did().unwrap().to_string();
 
-    println!("Alice DID: {}", alice_did);
-    println!("Bob DID: {}", bob_did);
+    println!("Love DID: {}", love_did);
+    println!("Joy DID: {}", joy_did);
 
     // Exchange contacts
-    let invite_code = alice.generate_contact_invite(24).await.unwrap();
-    let invite = bob.decode_contact_invite(&invite_code).await.unwrap();
-    bob.send_contact_request(invite).await.unwrap();
+    let invite_code = love.generate_contact_invite(24).await.unwrap();
+    let invite = joy.decode_contact_invite(&invite_code).await.unwrap();
+    joy.send_contact_request(invite).await.unwrap();
 
     // Wait for contact exchange to complete and gossip mesh to form
     // Profile topic subscriptions need time to establish connections
     sleep(Duration::from_millis(3000)).await;
 
     // Verify contacts were created
-    let alice_contacts = alice.list_contacts().unwrap();
-    let bob_contacts = bob.list_contacts().unwrap();
-    assert_eq!(alice_contacts.len(), 1, "Alice should have 1 contact");
-    assert_eq!(bob_contacts.len(), 1, "Bob should have 1 contact");
+    let love_contacts = love.list_contacts().unwrap();
+    let joy_contacts = joy.list_contacts().unwrap();
+    assert_eq!(love_contacts.len(), 1, "Love should have 1 contact");
+    assert_eq!(joy_contacts.len(), 1, "Joy should have 1 contact");
     println!("Contact exchange complete");
 
-    // Alice updates her display name
-    update_display_name(&mut alice, "Alice").await.unwrap();
-    println!("Alice updated display name to 'Alice'");
+    // Love updates her display name
+    update_display_name(&mut love, "Love").await.unwrap();
+    println!("Love updated display name to 'Love'");
 
-    // Alice broadcasts her profile
-    alice.announce_profile(None).await.unwrap();
-    println!("Alice broadcast profile update");
+    // Love broadcasts her profile
+    love.announce_profile(None).await.unwrap();
+    println!("Love broadcast profile update");
 
-    // Wait for Bob to receive the update
-    wait_for_profile_update(&bob, &alice_did, "Alice", Duration::from_secs(10))
+    // Wait for Joy to receive the update
+    wait_for_profile_update(&joy, &love_did, "Love", Duration::from_secs(10))
         .await
-        .expect("Bob should receive Alice's profile update");
+        .expect("Joy should receive Love's profile update");
 
-    let bob_sees_alice_name = get_peer_display_name(&bob, &alice_did);
-    println!("Bob sees Alice as: {:?}", bob_sees_alice_name);
-    assert_eq!(bob_sees_alice_name, Some("Alice".to_string()));
+    let joy_sees_love_name = get_peer_display_name(&joy, &love_did);
+    println!("Joy sees Love as: {:?}", joy_sees_love_name);
+    assert_eq!(joy_sees_love_name, Some("Love".to_string()));
 
     // Cleanup
-    alice.shutdown().await.ok();
-    bob.shutdown().await.ok();
+    love.shutdown().await.ok();
+    joy.shutdown().await.ok();
 
     println!("\n=== PASSED: Profile update propagated successfully ===\n");
 }
@@ -216,20 +216,20 @@ async fn test_profile_update_propagates_to_contact() {
 /// ## Test Flow:
 ///
 /// ### Phase 1: Initial Setup
-/// 1. Alice and Bob exchange contacts
-/// 2. Alice sets name to "Alice v1", broadcasts, Bob receives it
+/// 1. Love and Joy exchange contacts
+/// 2. Love sets name to "Love v1", broadcasts, Joy receives it
 /// 3. Shutdown both engines
 ///
 /// ### Phase 2: Restart and Test (THE BUG SCENARIO)
 /// 4. Restart both engines from same data directories
 /// 5. Call startup_sync() on both (this should initialize profile sync)
-/// 6. Alice updates name to "Alice v2" and broadcasts
-/// 7. CRITICAL: Verify Bob receives "Alice v2"
+/// 6. Love updates name to "Love v2" and broadcasts
+/// 7. CRITICAL: Verify Joy receives "Love v2"
 ///
 /// ## The Bug:
 /// Before the fix, step 7 would fail because:
-/// - Alice's `profile_gossip_sender` was None (announce_profile fails)
-/// - Bob's profile topic listener for Alice wasn't recreated (no receiver)
+/// - Love's `profile_gossip_sender` was None (announce_profile fails)
+/// - Joy's profile topic listener for Love wasn't recreated (no receiver)
 ///
 /// ## Known Issue (2024-01)
 /// TODO: Fix database locking issue on restart
@@ -244,11 +244,11 @@ async fn test_profile_update_works_after_restart() {
     println!("\n=== Test: Profile Update After Restart (Critical Bug Test) ===\n");
 
     // Create persistent contexts (data survives restart)
-    let ctx_alice = TestContext::new().expect("Failed to create Alice context");
-    let ctx_bob = TestContext::new().expect("Failed to create Bob context");
+    let ctx_love = TestContext::new().expect("Failed to create Love context");
+    let ctx_joy = TestContext::new().expect("Failed to create Joy context");
 
-    let alice_did: String;
-    let bob_did: String;
+    let love_did: String;
+    let joy_did: String;
 
     // ========================================================================
     // Phase 1: Initial Setup
@@ -256,51 +256,51 @@ async fn test_profile_update_works_after_restart() {
     println!("--- Phase 1: Initial Setup ---\n");
 
     {
-        let mut alice = ctx_alice.create_engine().await.expect("Failed to create Alice");
-        let mut bob = ctx_bob.create_engine().await.expect("Failed to create Bob");
+        let mut love = ctx_love.create_engine().await.expect("Failed to create Love");
+        let mut joy = ctx_joy.create_engine().await.expect("Failed to create Joy");
 
-        alice.init_identity().unwrap();
-        bob.init_identity().unwrap();
+        love.init_identity().unwrap();
+        joy.init_identity().unwrap();
 
-        alice.start_networking().await.unwrap();
-        bob.start_networking().await.unwrap();
+        love.start_networking().await.unwrap();
+        joy.start_networking().await.unwrap();
 
         // Initialize profile sync on both
-        alice.startup_sync().await.ok();
-        bob.startup_sync().await.ok();
+        love.startup_sync().await.ok();
+        joy.startup_sync().await.ok();
         sleep(Duration::from_millis(500)).await;
 
-        alice_did = alice.did().unwrap().to_string();
-        bob_did = bob.did().unwrap().to_string();
+        love_did = love.did().unwrap().to_string();
+        joy_did = joy.did().unwrap().to_string();
 
-        println!("Alice DID: {}", alice_did);
-        println!("Bob DID: {}", bob_did);
+        println!("Love DID: {}", love_did);
+        println!("Joy DID: {}", joy_did);
 
         // Exchange contacts
-        let invite_code = alice.generate_contact_invite(24).await.unwrap();
-        let invite = bob.decode_contact_invite(&invite_code).await.unwrap();
-        bob.send_contact_request(invite).await.unwrap();
+        let invite_code = love.generate_contact_invite(24).await.unwrap();
+        let invite = joy.decode_contact_invite(&invite_code).await.unwrap();
+        joy.send_contact_request(invite).await.unwrap();
         sleep(Duration::from_millis(2000)).await;
 
-        assert_eq!(alice.list_contacts().unwrap().len(), 1);
-        assert_eq!(bob.list_contacts().unwrap().len(), 1);
+        assert_eq!(love.list_contacts().unwrap().len(), 1);
+        assert_eq!(joy.list_contacts().unwrap().len(), 1);
         println!("Contacts exchanged");
 
-        // Alice sets initial name and broadcasts
-        update_display_name(&mut alice, "Alice v1").await.unwrap();
-        alice.announce_profile(None).await.unwrap();
-        println!("Alice set name to 'Alice v1' and broadcast");
+        // Love sets initial name and broadcasts
+        update_display_name(&mut love, "Love v1").await.unwrap();
+        love.announce_profile(None).await.unwrap();
+        println!("Love set name to 'Love v1' and broadcast");
 
-        // Verify Bob receives it
-        wait_for_profile_update(&bob, &alice_did, "Alice v1", Duration::from_secs(10))
+        // Verify Joy receives it
+        wait_for_profile_update(&joy, &love_did, "Love v1", Duration::from_secs(10))
             .await
-            .expect("Bob should receive initial profile");
+            .expect("Joy should receive initial profile");
 
-        println!("Bob received 'Alice v1'");
+        println!("Joy received 'Love v1'");
 
         // Shutdown both engines
-        alice.shutdown().await.ok();
-        bob.shutdown().await.ok();
+        love.shutdown().await.ok();
+        joy.shutdown().await.ok();
 
         println!("\nPhase 1 complete - engines shutdown\n");
     }
@@ -313,79 +313,79 @@ async fn test_profile_update_works_after_restart() {
     // Small delay to ensure clean shutdown
     sleep(Duration::from_millis(500)).await;
 
-    // Restart Alice
-    let mut alice = ctx_alice.create_engine().await.expect("Failed to restart Alice");
-    alice.start_networking().await.unwrap();
+    // Restart Love
+    let mut love = ctx_love.create_engine().await.expect("Failed to restart Love");
+    love.start_networking().await.unwrap();
 
     // CRITICAL: Call startup_sync which should initialize profile sync
-    let alice_sync_result = alice.startup_sync().await;
-    println!("Alice startup_sync result: {:?}", alice_sync_result.is_ok());
+    let love_sync_result = love.startup_sync().await;
+    println!("Love startup_sync result: {:?}", love_sync_result.is_ok());
 
-    // Restart Bob
-    let mut bob = ctx_bob.create_engine().await.expect("Failed to restart Bob");
-    bob.start_networking().await.unwrap();
+    // Restart Joy
+    let mut joy = ctx_joy.create_engine().await.expect("Failed to restart Joy");
+    joy.start_networking().await.unwrap();
 
     // CRITICAL: Call startup_sync which should reconnect to profile topics
-    let bob_sync_result = bob.startup_sync().await;
-    println!("Bob startup_sync result: {:?}", bob_sync_result.is_ok());
+    let joy_sync_result = joy.startup_sync().await;
+    println!("Joy startup_sync result: {:?}", joy_sync_result.is_ok());
 
     // Wait for networking to stabilize
     sleep(Duration::from_millis(1000)).await;
 
     // Verify contacts persisted
     assert_eq!(
-        alice.list_contacts().unwrap().len(),
+        love.list_contacts().unwrap().len(),
         1,
-        "Alice should still have contact after restart"
+        "Love should still have contact after restart"
     );
     assert_eq!(
-        bob.list_contacts().unwrap().len(),
+        joy.list_contacts().unwrap().len(),
         1,
-        "Bob should still have contact after restart"
+        "Joy should still have contact after restart"
     );
     println!("Contacts persisted after restart");
 
-    // Verify Bob still has "Alice v1" from before restart
-    let pre_update_name = get_peer_display_name(&bob, &alice_did);
-    println!("Bob's stored name for Alice before update: {:?}", pre_update_name);
-    assert_eq!(pre_update_name, Some("Alice v1".to_string()));
+    // Verify Joy still has "Love v1" from before restart
+    let pre_update_name = get_peer_display_name(&joy, &love_did);
+    println!("Joy's stored name for Love before update: {:?}", pre_update_name);
+    assert_eq!(pre_update_name, Some("Love v1".to_string()));
 
     // ========================================================================
     // THE CRITICAL TEST: Profile update after restart
     // ========================================================================
     println!("\n--- Critical Test: Post-restart profile update ---\n");
 
-    // Alice updates her name
-    update_display_name(&mut alice, "Alice v2").await.unwrap();
-    println!("Alice updated display name to 'Alice v2'");
+    // Love updates her name
+    update_display_name(&mut love, "Love v2").await.unwrap();
+    println!("Love updated display name to 'Love v2'");
 
-    // Alice broadcasts (THIS WOULD FAIL WITHOUT THE FIX)
-    let broadcast_result = alice.announce_profile(None).await;
-    println!("Alice announce_profile result: {:?}", broadcast_result.is_ok());
+    // Love broadcasts (THIS WOULD FAIL WITHOUT THE FIX)
+    let broadcast_result = love.announce_profile(None).await;
+    println!("Love announce_profile result: {:?}", broadcast_result.is_ok());
     assert!(
         broadcast_result.is_ok(),
         "announce_profile should succeed after restart (profile_gossip_sender must be initialized)"
     );
 
-    // Wait for Bob to receive the update (THIS WOULD FAIL WITHOUT THE FIX)
-    wait_for_profile_update(&bob, &alice_did, "Alice v2", Duration::from_secs(15))
+    // Wait for Joy to receive the update (THIS WOULD FAIL WITHOUT THE FIX)
+    wait_for_profile_update(&joy, &love_did, "Love v2", Duration::from_secs(15))
         .await
         .expect(
-            "Bob should receive profile update after restart \
+            "Joy should receive profile update after restart \
             (reconnect_contacts must recreate profile listeners)"
         );
 
-    let post_update_name = get_peer_display_name(&bob, &alice_did);
-    println!("Bob sees Alice as: {:?}", post_update_name);
+    let post_update_name = get_peer_display_name(&joy, &love_did);
+    println!("Joy sees Love as: {:?}", post_update_name);
     assert_eq!(
         post_update_name,
-        Some("Alice v2".to_string()),
-        "Profile should update to 'Alice v2' after restart"
+        Some("Love v2".to_string()),
+        "Profile should update to 'Love v2' after restart"
     );
 
     // Cleanup
-    alice.shutdown().await.ok();
-    bob.shutdown().await.ok();
+    love.shutdown().await.ok();
+    joy.shutdown().await.ok();
 
     println!("\n=== PASSED: Profile update works after restart ===\n");
 }
@@ -397,10 +397,10 @@ async fn test_profile_update_works_after_restart() {
 /// Test that manual_sync() properly broadcasts profile and reconnects contacts
 ///
 /// ## Test Flow:
-/// 1. Setup Alice and Bob with contacts
-/// 2. Alice updates profile
-/// 3. Call manual_sync() on Alice (should broadcast profile)
-/// 4. Verify Bob receives the update
+/// 1. Setup Love and Joy with contacts
+/// 2. Love updates profile
+/// 3. Call manual_sync() on Love (should broadcast profile)
+/// 4. Verify Joy receives the update
 ///
 /// ## What This Tests:
 /// - manual_sync() initializes contact manager if needed
@@ -417,62 +417,62 @@ async fn test_manual_sync_broadcasts_profile() {
 
     println!("\n=== Test: Manual Sync Broadcasts Profile ===\n");
 
-    // Setup Alice
-    let ctx_alice = TestContext::new().expect("Failed to create Alice context");
-    let mut alice = ctx_alice.create_engine().await.expect("Failed to create Alice");
-    alice.init_identity().unwrap();
-    alice.start_networking().await.unwrap();
-    alice.startup_sync().await.ok();
+    // Setup Love
+    let ctx_love = TestContext::new().expect("Failed to create Love context");
+    let mut love = ctx_love.create_engine().await.expect("Failed to create Love");
+    love.init_identity().unwrap();
+    love.start_networking().await.unwrap();
+    love.startup_sync().await.ok();
 
-    // Setup Bob
-    let ctx_bob = TestContext::new().expect("Failed to create Bob context");
-    let mut bob = ctx_bob.create_engine().await.expect("Failed to create Bob");
-    bob.init_identity().unwrap();
-    bob.start_networking().await.unwrap();
-    bob.startup_sync().await.ok();
+    // Setup Joy
+    let ctx_joy = TestContext::new().expect("Failed to create Joy context");
+    let mut joy = ctx_joy.create_engine().await.expect("Failed to create Joy");
+    joy.init_identity().unwrap();
+    joy.start_networking().await.unwrap();
+    joy.startup_sync().await.ok();
     sleep(Duration::from_millis(500)).await;
 
-    let alice_did = alice.did().unwrap().to_string();
+    let love_did = love.did().unwrap().to_string();
 
     // Exchange contacts
-    let invite_code = alice.generate_contact_invite(24).await.unwrap();
-    let invite = bob.decode_contact_invite(&invite_code).await.unwrap();
-    bob.send_contact_request(invite).await.unwrap();
+    let invite_code = love.generate_contact_invite(24).await.unwrap();
+    let invite = joy.decode_contact_invite(&invite_code).await.unwrap();
+    joy.send_contact_request(invite).await.unwrap();
     sleep(Duration::from_millis(2000)).await;
 
     // Verify contacts
-    assert_eq!(alice.list_contacts().unwrap().len(), 1);
-    assert_eq!(bob.list_contacts().unwrap().len(), 1);
+    assert_eq!(love.list_contacts().unwrap().len(), 1);
+    assert_eq!(joy.list_contacts().unwrap().len(), 1);
     println!("Contacts established");
 
-    // Alice updates profile
-    update_display_name(&mut alice, "Alice via Manual Sync").await.unwrap();
-    println!("Alice updated display name");
+    // Love updates profile
+    update_display_name(&mut love, "Love via Manual Sync").await.unwrap();
+    println!("Love updated display name");
 
     // Call manual_sync (this should broadcast profile AND reconnect contacts)
-    let sync_result = alice.manual_sync().await;
+    let sync_result = love.manual_sync().await;
     assert!(sync_result.is_ok(), "manual_sync should succeed");
     let contacts_count = sync_result.unwrap();
     println!("manual_sync returned {} contacts", contacts_count);
     assert!(contacts_count >= 1, "Should have at least 1 contact");
 
-    // Wait for Bob to receive update
+    // Wait for Joy to receive update
     wait_for_profile_update(
-        &bob,
-        &alice_did,
-        "Alice via Manual Sync",
+        &joy,
+        &love_did,
+        "Love via Manual Sync",
         Duration::from_secs(10),
     )
     .await
-    .expect("Bob should receive profile update via manual_sync");
+    .expect("Joy should receive profile update via manual_sync");
 
-    let bob_sees = get_peer_display_name(&bob, &alice_did);
-    println!("Bob sees Alice as: {:?}", bob_sees);
-    assert_eq!(bob_sees, Some("Alice via Manual Sync".to_string()));
+    let joy_sees = get_peer_display_name(&joy, &love_did);
+    println!("Joy sees Love as: {:?}", joy_sees);
+    assert_eq!(joy_sees, Some("Love via Manual Sync".to_string()));
 
     // Cleanup
-    alice.shutdown().await.ok();
-    bob.shutdown().await.ok();
+    love.shutdown().await.ok();
+    joy.shutdown().await.ok();
 
     println!("\n=== PASSED: Manual sync broadcasts profile ===\n");
 }
@@ -484,13 +484,13 @@ async fn test_manual_sync_broadcasts_profile() {
 /// Test that profile updates work in both directions
 ///
 /// ## Test Flow:
-/// 1. Alice and Bob exchange contacts
-/// 2. Alice updates name, Bob receives it
-/// 3. Bob updates name, Alice receives it
+/// 1. Love and Joy exchange contacts
+/// 2. Love updates name, Joy receives it
+/// 3. Joy updates name, Love receives it
 /// 4. Both see correct names for each other
 ///
 /// ## Known Issue (2024-01)
-/// TODO: Inviter (Alice) side doesn't store contact topic sender in active_topics
+/// TODO: Inviter (Love) side doesn't store contact topic sender in active_topics
 /// because contact finalization happens in contact_handler, not contact_manager.
 /// Need to bridge contact_handler → contact_manager for inviter-side contacts.
 #[tokio::test]
@@ -504,65 +504,65 @@ async fn test_bidirectional_profile_updates() {
     println!("\n=== Test: Bidirectional Profile Updates ===\n");
 
     // Setup
-    let ctx_alice = TestContext::new().expect("Failed to create Alice context");
-    let ctx_bob = TestContext::new().expect("Failed to create Bob context");
+    let ctx_love = TestContext::new().expect("Failed to create Love context");
+    let ctx_joy = TestContext::new().expect("Failed to create Joy context");
 
-    let mut alice = ctx_alice.create_engine().await.expect("Failed to create Alice");
-    let mut bob = ctx_bob.create_engine().await.expect("Failed to create Bob");
+    let mut love = ctx_love.create_engine().await.expect("Failed to create Love");
+    let mut joy = ctx_joy.create_engine().await.expect("Failed to create Joy");
 
-    alice.init_identity().unwrap();
-    bob.init_identity().unwrap();
+    love.init_identity().unwrap();
+    joy.init_identity().unwrap();
 
-    alice.start_networking().await.unwrap();
-    bob.start_networking().await.unwrap();
+    love.start_networking().await.unwrap();
+    joy.start_networking().await.unwrap();
 
     // Initialize profile sync on both
-    alice.startup_sync().await.ok();
-    bob.startup_sync().await.ok();
+    love.startup_sync().await.ok();
+    joy.startup_sync().await.ok();
     sleep(Duration::from_millis(500)).await;
 
-    let alice_did = alice.did().unwrap().to_string();
-    let bob_did = bob.did().unwrap().to_string();
+    let love_did = love.did().unwrap().to_string();
+    let joy_did = joy.did().unwrap().to_string();
 
     // Exchange contacts
-    let invite_code = alice.generate_contact_invite(24).await.unwrap();
-    let invite = bob.decode_contact_invite(&invite_code).await.unwrap();
-    bob.send_contact_request(invite).await.unwrap();
+    let invite_code = love.generate_contact_invite(24).await.unwrap();
+    let invite = joy.decode_contact_invite(&invite_code).await.unwrap();
+    joy.send_contact_request(invite).await.unwrap();
     sleep(Duration::from_millis(2000)).await;
 
     println!("Contacts established");
 
-    // Alice updates and broadcasts
-    update_display_name(&mut alice, "Alice").await.unwrap();
-    alice.announce_profile(None).await.unwrap();
-    println!("Alice broadcast 'Alice'");
+    // Love updates and broadcasts
+    update_display_name(&mut love, "Love").await.unwrap();
+    love.announce_profile(None).await.unwrap();
+    println!("Love broadcast 'Love'");
 
-    // Wait for Bob to receive Alice's update
-    wait_for_profile_update(&bob, &alice_did, "Alice", Duration::from_secs(10))
+    // Wait for Joy to receive Love's update
+    wait_for_profile_update(&joy, &love_did, "Love", Duration::from_secs(10))
         .await
-        .expect("Bob should receive Alice's update");
-    println!("Bob received Alice's profile");
+        .expect("Joy should receive Love's update");
+    println!("Joy received Love's profile");
 
-    // Bob updates and broadcasts
-    update_display_name(&mut bob, "Bob").await.unwrap();
-    bob.announce_profile(None).await.unwrap();
-    println!("Bob broadcast 'Bob'");
+    // Joy updates and broadcasts
+    update_display_name(&mut joy, "Joy").await.unwrap();
+    joy.announce_profile(None).await.unwrap();
+    println!("Joy broadcast 'Joy'");
 
-    // Wait for Alice to receive Bob's update
-    wait_for_profile_update(&alice, &bob_did, "Bob", Duration::from_secs(10))
+    // Wait for Love to receive Joy's update
+    wait_for_profile_update(&love, &joy_did, "Joy", Duration::from_secs(10))
         .await
-        .expect("Alice should receive Bob's update");
-    println!("Alice received Bob's profile");
+        .expect("Love should receive Joy's update");
+    println!("Love received Joy's profile");
 
     // Verify both see correct names
-    assert_eq!(get_peer_display_name(&bob, &alice_did), Some("Alice".to_string()));
-    assert_eq!(get_peer_display_name(&alice, &bob_did), Some("Bob".to_string()));
+    assert_eq!(get_peer_display_name(&joy, &love_did), Some("Love".to_string()));
+    assert_eq!(get_peer_display_name(&love, &joy_did), Some("Joy".to_string()));
 
     println!("Bidirectional profile updates verified!");
 
     // Cleanup
-    alice.shutdown().await.ok();
-    bob.shutdown().await.ok();
+    love.shutdown().await.ok();
+    joy.shutdown().await.ok();
 
     println!("\n=== PASSED: Bidirectional profile updates work ===\n");
 }

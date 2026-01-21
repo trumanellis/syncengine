@@ -309,12 +309,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_connect_nodes() {
-        let node_a = TestNode::new("alice".to_string()).await.unwrap();
-        let node_b = TestNode::new("bob".to_string()).await.unwrap();
+        let node_a = TestNode::new("love".to_string()).await.unwrap();
+        let node_b = TestNode::new("joy".to_string()).await.unwrap();
 
         node_a.connect_to(&node_b).await.unwrap();
 
-        assert!(node_a.is_connected_to("bob"));
-        assert!(node_b.is_connected_to("alice"));
+        assert!(node_a.is_connected_to("joy"));
+        assert!(node_b.is_connected_to("love"));
     }
 }

@@ -231,36 +231,36 @@ fn test_mirror_store_multiple_profiles() {
     let mirror_store = MirrorStore::new(db).unwrap();
 
     // Create packets from two different profiles
-    let alice_keys = ProfileKeys::generate();
-    let alice_did = alice_keys.did();
-    let mut alice_log = ProfileLog::new(alice_did.clone());
+    let love_keys = ProfileKeys::generate();
+    let love_did = love_keys.did();
+    let mut love_log = ProfileLog::new(love_did.clone());
 
-    let bob_keys = ProfileKeys::generate();
-    let bob_did = bob_keys.did();
-    let mut bob_log = ProfileLog::new(bob_did.clone());
+    let joy_keys = ProfileKeys::generate();
+    let joy_did = joy_keys.did();
+    let mut joy_log = ProfileLog::new(joy_did.clone());
 
-    // Alice creates 2 packets
-    let builder1 = PacketBuilder::new(&alice_keys, &alice_log);
-    let alice_p1 = builder1.create_global_packet(&heartbeat()).unwrap();
-    alice_log.append(alice_p1.clone()).unwrap();
+    // Love creates 2 packets
+    let builder1 = PacketBuilder::new(&love_keys, &love_log);
+    let love_p1 = builder1.create_global_packet(&heartbeat()).unwrap();
+    love_log.append(love_p1.clone()).unwrap();
 
-    let builder2 = PacketBuilder::new(&alice_keys, &alice_log);
-    let alice_p2 = builder2.create_global_packet(&heartbeat()).unwrap();
-    alice_log.append(alice_p2.clone()).unwrap();
+    let builder2 = PacketBuilder::new(&love_keys, &love_log);
+    let love_p2 = builder2.create_global_packet(&heartbeat()).unwrap();
+    love_log.append(love_p2.clone()).unwrap();
 
-    // Bob creates 1 packet
-    let builder3 = PacketBuilder::new(&bob_keys, &bob_log);
-    let bob_p1 = builder3.create_global_packet(&heartbeat()).unwrap();
-    bob_log.append(bob_p1.clone()).unwrap();
+    // Joy creates 1 packet
+    let builder3 = PacketBuilder::new(&joy_keys, &joy_log);
+    let joy_p1 = builder3.create_global_packet(&heartbeat()).unwrap();
+    joy_log.append(joy_p1.clone()).unwrap();
 
     // Store all packets
-    mirror_store.store_packet(&alice_p1).unwrap();
-    mirror_store.store_packet(&alice_p2).unwrap();
-    mirror_store.store_packet(&bob_p1).unwrap();
+    mirror_store.store_packet(&love_p1).unwrap();
+    mirror_store.store_packet(&love_p2).unwrap();
+    mirror_store.store_packet(&joy_p1).unwrap();
 
     // Verify each profile has correct head
-    assert_eq!(mirror_store.get_head(&alice_did).unwrap(), Some(1));
-    assert_eq!(mirror_store.get_head(&bob_did).unwrap(), Some(0));
+    assert_eq!(mirror_store.get_head(&love_did).unwrap(), Some(1));
+    assert_eq!(mirror_store.get_head(&joy_did).unwrap(), Some(0));
 
     // List all mirrored profiles
     let dids = mirror_store.list_mirrored_dids().unwrap();
@@ -274,166 +274,166 @@ fn test_mirror_store_multiple_profiles() {
 /// Test two peers exchanging packets (simulated without network).
 ///
 /// Scenario:
-/// - Alice creates a packet
-/// - Bob receives it (simulated by direct call)
-/// - Verify Bob's mirror contains Alice's packet
+/// - Love creates a packet
+/// - Joy receives it (simulated by direct call)
+/// - Verify Joy's mirror contains Love's packet
 #[tokio::test]
 async fn test_two_peers_direct_packet_simulated() {
-    let alice_dir = tempdir().unwrap();
-    let bob_dir = tempdir().unwrap();
+    let love_dir = tempdir().unwrap();
+    let joy_dir = tempdir().unwrap();
 
-    // Setup Alice
-    let mut alice = SyncEngine::new(alice_dir.path()).await.unwrap();
-    alice.init_profile_keys().unwrap();
-    let alice_did = alice.profile_did().unwrap().clone();
+    // Setup Love
+    let mut love = SyncEngine::new(love_dir.path()).await.unwrap();
+    love.init_profile_keys().unwrap();
+    let love_did = love.profile_did().unwrap().clone();
 
-    // Setup Bob
-    let mut bob = SyncEngine::new(bob_dir.path()).await.unwrap();
-    bob.init_profile_keys().unwrap();
+    // Setup Joy
+    let mut joy = SyncEngine::new(joy_dir.path()).await.unwrap();
+    joy.init_profile_keys().unwrap();
 
-    // Alice creates a heartbeat packet
-    alice
+    // Love creates a heartbeat packet
+    love
         .create_packet(heartbeat(), PacketAddress::Global)
         .unwrap();
 
-    // Get packets from Alice's log
-    let alice_log = alice.my_log().unwrap();
-    let alice_entries = alice_log.entries_ordered();
-    assert_eq!(alice_entries.len(), 1, "Alice should have 1 packet");
+    // Get packets from Love's log
+    let love_log = love.my_log().unwrap();
+    let love_entries = love_log.entries_ordered();
+    assert_eq!(love_entries.len(), 1, "Love should have 1 packet");
 
-    let packet_to_send = alice_entries[0].envelope.clone();
+    let packet_to_send = love_entries[0].envelope.clone();
 
-    // Bob receives the packet
-    let is_new = bob.handle_incoming_packet(packet_to_send).unwrap();
-    assert!(is_new, "Packet should be new to Bob");
+    // Joy receives the packet
+    let is_new = joy.handle_incoming_packet(packet_to_send).unwrap();
+    assert!(is_new, "Packet should be new to Joy");
 
-    // Verify Bob's mirror contains Alice's packet
-    let bob_mirror_head = bob.mirror_head(&alice_did);
+    // Verify Joy's mirror contains Love's packet
+    let joy_mirror_head = joy.mirror_head(&love_did);
     assert_eq!(
-        bob_mirror_head,
+        joy_mirror_head,
         Some(0),
-        "Bob's mirror of Alice should have seq 0"
+        "Joy's mirror of Love should have seq 0"
     );
 }
 
 /// Test encrypted relay - a relay node stores packets they can't decrypt.
 ///
 /// Scenario:
-/// - Alice sends encrypted packet addressed to Bob only
-/// - Carol (relay) receives and stores the packet
-/// - Carol cannot decrypt it, but stores it for Bob
+/// - Love sends encrypted packet addressed to Joy only
+/// - Peace (relay) receives and stores the packet
+/// - Peace cannot decrypt it, but stores it for Joy
 #[tokio::test]
 async fn test_encrypted_relay_simulated() {
-    let alice_dir = tempdir().unwrap();
-    let bob_dir = tempdir().unwrap();
-    let carol_dir = tempdir().unwrap();
+    let love_dir = tempdir().unwrap();
+    let joy_dir = tempdir().unwrap();
+    let peace_dir = tempdir().unwrap();
 
     // Setup all three nodes
-    let mut alice = SyncEngine::new(alice_dir.path()).await.unwrap();
-    alice.init_profile_keys().unwrap();
-    let alice_did = alice.profile_did().unwrap().clone();
+    let mut love = SyncEngine::new(love_dir.path()).await.unwrap();
+    love.init_profile_keys().unwrap();
+    let love_did = love.profile_did().unwrap().clone();
 
-    let mut bob = SyncEngine::new(bob_dir.path()).await.unwrap();
-    bob.init_profile_keys().unwrap();
+    let mut joy = SyncEngine::new(joy_dir.path()).await.unwrap();
+    joy.init_profile_keys().unwrap();
 
-    let mut carol = SyncEngine::new(carol_dir.path()).await.unwrap();
-    carol.init_profile_keys().unwrap();
+    let mut peace = SyncEngine::new(peace_dir.path()).await.unwrap();
+    peace.init_profile_keys().unwrap();
 
-    // Alice creates a global packet (encrypted per-recipient not yet tested)
-    alice
+    // Love creates a global packet (encrypted per-recipient not yet tested)
+    love
         .create_packet(heartbeat(), PacketAddress::Global)
         .unwrap();
 
-    let alice_log = alice.my_log().unwrap();
-    let packet = alice_log.entries_ordered()[0].envelope.clone();
+    let love_log = love.my_log().unwrap();
+    let packet = love_log.entries_ordered()[0].envelope.clone();
 
-    // Carol (relay) receives and stores the packet
-    let is_new_for_carol = carol.handle_incoming_packet(packet.clone()).unwrap();
-    assert!(is_new_for_carol, "Packet should be new to Carol");
+    // Peace (relay) receives and stores the packet
+    let is_new_for_peace = peace.handle_incoming_packet(packet.clone()).unwrap();
+    assert!(is_new_for_peace, "Packet should be new to Peace");
 
-    // Verify Carol stored it in her mirror
-    let carol_mirror_head = carol.mirror_head(&alice_did);
+    // Verify Peace stored it in her mirror
+    let peace_mirror_head = peace.mirror_head(&love_did);
     assert_eq!(
-        carol_mirror_head,
+        peace_mirror_head,
         Some(0),
-        "Carol should have Alice's packet in mirror"
+        "Peace should have Love's packet in mirror"
     );
 
-    // Bob also receives the same packet
-    let is_new_for_bob = bob.handle_incoming_packet(packet).unwrap();
-    assert!(is_new_for_bob, "Packet should be new to Bob");
+    // Joy also receives the same packet
+    let is_new_for_joy = joy.handle_incoming_packet(packet).unwrap();
+    assert!(is_new_for_joy, "Packet should be new to Joy");
 
-    // Verify Bob has it in his mirror too
-    let bob_mirror_head = bob.mirror_head(&alice_did);
+    // Verify Joy has it in his mirror too
+    let joy_mirror_head = joy.mirror_head(&love_did);
     assert_eq!(
-        bob_mirror_head,
+        joy_mirror_head,
         Some(0),
-        "Bob should have Alice's packet in mirror"
+        "Joy should have Love's packet in mirror"
     );
 }
 
 /// Test mirror sync after being offline.
 ///
 /// Scenario:
-/// - Alice sends packets while Bob is offline
-/// - Carol receives and mirrors them
-/// - Bob comes online and syncs from Carol (simulated)
+/// - Love sends packets while Joy is offline
+/// - Peace receives and mirrors them
+/// - Joy comes online and syncs from Peace (simulated)
 #[tokio::test]
 async fn test_mirror_sync_after_offline_simulated() {
-    let alice_dir = tempdir().unwrap();
-    let bob_dir = tempdir().unwrap();
-    let carol_dir = tempdir().unwrap();
+    let love_dir = tempdir().unwrap();
+    let joy_dir = tempdir().unwrap();
+    let peace_dir = tempdir().unwrap();
 
     // Setup all three nodes
-    let mut alice = SyncEngine::new(alice_dir.path()).await.unwrap();
-    alice.init_profile_keys().unwrap();
-    let alice_did = alice.profile_did().unwrap().clone();
+    let mut love = SyncEngine::new(love_dir.path()).await.unwrap();
+    love.init_profile_keys().unwrap();
+    let love_did = love.profile_did().unwrap().clone();
 
-    let mut carol = SyncEngine::new(carol_dir.path()).await.unwrap();
-    carol.init_profile_keys().unwrap();
+    let mut peace = SyncEngine::new(peace_dir.path()).await.unwrap();
+    peace.init_profile_keys().unwrap();
 
-    // Alice creates several packets while Bob is offline
+    // Love creates several packets while Joy is offline
     for _ in 0..3 {
-        alice
+        love
             .create_packet(heartbeat(), PacketAddress::Global)
             .unwrap();
     }
 
-    // Carol receives all of Alice's packets
-    let alice_log = alice.my_log().unwrap();
-    for entry in alice_log.entries_ordered() {
-        carol
+    // Peace receives all of Love's packets
+    let love_log = love.my_log().unwrap();
+    for entry in love_log.entries_ordered() {
+        peace
             .handle_incoming_packet(entry.envelope.clone())
             .unwrap();
     }
 
-    // Verify Carol has all packets (head is at sequence 2 = 3 packets: 0, 1, 2)
-    assert_eq!(carol.mirror_head(&alice_did), Some(2));
+    // Verify Peace has all packets (head is at sequence 2 = 3 packets: 0, 1, 2)
+    assert_eq!(peace.mirror_head(&love_did), Some(2));
 
-    // Now Bob comes online
-    let mut bob = SyncEngine::new(bob_dir.path()).await.unwrap();
-    bob.init_profile_keys().unwrap();
+    // Now Joy comes online
+    let mut joy = SyncEngine::new(joy_dir.path()).await.unwrap();
+    joy.init_profile_keys().unwrap();
 
-    // Simulate Bob syncing from Carol's mirror
+    // Simulate Joy syncing from Peace's mirror
     // mirror_packets_since returns packets AFTER the given sequence
     // To get all packets, use mirror_packets_range which includes both endpoints
-    let carol_mirror_packets = carol.mirror_packets_range(&alice_did, 0, 2).unwrap();
+    let peace_mirror_packets = peace.mirror_packets_range(&love_did, 0, 2).unwrap();
     assert_eq!(
-        carol_mirror_packets.len(),
+        peace_mirror_packets.len(),
         3,
-        "Carol should have 3 packets from Alice (seq 0, 1, 2)"
+        "Peace should have 3 packets from Love (seq 0, 1, 2)"
     );
 
-    // Bob receives all packets from Carol's mirror
-    for packet in carol_mirror_packets {
-        bob.handle_incoming_packet(packet).unwrap();
+    // Joy receives all packets from Peace's mirror
+    for packet in peace_mirror_packets {
+        joy.handle_incoming_packet(packet).unwrap();
     }
 
-    // Verify Bob now has all packets
+    // Verify Joy now has all packets
     assert_eq!(
-        bob.mirror_head(&alice_did),
+        joy.mirror_head(&love_did),
         Some(2),
-        "Bob should have all 3 packets"
+        "Joy should have all 3 packets"
     );
 }
 
@@ -510,42 +510,42 @@ fn test_mirror_detects_fork() {
 /// Test creating and decrypting a global packet.
 #[tokio::test]
 async fn test_global_packet_roundtrip() {
-    let alice_dir = tempdir().unwrap();
-    let bob_dir = tempdir().unwrap();
+    let love_dir = tempdir().unwrap();
+    let joy_dir = tempdir().unwrap();
 
-    // Setup Alice
-    let mut alice = SyncEngine::new(alice_dir.path()).await.unwrap();
-    alice.init_profile_keys().unwrap();
+    // Setup Love
+    let mut love = SyncEngine::new(love_dir.path()).await.unwrap();
+    love.init_profile_keys().unwrap();
 
-    // Setup Bob
-    let mut bob = SyncEngine::new(bob_dir.path()).await.unwrap();
-    bob.init_profile_keys().unwrap();
+    // Setup Joy
+    let mut joy = SyncEngine::new(joy_dir.path()).await.unwrap();
+    joy.init_profile_keys().unwrap();
 
-    // Create a global packet with a direct message (addressed to Bob)
-    let bob_did = bob.profile_did().unwrap();
-    alice
+    // Create a global packet with a direct message (addressed to Joy)
+    let joy_did = joy.profile_did().unwrap();
+    love
         .create_packet(
             PacketPayload::DirectMessage {
-                content: "Hello Bob!".to_string(),
-                recipient: bob_did,
+                content: "Hello Joy!".to_string(),
+                recipient: joy_did,
             },
             PacketAddress::Global,
         )
         .unwrap();
 
-    let alice_log = alice.my_log().unwrap();
-    let packet = alice_log.entries_ordered()[0].envelope.clone();
+    let love_log = love.my_log().unwrap();
+    let packet = love_log.entries_ordered()[0].envelope.clone();
 
-    // Bob receives and decrypts (global packets can be decoded by anyone)
-    let decrypted = bob.decrypt_packet(&packet);
+    // Joy receives and decrypts (global packets can be decoded by anyone)
+    let decrypted = joy.decrypt_packet(&packet);
     assert!(
         decrypted.is_some(),
-        "Bob should be able to decode global packet"
+        "Joy should be able to decode global packet"
     );
 
     match decrypted.unwrap() {
         PacketPayload::DirectMessage { content, recipient: _ } => {
-            assert_eq!(content, "Hello Bob!");
+            assert_eq!(content, "Hello Joy!");
         }
         _ => panic!("Expected DirectMessage payload"),
     }
@@ -563,10 +563,10 @@ fn test_receipt_payload_creation() {
     let log = ProfileLog::new(did);
 
     // Create a receipt payload - use a valid generated DID
-    let alice_keys = ProfileKeys::generate();
-    let alice_did = alice_keys.did();
+    let love_keys = ProfileKeys::generate();
+    let love_did = love_keys.did();
     let receipt = PacketPayload::Receipt {
-        original_sender: alice_did.clone(),
+        original_sender: love_did.clone(),
         packet_seq: 42,
     };
 
@@ -619,63 +619,63 @@ fn test_depin_payload_creation() {
 /// Test listing all mirrored DIDs from an engine.
 #[tokio::test]
 async fn test_list_mirrored_dids() {
-    let alice_dir = tempdir().unwrap();
-    let bob_dir = tempdir().unwrap();
-    let carol_dir = tempdir().unwrap();
+    let love_dir = tempdir().unwrap();
+    let joy_dir = tempdir().unwrap();
+    let peace_dir = tempdir().unwrap();
     let mirror_dir = tempdir().unwrap();
 
     // Create packets from multiple profiles
-    let mut alice = SyncEngine::new(alice_dir.path()).await.unwrap();
-    alice.init_profile_keys().unwrap();
+    let mut love = SyncEngine::new(love_dir.path()).await.unwrap();
+    love.init_profile_keys().unwrap();
 
-    let mut bob = SyncEngine::new(bob_dir.path()).await.unwrap();
-    bob.init_profile_keys().unwrap();
+    let mut joy = SyncEngine::new(joy_dir.path()).await.unwrap();
+    joy.init_profile_keys().unwrap();
 
-    let mut carol = SyncEngine::new(carol_dir.path()).await.unwrap();
-    carol.init_profile_keys().unwrap();
+    let mut peace = SyncEngine::new(peace_dir.path()).await.unwrap();
+    peace.init_profile_keys().unwrap();
 
     // Create a receiving node
     let mut receiver = SyncEngine::new(mirror_dir.path()).await.unwrap();
     receiver.init_profile_keys().unwrap();
 
-    // Alice and Bob create packets
-    alice
+    // Love and Joy create packets
+    love
         .create_packet(heartbeat(), PacketAddress::Global)
         .unwrap();
-    bob.create_packet(heartbeat(), PacketAddress::Global)
+    joy.create_packet(heartbeat(), PacketAddress::Global)
         .unwrap();
 
-    // Receiver gets packets from Alice and Bob
-    let alice_packet = alice.my_log().unwrap().entries_ordered()[0]
+    // Receiver gets packets from Love and Joy
+    let love_packet = love.my_log().unwrap().entries_ordered()[0]
         .envelope
         .clone();
-    let bob_packet = bob.my_log().unwrap().entries_ordered()[0].envelope.clone();
+    let joy_packet = joy.my_log().unwrap().entries_ordered()[0].envelope.clone();
 
-    receiver.handle_incoming_packet(alice_packet).unwrap();
-    receiver.handle_incoming_packet(bob_packet).unwrap();
+    receiver.handle_incoming_packet(love_packet).unwrap();
+    receiver.handle_incoming_packet(joy_packet).unwrap();
 
     // List mirrored DIDs
     let mirrored_dids = receiver.list_mirrored_dids().unwrap();
     assert_eq!(
         mirrored_dids.len(),
         2,
-        "Should have mirrors for Alice and Bob"
+        "Should have mirrors for Love and Joy"
     );
 
-    // Carol's packet not received yet
-    carol
+    // Peace's packet not received yet
+    peace
         .create_packet(heartbeat(), PacketAddress::Global)
         .unwrap();
-    let carol_packet = carol.my_log().unwrap().entries_ordered()[0]
+    let peace_packet = peace.my_log().unwrap().entries_ordered()[0]
         .envelope
         .clone();
-    receiver.handle_incoming_packet(carol_packet).unwrap();
+    receiver.handle_incoming_packet(peace_packet).unwrap();
 
     let mirrored_dids = receiver.list_mirrored_dids().unwrap();
     assert_eq!(
         mirrored_dids.len(),
         3,
-        "Should have mirrors for Alice, Bob, and Carol"
+        "Should have mirrors for Love, Joy, and Peace"
     );
 }
 
@@ -691,7 +691,7 @@ fn test_profile_update_packet() {
     let log = ProfileLog::new(did);
 
     let profile_update = PacketPayload::ProfileUpdate {
-        display_name: Some("Alice Quantum".to_string()),
+        display_name: Some("Love Quantum".to_string()),
         bio: Some("Building post-quantum systems".to_string()),
         avatar_blob_id: None,
     };
@@ -708,7 +708,7 @@ fn test_profile_update_packet() {
             bio,
             avatar_blob_id,
         } => {
-            assert_eq!(display_name, Some("Alice Quantum".to_string()));
+            assert_eq!(display_name, Some("Love Quantum".to_string()));
             assert_eq!(bio, Some("Building post-quantum systems".to_string()));
             assert_eq!(avatar_blob_id, None);
         }
@@ -758,70 +758,70 @@ fn test_realm_invite_packet() {
 /// Test handling duplicate packets (same packet received twice).
 #[tokio::test]
 async fn test_duplicate_packet_handling() {
-    let alice_dir = tempdir().unwrap();
-    let bob_dir = tempdir().unwrap();
+    let love_dir = tempdir().unwrap();
+    let joy_dir = tempdir().unwrap();
 
-    let mut alice = SyncEngine::new(alice_dir.path()).await.unwrap();
-    alice.init_profile_keys().unwrap();
+    let mut love = SyncEngine::new(love_dir.path()).await.unwrap();
+    love.init_profile_keys().unwrap();
 
-    let mut bob = SyncEngine::new(bob_dir.path()).await.unwrap();
-    bob.init_profile_keys().unwrap();
+    let mut joy = SyncEngine::new(joy_dir.path()).await.unwrap();
+    joy.init_profile_keys().unwrap();
 
-    // Alice creates a packet
-    alice
+    // Love creates a packet
+    love
         .create_packet(heartbeat(), PacketAddress::Global)
         .unwrap();
 
-    let packet = alice.my_log().unwrap().entries_ordered()[0]
+    let packet = love.my_log().unwrap().entries_ordered()[0]
         .envelope
         .clone();
 
-    // Bob receives it once
-    let is_new_first = bob.handle_incoming_packet(packet.clone()).unwrap();
+    // Joy receives it once
+    let is_new_first = joy.handle_incoming_packet(packet.clone()).unwrap();
     assert!(is_new_first, "First receipt should be new");
 
-    // Bob receives it again (duplicate)
-    let is_new_second = bob.handle_incoming_packet(packet).unwrap();
+    // Joy receives it again (duplicate)
+    let is_new_second = joy.handle_incoming_packet(packet).unwrap();
     assert!(!is_new_second, "Duplicate should not be new");
 }
 
 /// Test receiving packets out of order.
 #[tokio::test]
 async fn test_out_of_order_packets() {
-    let alice_dir = tempdir().unwrap();
-    let bob_dir = tempdir().unwrap();
+    let love_dir = tempdir().unwrap();
+    let joy_dir = tempdir().unwrap();
 
-    let mut alice = SyncEngine::new(alice_dir.path()).await.unwrap();
-    alice.init_profile_keys().unwrap();
-    let alice_did = alice.profile_did().unwrap().clone();
+    let mut love = SyncEngine::new(love_dir.path()).await.unwrap();
+    love.init_profile_keys().unwrap();
+    let love_did = love.profile_did().unwrap().clone();
 
-    let mut bob = SyncEngine::new(bob_dir.path()).await.unwrap();
-    bob.init_profile_keys().unwrap();
+    let mut joy = SyncEngine::new(joy_dir.path()).await.unwrap();
+    joy.init_profile_keys().unwrap();
 
-    // Alice creates 3 packets
-    alice
+    // Love creates 3 packets
+    love
         .create_packet(heartbeat(), PacketAddress::Global)
         .unwrap();
-    alice
+    love
         .create_packet(heartbeat(), PacketAddress::Global)
         .unwrap();
-    alice
+    love
         .create_packet(heartbeat(), PacketAddress::Global)
         .unwrap();
 
-    let entries = alice.my_log().unwrap().entries_ordered();
+    let entries = love.my_log().unwrap().entries_ordered();
     let packet0 = entries[0].envelope.clone();
     let packet1 = entries[1].envelope.clone();
     let packet2 = entries[2].envelope.clone();
 
-    // Bob receives them out of order: 2, 0, 1
-    bob.handle_incoming_packet(packet2).unwrap();
-    bob.handle_incoming_packet(packet0).unwrap();
-    bob.handle_incoming_packet(packet1).unwrap();
+    // Joy receives them out of order: 2, 0, 1
+    joy.handle_incoming_packet(packet2).unwrap();
+    joy.handle_incoming_packet(packet0).unwrap();
+    joy.handle_incoming_packet(packet1).unwrap();
 
-    // Bob's mirror should have all 3
+    // Joy's mirror should have all 3
     assert_eq!(
-        bob.mirror_head(&alice_did),
+        joy.mirror_head(&love_did),
         Some(2),
         "Should have all packets"
     );

@@ -105,50 +105,50 @@ async fn test_two_node_blob_transfer() {
         .try_init()
         .ok();
 
-    // Setup Alice (blob provider)
-    let alice_dir = tempdir().unwrap();
-    let mut alice = SyncEngine::new(alice_dir.path()).await.unwrap();
-    alice.init_identity().unwrap();
-    alice.start_networking().await.unwrap();
+    // Setup Love (blob provider)
+    let love_dir = tempdir().unwrap();
+    let mut love = SyncEngine::new(love_dir.path()).await.unwrap();
+    love.init_identity().unwrap();
+    love.start_networking().await.unwrap();
     sleep(Duration::from_millis(300)).await;
 
-    // Setup Bob (blob requester)
-    let bob_dir = tempdir().unwrap();
-    let mut bob = SyncEngine::new(bob_dir.path()).await.unwrap();
-    bob.init_identity().unwrap();
-    bob.start_networking().await.unwrap();
+    // Setup Joy (blob requester)
+    let joy_dir = tempdir().unwrap();
+    let mut joy = SyncEngine::new(joy_dir.path()).await.unwrap();
+    joy.init_identity().unwrap();
+    joy.start_networking().await.unwrap();
     sleep(Duration::from_millis(300)).await;
 
-    // Alice uploads a blob
+    // Love uploads a blob
     let original_data = vec![0xEF; 4096]; // 4KB test blob
-    let blob_id = alice.upload_image(original_data.clone()).await.unwrap();
+    let blob_id = love.upload_image(original_data.clone()).await.unwrap();
 
-    // Alice creates a ticket
-    let ticket_str = alice.create_image_ticket(&blob_id).await.unwrap();
-    println!("Alice created ticket: {}...", &ticket_str[..50.min(ticket_str.len())]);
+    // Love creates a ticket
+    let ticket_str = love.create_image_ticket(&blob_id).await.unwrap();
+    println!("Love created ticket: {}...", &ticket_str[..50.min(ticket_str.len())]);
 
-    // Verify Bob doesn't have this blob yet
-    let bob_has_blob = bob.load_image(&blob_id).await.unwrap();
-    assert!(bob_has_blob.is_none(), "Bob should not have blob initially");
+    // Verify Joy doesn't have this blob yet
+    let joy_has_blob = joy.load_image(&blob_id).await.unwrap();
+    assert!(joy_has_blob.is_none(), "Joy should not have blob initially");
 
-    // Bob downloads via ticket
-    let downloaded_blob_id = bob.download_image_from_ticket(&ticket_str).await.unwrap();
+    // Joy downloads via ticket
+    let downloaded_blob_id = joy.download_image_from_ticket(&ticket_str).await.unwrap();
     assert_eq!(blob_id, downloaded_blob_id, "Downloaded blob ID should match");
 
-    // Verify Bob now has the blob
-    let bob_data = bob.load_image(&blob_id).await.unwrap();
-    assert!(bob_data.is_some(), "Bob should have blob after download");
-    assert_eq!(bob_data.unwrap(), original_data, "Downloaded data should match original");
+    // Verify Joy now has the blob
+    let joy_data = joy.load_image(&blob_id).await.unwrap();
+    assert!(joy_data.is_some(), "Joy should have blob after download");
+    assert_eq!(joy_data.unwrap(), original_data, "Downloaded data should match original");
 
     println!("✅ Two-node blob transfer completed successfully!");
 }
 
-/// Test 3-node blob propagation: Alice → Bob → Carol
+/// Test 3-node blob propagation: Love → Joy → Peace
 ///
 /// This tests that:
-/// 1. Alice creates a blob
-/// 2. Bob downloads from Alice
-/// 3. Carol downloads from Bob (not Alice)
+/// 1. Love creates a blob
+/// 2. Joy downloads from Love
+/// 3. Peace downloads from Joy (not Love)
 /// 4. All three nodes have identical blob data
 #[tokio::test]
 async fn test_three_node_blob_propagation() {
@@ -157,62 +157,62 @@ async fn test_three_node_blob_propagation() {
         .try_init()
         .ok();
 
-    // Setup Alice (original blob owner)
-    let alice_dir = tempdir().unwrap();
-    let mut alice = SyncEngine::new(alice_dir.path()).await.unwrap();
-    alice.init_identity().unwrap();
-    alice.start_networking().await.unwrap();
+    // Setup Love (original blob owner)
+    let love_dir = tempdir().unwrap();
+    let mut love = SyncEngine::new(love_dir.path()).await.unwrap();
+    love.init_identity().unwrap();
+    love.start_networking().await.unwrap();
     sleep(Duration::from_millis(300)).await;
 
-    // Setup Bob (will download from Alice)
-    let bob_dir = tempdir().unwrap();
-    let mut bob = SyncEngine::new(bob_dir.path()).await.unwrap();
-    bob.init_identity().unwrap();
-    bob.start_networking().await.unwrap();
+    // Setup Joy (will download from Love)
+    let joy_dir = tempdir().unwrap();
+    let mut joy = SyncEngine::new(joy_dir.path()).await.unwrap();
+    joy.init_identity().unwrap();
+    joy.start_networking().await.unwrap();
     sleep(Duration::from_millis(300)).await;
 
-    // Setup Carol (will download from Bob)
-    let carol_dir = tempdir().unwrap();
-    let mut carol = SyncEngine::new(carol_dir.path()).await.unwrap();
-    carol.init_identity().unwrap();
-    carol.start_networking().await.unwrap();
+    // Setup Peace (will download from Joy)
+    let peace_dir = tempdir().unwrap();
+    let mut peace = SyncEngine::new(peace_dir.path()).await.unwrap();
+    peace.init_identity().unwrap();
+    peace.start_networking().await.unwrap();
     sleep(Duration::from_millis(300)).await;
 
     println!("All three nodes started");
 
-    // Alice creates a 10KB blob
+    // Love creates a 10KB blob
     let original_data = vec![0x42; 10240]; // 10KB
-    let blob_id = alice.upload_image(original_data.clone()).await.unwrap();
-    let alice_ticket = alice.create_image_ticket(&blob_id).await.unwrap();
-    println!("Alice uploaded blob: {}", blob_id);
+    let blob_id = love.upload_image(original_data.clone()).await.unwrap();
+    let love_ticket = love.create_image_ticket(&blob_id).await.unwrap();
+    println!("Love uploaded blob: {}", blob_id);
 
-    // Bob downloads from Alice
-    let bob_blob_id = bob.download_image_from_ticket(&alice_ticket).await.unwrap();
-    assert_eq!(blob_id, bob_blob_id);
+    // Joy downloads from Love
+    let joy_blob_id = joy.download_image_from_ticket(&love_ticket).await.unwrap();
+    assert_eq!(blob_id, joy_blob_id);
 
-    let bob_data = bob.load_image(&blob_id).await.unwrap().unwrap();
-    assert_eq!(bob_data, original_data, "Bob's data should match Alice's");
-    println!("Bob downloaded blob from Alice");
+    let joy_data = joy.load_image(&blob_id).await.unwrap().unwrap();
+    assert_eq!(joy_data, original_data, "Joy's data should match Love's");
+    println!("Joy downloaded blob from Love");
 
-    // Bob creates a ticket for the same blob
-    let bob_ticket = bob.create_image_ticket(&blob_id).await.unwrap();
+    // Joy creates a ticket for the same blob
+    let joy_ticket = joy.create_image_ticket(&blob_id).await.unwrap();
 
-    // Carol downloads from Bob's ticket (different peer addresses)
-    let carol_blob_id = carol.download_image_from_ticket(&bob_ticket).await.unwrap();
-    assert_eq!(blob_id, carol_blob_id);
+    // Peace downloads from Joy's ticket (different peer addresses)
+    let peace_blob_id = peace.download_image_from_ticket(&joy_ticket).await.unwrap();
+    assert_eq!(blob_id, peace_blob_id);
 
-    let carol_data = carol.load_image(&blob_id).await.unwrap().unwrap();
-    assert_eq!(carol_data, original_data, "Carol's data should match original");
-    println!("Carol downloaded blob from Bob");
+    let peace_data = peace.load_image(&blob_id).await.unwrap().unwrap();
+    assert_eq!(peace_data, original_data, "Peace's data should match original");
+    println!("Peace downloaded blob from Joy");
 
     // Verify all three have identical data
-    let alice_final = alice.load_image(&blob_id).await.unwrap().unwrap();
-    let bob_final = bob.load_image(&blob_id).await.unwrap().unwrap();
-    let carol_final = carol.load_image(&blob_id).await.unwrap().unwrap();
+    let love_final = love.load_image(&blob_id).await.unwrap().unwrap();
+    let joy_final = joy.load_image(&blob_id).await.unwrap().unwrap();
+    let peace_final = peace.load_image(&blob_id).await.unwrap().unwrap();
 
-    assert_eq!(alice_final, bob_final);
-    assert_eq!(bob_final, carol_final);
-    assert_eq!(alice_final.len(), 10240);
+    assert_eq!(love_final, joy_final);
+    assert_eq!(joy_final, peace_final);
+    assert_eq!(love_final.len(), 10240);
 
     println!("✅ Three-node blob propagation completed successfully!");
 }
@@ -253,55 +253,55 @@ async fn test_blob_sharing_between_contacts() {
         .try_init()
         .ok();
 
-    // Setup Alice
-    let alice_dir = tempdir().unwrap();
-    let mut alice = SyncEngine::new(alice_dir.path()).await.unwrap();
-    alice.init_identity().unwrap();
-    alice.start_networking().await.unwrap();
+    // Setup Love
+    let love_dir = tempdir().unwrap();
+    let mut love = SyncEngine::new(love_dir.path()).await.unwrap();
+    love.init_identity().unwrap();
+    love.start_networking().await.unwrap();
     sleep(Duration::from_millis(500)).await;
 
-    // Setup Bob
-    let bob_dir = tempdir().unwrap();
-    let mut bob = SyncEngine::new(bob_dir.path()).await.unwrap();
-    bob.init_identity().unwrap();
-    bob.start_networking().await.unwrap();
+    // Setup Joy
+    let joy_dir = tempdir().unwrap();
+    let mut joy = SyncEngine::new(joy_dir.path()).await.unwrap();
+    joy.init_identity().unwrap();
+    joy.start_networking().await.unwrap();
     sleep(Duration::from_millis(500)).await;
 
     // Exchange contacts
-    let invite_code = alice.generate_contact_invite(24).await.unwrap();
-    let invite = bob.decode_contact_invite(&invite_code).await.unwrap();
-    bob.send_contact_request(invite).await.unwrap();
+    let invite_code = love.generate_contact_invite(24).await.unwrap();
+    let invite = joy.decode_contact_invite(&invite_code).await.unwrap();
+    joy.send_contact_request(invite).await.unwrap();
     sleep(Duration::from_millis(1000)).await;
 
-    let (alice_incoming, _) = alice.list_pending_contacts().unwrap();
-    if !alice_incoming.is_empty() {
-        alice.accept_contact(&alice_incoming[0].invite_id).await.unwrap();
+    let (love_incoming, _) = love.list_pending_contacts().unwrap();
+    if !love_incoming.is_empty() {
+        love.accept_contact(&love_incoming[0].invite_id).await.unwrap();
         sleep(Duration::from_millis(1500)).await;
     }
 
     // Verify they're contacts
-    let alice_contacts = alice.list_contacts().unwrap();
-    let bob_contacts = bob.list_contacts().unwrap();
+    let love_contacts = love.list_contacts().unwrap();
+    let joy_contacts = joy.list_contacts().unwrap();
 
-    if alice_contacts.is_empty() || bob_contacts.is_empty() {
+    if love_contacts.is_empty() || joy_contacts.is_empty() {
         println!("⚠️ Contact exchange didn't complete - skipping blob test");
         return;
     }
 
     println!("Contact exchange complete, testing blob sharing...");
 
-    // Alice uploads avatar
+    // Love uploads avatar
     let avatar_data = vec![0xAA; 50 * 1024]; // 50KB avatar
-    let avatar_id = alice.upload_avatar(avatar_data.clone()).await.unwrap();
-    let avatar_ticket = alice.create_image_ticket(&avatar_id).await.unwrap();
+    let avatar_id = love.upload_avatar(avatar_data.clone()).await.unwrap();
+    let avatar_ticket = love.create_image_ticket(&avatar_id).await.unwrap();
 
-    // Bob downloads Alice's avatar
-    let downloaded_id = bob.download_image_from_ticket(&avatar_ticket).await.unwrap();
+    // Joy downloads Love's avatar
+    let downloaded_id = joy.download_image_from_ticket(&avatar_ticket).await.unwrap();
     assert_eq!(avatar_id, downloaded_id);
 
-    let bob_avatar = bob.load_image(&avatar_id).await.unwrap();
-    assert!(bob_avatar.is_some());
-    assert_eq!(bob_avatar.unwrap(), avatar_data);
+    let joy_avatar = joy.load_image(&avatar_id).await.unwrap();
+    assert!(joy_avatar.is_some());
+    assert_eq!(joy_avatar.unwrap(), avatar_data);
 
     println!("✅ Blob sharing between contacts works!");
 }

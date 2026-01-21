@@ -69,6 +69,7 @@ pub mod envelope;
 pub mod events;
 pub mod gossip;
 pub mod manager;
+pub mod packet_events;
 pub mod packet_protocol;
 pub mod profile_pinning;
 pub mod profile_protocol;
@@ -80,8 +81,11 @@ pub use contact_protocol::{
     derive_contact_key, derive_contact_topic, ContactMessage, CONTACT_ALPN,
 };
 pub use envelope::{SyncEnvelope, ENVELOPE_VERSION};
-pub use events::{NetworkDebugInfo, SyncEvent, SyncStatus};
+pub use events::{
+    DecryptionStatus, NetworkDebugInfo, PacketDirection, PacketEvent, SyncEvent, SyncStatus,
+};
 pub use gossip::{ActiveContactTopics, GossipMessage, GossipSync, TopicEvent, TopicHandle, TopicReceiver, TopicSender};
+pub use packet_events::{PacketEventBuffer, PacketEventBufferConfig};
 pub use manager::SyncManager;
 pub use profile_pinning::{
     derive_profile_topic, global_profile_topic, ProfileAction, ProfileGossipMessage,

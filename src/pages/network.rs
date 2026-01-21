@@ -228,6 +228,7 @@ pub fn Network() -> Element {
                 let guard = shared.read().await;
 
                 if let Some(ref eng) = *guard {
+                    // Load conversation messages
                     match eng.get_conversation(&contact_did) {
                         Ok(convo) => {
                             let messages: Vec<ChatBubbleMessage> = convo
@@ -497,6 +498,7 @@ pub fn Network() -> Element {
                             },
 
                             if let Some(ref contact) = selected_contact() {
+                                // Conversation view (packet events now in status dropdown)
                                 ConversationView {
                                     contact_did: contact.did.clone(),
                                     contact_name: contact.name.clone(),

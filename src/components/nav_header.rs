@@ -4,7 +4,7 @@
 //! Mobile: Hidden (replaced by MobileNav)
 
 use dioxus::prelude::*;
-use syncengine_core::{Peer, PeerStatus};
+use syncengine_core::{PacketEvent, Peer, PeerStatus};
 
 use crate::app::Route;
 use crate::components::messages::MessageCompose;
@@ -62,6 +62,7 @@ pub fn NavHeader(props: NavHeaderProps) -> Element {
     let mut peers: Signal<Vec<Peer>> = use_signal(Vec::new);
     let mut syncing = use_signal(|| false);
     let mut compose_target: Signal<Option<(String, String)>> = use_signal(|| None);
+    let mut packet_events: Signal<Vec<PacketEvent>> = use_signal(Vec::new);
 
     let locations = [
         NavLocation::Field,
@@ -69,7 +70,7 @@ pub fn NavHeader(props: NavHeaderProps) -> Element {
         NavLocation::Profile,
     ];
 
-    // Load peers when engine ready
+    // Load peers and packet events when engine ready
     use_effect(move || {
         if engine_ready() {
             spawn(async move {
@@ -79,12 +80,23 @@ pub fn NavHeader(props: NavHeaderProps) -> Element {
                     if let Ok(peer_list) = eng.list_peer_contacts() {
                         peers.set(peer_list);
                     }
+                    // Load historical packet events from storage first
+                    if let Err(e) = eng.load_historical_packet_events() {
+                        tracing::warn!("Failed to load historical packet events: {:?}", e);
+                    }
+                    // Then get all packet events for display
+                    let all_events: Vec<PacketEvent> = eng
+                        .get_all_packet_events()
+                        .into_values()
+                        .flatten()
+                        .collect();
+                    packet_events.set(all_events);
                 }
             });
         }
     });
 
-    // Poll for peer updates
+    // Poll for peer and packet event updates
     use_effect(move || {
         spawn(async move {
             loop {
@@ -96,6 +108,13 @@ pub fn NavHeader(props: NavHeaderProps) -> Element {
                         if let Ok(peer_list) = eng.list_peer_contacts() {
                             peers.set(peer_list);
                         }
+                        // Refresh packet events
+                        let all_events: Vec<PacketEvent> = eng
+                            .get_all_packet_events()
+                            .into_values()
+                            .flatten()
+                            .collect();
+                        packet_events.set(all_events);
                     }
                 }
             }
@@ -232,6 +251,7 @@ pub fn NavHeader(props: NavHeaderProps) -> Element {
                 on_close: move |_| show_dropdown.set(false),
                 on_sync: on_sync,
                 on_message: on_message,
+                packet_events: packet_events(),
             }
         }
 
