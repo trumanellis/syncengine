@@ -19,13 +19,20 @@ pub fn create_context_table(
     let ctx = lua.create_table()?;
 
     // ctx.launch(name, opts)
+    // opts can include: profile (string), connect_to (array of instance names)
     let instances_clone = instances.clone();
     let launch_fn = lua.create_function(move |_lua, args: (String, Option<Table>)| {
         let (name, opts) = args;
 
         let profile = opts
+            .as_ref()
             .and_then(|t| t.get::<String>("profile").ok())
             .unwrap_or_else(|| capitalize(&name));
+
+        // Get connect_to peers if specified
+        let connect_peers: Option<Vec<String>> = opts.as_ref().and_then(|t| {
+            t.get::<Vec<String>>("connect_to").ok()
+        });
 
         let instances = instances_clone.clone();
 
@@ -33,12 +40,16 @@ pub fn create_context_table(
         let rt = tokio::runtime::Handle::current();
         rt.block_on(async {
             let mut mgr = instances.write().await;
-            mgr.launch(&name, &profile)
+            mgr.launch_with_connect(&name, &profile, connect_peers.clone())
                 .map_err(|e| mlua::Error::runtime(e.to_string()))?;
             Ok::<_, mlua::Error>(())
         })?;
 
-        tracing::info!(name = %name, profile = %profile, "Launched instance");
+        if let Some(ref peers) = connect_peers {
+            tracing::info!(name = %name, profile = %profile, connect_to = ?peers, "Launched instance with auto-connect");
+        } else {
+            tracing::info!(name = %name, profile = %profile, "Launched instance");
+        }
         Ok(())
     })?;
     ctx.set("launch", launch_fn)?;

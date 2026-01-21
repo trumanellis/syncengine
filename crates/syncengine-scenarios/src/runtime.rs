@@ -67,6 +67,24 @@ impl ScenarioRuntime {
                 "Running scenario"
             );
 
+            // Check topology - if mesh, we need to launch with auto-connect
+            let is_mesh = config
+                .get::<String>("topology")
+                .map(|t| t == "mesh")
+                .unwrap_or(false);
+
+            // Collect all instance names first (for mesh auto-connect)
+            let mut all_instance_names: Vec<String> = Vec::new();
+            if let Ok(instances_table) = config.get::<Table>("instances") {
+                for pair in instances_table.pairs::<i32, Table>() {
+                    if let Ok((_, instance)) = pair {
+                        let inst_name: String =
+                            instance.get("name").unwrap_or_else(|_| "unknown".to_string());
+                        all_instance_names.push(inst_name);
+                    }
+                }
+            }
+
             // Handle instances array if present
             if let Ok(instances_table) = config.get::<Table>("instances") {
                 for pair in instances_table.pairs::<i32, Table>() {
@@ -77,12 +95,25 @@ impl ScenarioRuntime {
                             .get("profile")
                             .unwrap_or_else(|_| capitalize(&inst_name));
 
-                        // Launch instance
+                        // For mesh topology, connect to all other instances
+                        let connect_peers = if is_mesh {
+                            Some(
+                                all_instance_names
+                                    .iter()
+                                    .filter(|n| *n != &inst_name)
+                                    .cloned()
+                                    .collect(),
+                            )
+                        } else {
+                            None
+                        };
+
+                        // Launch instance with auto-connect
                         let instances_clone = instances.clone();
                         let rt = tokio::runtime::Handle::current();
                         rt.block_on(async {
                             let mut mgr = instances_clone.write().await;
-                            if let Err(e) = mgr.launch(&inst_name, &profile) {
+                            if let Err(e) = mgr.launch_with_connect(&inst_name, &profile, connect_peers) {
                                 tracing::error!(name = %inst_name, error = %e, "Failed to launch");
                             }
                         });
@@ -93,22 +124,9 @@ impl ScenarioRuntime {
                 }
             }
 
-            // Handle topology
-            if let Ok(topology) = config.get::<String>("topology") {
-                match topology.as_str() {
-                    "mesh" => {
-                        let instances_clone = instances.clone();
-                        let rt = tokio::runtime::Handle::current();
-                        rt.block_on(async {
-                            let mgr = instances_clone.read().await;
-                            let names = mgr.list_instances();
-                            tracing::info!(instances = ?names, "Creating mesh topology");
-                        });
-                    }
-                    _ => {
-                        tracing::warn!(topology = %topology, "Unknown topology");
-                    }
-                }
+            // Log topology info
+            if is_mesh {
+                tracing::info!(instances = ?all_instance_names, "Created mesh topology with auto-connect");
             }
 
             // Call on_start if present

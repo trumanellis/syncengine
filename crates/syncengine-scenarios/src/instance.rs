@@ -88,8 +88,18 @@ impl InstanceManager {
         )
     }
 
-    /// Launch a new instance
+    /// Launch a new instance with auto-connect support
     pub fn launch(&mut self, name: &str, profile: &str) -> Result<()> {
+        self.launch_with_connect(name, profile, None)
+    }
+
+    /// Launch a new instance with optional auto-connect peers
+    pub fn launch_with_connect(
+        &mut self,
+        name: &str,
+        profile: &str,
+        connect_peers: Option<Vec<String>>,
+    ) -> Result<()> {
         if self.instances.contains_key(name) {
             anyhow::bail!("Instance '{}' already exists", name);
         }
@@ -101,27 +111,44 @@ impl InstanceManager {
         self.next_position += 1;
         let total = self.instances.len() as u8 + 1;
 
+        // Convert numeric position to string format expected by the binary
+        let position_str = match (position, total) {
+            (_, 1) => "maximized".to_string(),
+            (0, 2) => "left".to_string(),
+            (1, 2) => "right".to_string(),
+            (0, _) => "left".to_string(),
+            (p, t) if p == t - 1 => "right".to_string(),
+            _ => "center".to_string(),
+        };
+
         tracing::info!(
             name = %name,
             profile = %profile,
-            position = position,
+            position = %position_str,
             "Launching instance"
         );
 
-        let child = Command::new(&self.binary_path)
-            .arg("--name")
+        let mut cmd = Command::new(&self.binary_path);
+        cmd.arg("--name")
             .arg(name)
             .arg("--position")
-            .arg(format!("{}/{}", position + 1, total))
+            .arg(&position_str)
             .arg("--total-windows")
             .arg(total.to_string())
             .arg("--init-profile-name")
             .arg(profile)
             .env("SYNCENGINE_DATA_DIR", &data_dir)
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .context("Failed to spawn instance")?;
+            .stderr(Stdio::null());
+
+        // Add auto-connect peers if provided
+        if let Some(peers) = connect_peers {
+            if !peers.is_empty() {
+                cmd.arg("--init-connect").arg(peers.join(","));
+            }
+        }
+
+        let child = cmd.spawn().context("Failed to spawn instance")?;
 
         self.instances.insert(
             name.to_string(),
@@ -136,6 +163,11 @@ impl InstanceManager {
         );
 
         Ok(())
+    }
+
+    /// Get all instance names (for auto-connect)
+    pub fn get_all_names(&self) -> Vec<String> {
+        self.instances.keys().cloned().collect()
     }
 
     /// Kill an instance
@@ -154,7 +186,7 @@ impl InstanceManager {
         Ok(())
     }
 
-    /// Restart a killed instance
+    /// Restart a killed instance (reconnects to all other running instances)
     pub fn restart(&mut self, name: &str) -> Result<()> {
         let info = self
             .instances
@@ -169,30 +201,55 @@ impl InstanceManager {
         let data_dir = info.data_dir.clone();
         let position = info.position;
 
+        // Get all other running instances for auto-connect
+        let connect_peers: Vec<String> = self
+            .instances
+            .iter()
+            .filter(|(n, i)| *n != name && i.state == InstanceState::Running)
+            .map(|(n, _)| n.clone())
+            .collect();
+
         // Remove old entry
         self.instances.remove(name);
 
         // Relaunch
         let total = self.instances.len() as u8 + 1;
 
+        // Convert numeric position to string format expected by the binary
+        let position_str = match (position, total) {
+            (_, 1) => "maximized".to_string(),
+            (0, 2) => "left".to_string(),
+            (1, 2) => "right".to_string(),
+            (0, _) => "left".to_string(),
+            (p, t) if p == t - 1 => "right".to_string(),
+            _ => "center".to_string(),
+        };
+
         tracing::info!(
             name = %name,
             profile = %profile,
+            position = %position_str,
+            connect_peers = ?connect_peers,
             "Restarting instance"
         );
 
-        let child = Command::new(&self.binary_path)
-            .arg("--name")
+        let mut cmd = Command::new(&self.binary_path);
+        cmd.arg("--name")
             .arg(name)
             .arg("--position")
-            .arg(format!("{}/{}", position + 1, total))
+            .arg(&position_str)
             .arg("--total-windows")
             .arg(total.to_string())
             .env("SYNCENGINE_DATA_DIR", &data_dir)
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .context("Failed to spawn instance")?;
+            .stderr(Stdio::null());
+
+        // Add auto-connect to other running instances
+        if !connect_peers.is_empty() {
+            cmd.arg("--init-connect").arg(connect_peers.join(","));
+        }
+
+        let child = cmd.spawn().context("Failed to spawn instance")?;
 
         self.instances.insert(
             name.to_string(),
