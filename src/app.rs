@@ -3,7 +3,7 @@ use std::sync::Arc;
 use dioxus::prelude::*;
 use tokio::sync::RwLock;
 
-use crate::context::{get_data_dir, SharedEngine};
+use crate::context::{get_data_dir, get_init_connect, get_init_profile_name, SharedEngine};
 use crate::pages::{Field, Landing, Network, Profile, RealmView};
 use crate::theme::GLOBAL_STYLES;
 
@@ -57,6 +57,112 @@ pub fn App() -> Element {
                     // This is required for send_message() and get_conversation() to work
                     if let Err(e) = eng.init_profile_keys() {
                         tracing::error!("Failed to initialize profile keys: {}", e);
+                    }
+
+                    // Set initial profile name if provided via --init-profile-name
+                    // Only sets if the current display_name is empty or default (first launch)
+                    if let Some(init_name) = get_init_profile_name() {
+                        match eng.get_own_profile() {
+                            Ok(mut profile) => {
+                                if profile.display_name.is_empty() || profile.display_name == "Anonymous User" {
+                                    profile.display_name = init_name.clone();
+                                    if let Err(e) = eng.save_profile(&profile) {
+                                        tracing::error!("Failed to set initial profile name: {}", e);
+                                    } else {
+                                        tracing::info!("Profile name set to '{}'", init_name);
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!("Could not get profile for initial name setup: {}", e);
+                            }
+                        }
+                    }
+
+                    // Bootstrap auto-connect: connect with other named instances
+                    // This allows ./se love joy peace to auto-connect all three instances
+                    if let Some(bootstrap_peers) = get_init_connect() {
+                        // Get our profile name to identify ourselves
+                        let our_name = eng.get_own_profile()
+                            .map(|p| p.display_name.to_lowercase())
+                            .unwrap_or_default();
+
+                        if !our_name.is_empty() && our_name != "anonymous user" {
+                            // Bootstrap directory for sharing invites between instances
+                            let bootstrap_dir = dirs::data_dir()
+                                .unwrap_or_else(|| std::path::PathBuf::from("."))
+                                .join("syncengine-bootstrap");
+
+                            // Create directory if it doesn't exist
+                            if let Err(e) = std::fs::create_dir_all(&bootstrap_dir) {
+                                tracing::warn!("Could not create bootstrap directory: {}", e);
+                            } else {
+                                // Generate and write our invite for others to find
+                                match eng.generate_contact_invite(24).await {
+                                    Ok(invite_str) => {
+                                        let our_invite_path = bootstrap_dir.join(format!("{}.invite", our_name));
+                                        if let Err(e) = std::fs::write(&our_invite_path, &invite_str) {
+                                            tracing::warn!("Could not write bootstrap invite: {}", e);
+                                        } else {
+                                            tracing::info!("Bootstrap invite written to {:?}", our_invite_path);
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!("Could not generate bootstrap invite: {}", e);
+                                    }
+                                }
+
+                                // Small delay to let other instances write their invites
+                                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+                                // Read invites from other bootstrap peers and send contact requests
+                                for peer_name in &bootstrap_peers {
+                                    let peer_name_lower = peer_name.to_lowercase();
+
+                                    // Skip ourselves
+                                    if peer_name_lower == our_name {
+                                        continue;
+                                    }
+
+                                    let peer_invite_path = bootstrap_dir.join(format!("{}.invite", peer_name_lower));
+
+                                    // Try to read the peer's invite file
+                                    if let Ok(invite_str) = std::fs::read_to_string(&peer_invite_path) {
+                                        // Decode and send contact request
+                                        match eng.decode_contact_invite(&invite_str).await {
+                                            Ok(invite) => {
+                                                match eng.send_contact_request(invite).await {
+                                                    Ok(()) => {
+                                                        tracing::info!(
+                                                            "Bootstrap: sent contact request to '{}'",
+                                                            peer_name
+                                                        );
+                                                    }
+                                                    Err(e) => {
+                                                        // May fail if already connected or request pending
+                                                        tracing::debug!(
+                                                            "Bootstrap: could not send request to '{}': {}",
+                                                            peer_name, e
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                            Err(e) => {
+                                                tracing::debug!(
+                                                    "Bootstrap: could not decode invite from '{}': {}",
+                                                    peer_name, e
+                                                );
+                                            }
+                                        }
+                                    } else {
+                                        tracing::debug!(
+                                            "Bootstrap: no invite found for '{}' (may not be running yet)",
+                                            peer_name
+                                        );
+                                    }
+                                }
+                            }
+                        }
                     }
 
                     // Perform immediate startup sync with known peers

@@ -41,6 +41,12 @@ fn get_screen_size() -> (f64, f64) {
 /// Global data directory, set from command line
 static DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
 
+/// Initial profile name to set on first launch
+static INIT_PROFILE_NAME: OnceLock<String> = OnceLock::new();
+
+/// Bootstrap peers to auto-connect with on first launch (e.g., "love,joy,peace")
+static INIT_CONNECT: OnceLock<Vec<String>> = OnceLock::new();
+
 /// Window position on screen
 #[derive(Debug, Clone, ValueEnum)]
 enum WindowPosition {
@@ -57,6 +63,16 @@ pub fn get_data_dir() -> PathBuf {
             .unwrap_or_else(|| PathBuf::from("."))
             .join("syncengine")
     })
+}
+
+/// Get the initial profile name (set from command line, if any)
+pub fn get_init_profile_name() -> Option<String> {
+    INIT_PROFILE_NAME.get().cloned()
+}
+
+/// Get the bootstrap peer names to auto-connect with (set from command line, if any)
+pub fn get_init_connect() -> Option<Vec<String>> {
+    INIT_CONNECT.get().cloned()
 }
 
 /// Synchronicity Engine - P2P Task Sharing
@@ -83,6 +99,14 @@ struct Args {
     /// Total number of windows (for calculating split width)
     #[arg(short, long, default_value = "1")]
     total_windows: u8,
+
+    /// Set profile display name on first launch (when profile is empty)
+    #[arg(long)]
+    init_profile_name: Option<String>,
+
+    /// Bootstrap peer names to auto-connect with (comma-separated, e.g., "love,joy,peace")
+    #[arg(long, value_delimiter = ',')]
+    init_connect: Option<Vec<String>>,
 }
 
 fn main() {
@@ -123,6 +147,16 @@ fn main() {
 
     // Store data directory globally
     let _ = DATA_DIR.set(data_dir.clone());
+
+    // Store initial profile name if provided
+    if let Some(name) = args.init_profile_name {
+        let _ = INIT_PROFILE_NAME.set(name);
+    }
+
+    // Store bootstrap peers if provided
+    if let Some(peers) = args.init_connect {
+        let _ = INIT_CONNECT.set(peers);
+    }
 
     // Get screen dimensions and calculate window size
     let (screen_width, screen_height) = get_screen_size();

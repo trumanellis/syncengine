@@ -32,6 +32,18 @@ pub fn get_data_dir() -> PathBuf {
     crate::get_data_dir()
 }
 
+/// Get the initial profile name (if set via --init-profile-name).
+/// Used to auto-set the profile display name on first launch.
+pub fn get_init_profile_name() -> Option<String> {
+    crate::get_init_profile_name()
+}
+
+/// Get the bootstrap peer names (if set via --init-connect).
+/// Used to auto-connect with other instances on first launch.
+pub fn get_init_connect() -> Option<Vec<String>> {
+    crate::get_init_connect()
+}
+
 /// Hook to access the SyncEngine from context.
 ///
 /// Returns a Signal containing the shared engine state.
