@@ -47,8 +47,8 @@ use crate::peers::{PeerInfo, PeerRegistry, PeerSource, PeerStatus};
 use crate::realm::RealmDoc;
 use crate::storage::Storage;
 use crate::sync::{
-    ContactEvent, ContactManager, GossipSync, NetworkDebugInfo, SyncEnvelope, SyncEvent,
-    SyncMessage, SyncStatus, TopicEvent, TopicReceiver, TopicSender,
+    ContactEvent, ContactManager, GossipSync, NetworkDebugInfo, RelayStore, RelayWrapper,
+    SyncEnvelope, SyncEvent, SyncMessage, SyncStatus, TopicEvent, TopicReceiver, TopicSender,
 };
 use crate::types::contact::{ContactInfo, HybridContactInvite, PeerContactInvite, PendingContact, ProfileSnapshot};
 use crate::types::{RealmId, RealmInfo, Task, TaskId};
@@ -227,6 +227,15 @@ pub struct SyncEngine {
     /// In-memory buffer for packet events (per-peer, for UI visualization).
     /// Used to display packet flow in the network page.
     packet_event_buffer: Arc<crate::sync::PacketEventBuffer>,
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Relay Store (Store-and-Forward for Offline Contacts)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// In-memory store for relay messages awaiting delivery.
+    /// When a contact is offline and a mutual peer receives a relay request,
+    /// the encrypted payload is stored here until the recipient comes online.
+    relay_store: Arc<std::sync::Mutex<RelayStore>>,
 }
 
 impl SyncEngine {
@@ -294,6 +303,7 @@ impl SyncEngine {
             profile_topic_tracker: ProfileTopicTracker::new(),
             networking_requested: false,
             packet_event_buffer,
+            relay_store: Arc::new(std::sync::Mutex::new(RelayStore::new())),
         };
 
         // Initialize the Private realm if it doesn't exist
@@ -841,10 +851,125 @@ impl SyncEngine {
             PacketAddress::Individual(did) => {
                 // Send via 1:1 contact topic
                 if let Some(ref contact_mgr) = self.contact_manager {
-                    contact_mgr
+                    // Try direct send first
+                    let direct_result = contact_mgr
                         .send_packet_to_contact(&did.to_string(), &bytes)
-                        .await?;
-                    debug!(sequence, to = %did, "Sent packet to contact via 1:1 topic");
+                        .await;
+
+                    match &direct_result {
+                        Ok(()) => {
+                            info!(sequence, to = %did, "Sent packet to contact via 1:1 topic");
+                        }
+                        Err(e) => {
+                            info!(sequence, to = %did, error = %e, "Direct send to contact failed");
+                        }
+                    }
+
+                    // ALWAYS send via mutual peers as backup (proactive relay).
+                    // This is critical because iroh-gossip's broadcast() succeeds silently
+                    // even when no peers are connected to the topic. The recipient might
+                    // be offline, so we send to mutual peers who can store-and-forward.
+                    //
+                    // We prefer stored mutual_peers (populated via MeshUpdate messages) because
+                    // they represent true mutual contacts. Fall back to dynamic computation
+                    // for backward compatibility with contacts created before MeshUpdate.
+                    let mutual_peers = match self.storage.load_contact(&did.to_string()) {
+                        Ok(Some(contact)) if !contact.mutual_peers.is_empty() => {
+                            debug!(
+                                recipient = %did,
+                                stored_mutual_peers = ?contact.mutual_peers,
+                                "Using stored mutual_peers for relay routing"
+                            );
+                            contact.mutual_peers
+                        }
+                        _ => {
+                            // Fallback: compute dynamically (any of our contacts except recipient)
+                            let computed = self.compute_mutual_peers_with(&did.to_string());
+                            if !computed.is_empty() {
+                                debug!(
+                                    recipient = %did,
+                                    computed_count = computed.len(),
+                                    "Using dynamically computed mutual_peers (stored list empty)"
+                                );
+                            }
+                            computed
+                        }
+                    };
+                    if !mutual_peers.is_empty() {
+                        // Get our DID for the relay wrapper
+                        let our_did = self.did().map(|d| d.to_string()).unwrap_or_default();
+
+                        // Create relay wrapper with the original encrypted bytes
+                        let relay_wrapper = RelayWrapper::new(
+                            did.to_string(),      // final_recipient
+                            our_did,              // original_sender
+                            bytes.clone(),        // original encrypted packet
+                        );
+
+                        let relay_bytes = match relay_wrapper.to_bytes() {
+                            Ok(b) => b,
+                            Err(e) => {
+                                warn!(error = %e, "Failed to serialize relay wrapper");
+                                Vec::new()
+                            }
+                        };
+
+                        if !relay_bytes.is_empty() {
+                            // Send via ALL mutual peers for redundancy
+                            let mut relay_success_count = 0;
+                            for relay_peer_did in &mutual_peers {
+                                if contact_mgr
+                                    .send_packet_to_contact(relay_peer_did, &relay_bytes)
+                                    .await
+                                    .is_ok()
+                                {
+                                    info!(
+                                        sequence,
+                                        relay_via = %relay_peer_did,
+                                        final_recipient = %did,
+                                        relay_id = ?relay_wrapper.relay_id,
+                                        "Packet also sent via mutual peer (proactive relay)"
+                                    );
+                                    relay_success_count += 1;
+                                } else {
+                                    debug!(
+                                        relay_via = %relay_peer_did,
+                                        "Relay peer unavailable"
+                                    );
+                                }
+                            }
+                            if relay_success_count > 0 {
+                                info!(
+                                    sequence,
+                                    relay_count = relay_success_count,
+                                    "Proactive relay complete"
+                                );
+                            }
+                        }
+                    }
+
+                    // If direct send failed and no relay was possible, try global gossip
+                    if direct_result.is_err() {
+                        if let Some(sender) = self.global_profile_gossip_sender.as_ref() {
+                            match sender.broadcast(bytes.clone()).await {
+                                Ok(()) => {
+                                    info!(
+                                        sequence,
+                                        to = %did,
+                                        "Direct send failed, broadcast to global gossip as fallback"
+                                    );
+                                }
+                                Err(e) => {
+                                    warn!(
+                                        sequence,
+                                        to = %did,
+                                        error = %e,
+                                        "Global gossip fallback also failed"
+                                    );
+                                }
+                            }
+                        }
+                    }
                 } else {
                     return Err(SyncError::Network(
                         "Contact manager not initialized. Cannot send to individual contact."
@@ -4522,6 +4647,15 @@ impl SyncEngine {
                                             );
                                         }
                                     }
+
+                                    // MeshUpdate messages are handled by contact topic listeners,
+                                    // not the global profile topic. Ignore them here.
+                                    crate::sync::ProfileGossipMessage::MeshUpdate { sender_did, .. } => {
+                                        debug!(
+                                            sender = %sender_did,
+                                            "MeshUpdate received on global topic (handled in contact topic)"
+                                        );
+                                    }
                                 }
                             }
                             Err(e) => {
@@ -4715,6 +4849,47 @@ impl SyncEngine {
     /// Vector of all stored contacts with their online/offline status.
     pub fn list_contacts(&self) -> Result<Vec<ContactInfo>, SyncError> {
         self.storage.list_contacts()
+    }
+
+    /// Compute mutual peers dynamically for a given contact.
+    ///
+    /// Returns all contacts we share in common with the target peer.
+    /// This is computed dynamically rather than using stored values to avoid
+    /// race conditions during simultaneous contact creation in mesh topology.
+    ///
+    /// Used by:
+    /// - Relay routing (proactive relay to offline contacts)
+    /// - UI display (BioCard mutual contacts count)
+    ///
+    /// Since we can't know the target's full contact list, this uses a
+    /// simplified approach: any of OUR contacts (excluding the target) can
+    /// serve as potential mutual peers. For relay, the relay peer verifies
+    /// they know the target before forwarding.
+    ///
+    /// # Arguments
+    ///
+    /// * `target_did` - The DID of the contact to compute mutual peers for
+    ///
+    /// # Returns
+    ///
+    /// Vector of DIDs representing mutual/potential relay peers
+    pub fn compute_mutual_peers_with(&self, target_did: &str) -> Vec<String> {
+        // Get all our contacts
+        let our_contacts = match self.storage.list_contacts() {
+            Ok(contacts) => contacts,
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to list contacts for relay computation");
+                return Vec::new();
+            }
+        };
+
+        // Any of our contacts (except the target) can serve as potential relays.
+        // The relay peer will verify they have the target as a contact before forwarding.
+        our_contacts
+            .into_iter()
+            .map(|c| c.peer_did)
+            .filter(|did| did != target_did)
+            .collect()
     }
 
     /// List pending contact requests
@@ -8131,6 +8306,7 @@ mod tests {
             status: crate::types::contact::ContactStatus::Offline,
             is_favorite: false,
             encryption_keys: None,
+            mutual_peers: vec![],
         };
         engine.storage.save_contact(&contact_info).unwrap();
 
@@ -8220,6 +8396,7 @@ mod tests {
             status: crate::types::contact::ContactStatus::Offline,
             is_favorite: false,
             encryption_keys: None,
+            mutual_peers: vec![],
         };
         engine.storage.save_contact(&contact_info).unwrap();
 
@@ -8283,6 +8460,7 @@ mod tests {
                 status: crate::types::contact::ContactStatus::Offline,
                 is_favorite: false,
                 encryption_keys: None,
+                mutual_peers: vec![],
             };
             engine.storage.save_contact(&contact_info).unwrap();
         }
@@ -8409,6 +8587,7 @@ mod tests {
             status: ContactStatus::Offline,
             is_favorite: false,
             encryption_keys: Some(contact_pubkeys.to_bytes()),
+            mutual_peers: vec![],
         };
         engine.storage.save_contact(&contact).unwrap();
 
@@ -8512,6 +8691,7 @@ mod tests {
             status: ContactStatus::Offline,
             is_favorite: false,
             encryption_keys: Some(contact_pubkeys.to_bytes()),
+            mutual_peers: vec![],
         };
         engine.storage.save_contact(&contact).unwrap();
 
@@ -8585,6 +8765,7 @@ mod tests {
             status: ContactStatus::Offline,
             is_favorite: false,
             encryption_keys: Some(contact1_pubkeys.to_bytes()),
+            mutual_peers: vec![],
         };
         engine.storage.save_contact(&contact1).unwrap();
 
@@ -8605,6 +8786,7 @@ mod tests {
             status: ContactStatus::Offline,
             is_favorite: false,
             encryption_keys: Some(contact2_pubkeys.to_bytes()),
+            mutual_peers: vec![],
         };
         engine.storage.save_contact(&contact2).unwrap();
 
@@ -8852,6 +9034,7 @@ mod tests {
             status: ContactStatus::Offline,
             is_favorite: false,
             encryption_keys: None, // Legacy contact - no encryption keys
+            mutual_peers: vec![],
         };
         engine.storage.save_contact(&legacy_contact).unwrap();
 
@@ -8899,6 +9082,7 @@ mod tests {
             status: ContactStatus::Offline,
             is_favorite: false,
             encryption_keys: Some(enc_keys_bytes),
+            mutual_peers: vec![],
         };
         engine.storage.save_contact(&contact).unwrap();
 
@@ -8943,6 +9127,7 @@ mod tests {
             status: ContactStatus::Offline,
             is_favorite: false,
             encryption_keys: Some(vec![0xDE, 0xAD, 0xBE, 0xEF]), // Invalid key data
+            mutual_peers: vec![],
         };
         engine.storage.save_contact(&contact).unwrap();
 

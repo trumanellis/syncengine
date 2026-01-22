@@ -113,6 +113,73 @@ impl Storage {
             .collect())
     }
 
+    /// Add a DID to a contact's mutual_peers list (if not already present)
+    ///
+    /// This is used to maintain mesh topology awareness as contacts form.
+    /// When we learn that two of our contacts know each other, we update
+    /// their `mutual_peers` lists so relay routing can use stored values
+    /// instead of computing dynamically.
+    ///
+    /// # Arguments
+    ///
+    /// * `contact_did` - The DID of the contact whose mutual_peers to update
+    /// * `mutual_peer_did` - The DID to add as a mutual peer
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(true)` - Mutual peer was added (not already present)
+    /// * `Ok(false)` - Mutual peer was already present (no change)
+    /// * `Err(_)` - Contact not found or storage error
+    pub fn add_mutual_peer(&self, contact_did: &str, mutual_peer_did: &str) -> Result<bool, SyncError> {
+        // Load the existing contact
+        let mut contact = self
+            .load_contact(contact_did)?
+            .ok_or_else(|| SyncError::ContactNotFound(contact_did.to_string()))?;
+
+        // Check if already present
+        if contact.mutual_peers.contains(&mutual_peer_did.to_string()) {
+            return Ok(false);
+        }
+
+        // Add the mutual peer
+        contact.mutual_peers.push(mutual_peer_did.to_string());
+
+        // Save back
+        self.save_contact(&contact)?;
+
+        Ok(true)
+    }
+
+    /// Remove a DID from a contact's mutual_peers list
+    ///
+    /// Used when a contact is removed and we need to clean up mutual_peers
+    /// on other contacts that referenced them.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(true)` - Mutual peer was removed
+    /// * `Ok(false)` - Mutual peer was not present (no change)
+    /// * `Err(_)` - Contact not found or storage error
+    pub fn remove_mutual_peer(&self, contact_did: &str, mutual_peer_did: &str) -> Result<bool, SyncError> {
+        // Load the existing contact
+        let mut contact = self
+            .load_contact(contact_did)?
+            .ok_or_else(|| SyncError::ContactNotFound(contact_did.to_string()))?;
+
+        // Find and remove
+        let original_len = contact.mutual_peers.len();
+        contact.mutual_peers.retain(|did| did != mutual_peer_did);
+
+        if contact.mutual_peers.len() == original_len {
+            return Ok(false);
+        }
+
+        // Save back
+        self.save_contact(&contact)?;
+
+        Ok(true)
+    }
+
     // ═══════════════════════════════════════════════════════════════════════
     // Pending Contact Operations
     // ═══════════════════════════════════════════════════════════════════════
@@ -318,6 +385,7 @@ mod tests {
             status: ContactStatus::Offline,
             is_favorite: false,
             encryption_keys: None,
+            mutual_peers: vec![],
         }
     }
 
@@ -336,6 +404,7 @@ mod tests {
             state,
             created_at: chrono::Utc::now().timestamp(),
             encryption_keys: None,
+            peer_contact_dids: vec![],
         }
     }
 

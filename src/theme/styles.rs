@@ -2860,6 +2860,98 @@ body {
   font-weight: 600;
 }
 
+/* === Bio Card === */
+.bio-card {
+  width: 100%;
+}
+
+.bio-card__avatar-area {
+  position: relative;
+}
+
+.bio-card__status-dot {
+  position: absolute;
+  bottom: 0.75rem;
+  right: 0.75rem;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 2px solid #0a0a0a;
+  z-index: 2;
+}
+
+.bio-card__status-dot.online {
+  background: var(--moss);
+  box-shadow: 0 0 8px rgba(124, 184, 124, 0.8);
+  animation: pulse-status 2s ease-in-out infinite;
+}
+
+.bio-card__status-dot.offline {
+  background: #5a7a5a;
+}
+
+@keyframes pulse-status {
+  0%, 100% {
+    box-shadow: 0 0 8px rgba(124, 184, 124, 0.8);
+  }
+  50% {
+    box-shadow: 0 0 16px rgba(124, 184, 124, 1);
+  }
+}
+
+.bio-card__content {
+  justify-content: center;
+  gap: var(--spacing-phi-sm);
+}
+
+.bio-card__header {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.bio-card__name {
+  font-family: var(--font-serif);
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--gold);
+  margin: 0;
+  letter-spacing: 0.02em;
+  line-height: 1.3;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.bio-card__tagline {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: rgba(124, 184, 124, 0.8);
+}
+
+.bio-card__stats {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.bio-card__stat {
+  display: flex;
+  gap: 0.5rem;
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+}
+
+.bio-card__stat-label {
+  color: var(--text-muted);
+}
+
+.bio-card__stat-value {
+  color: var(--text-secondary);
+}
+
 /* === Gallery === */
 .card-gallery-section {
   margin: 0.25rem 0;
@@ -4639,6 +4731,16 @@ body {
   white-space: nowrap;
 }
 
+/* Packet activity indicator - glowing border when sending/receiving */
+.contact-card.packet-activity .contact-avatar {
+  animation: packet-pulse 0.6s ease-out;
+  box-shadow: 0 0 12px 4px rgba(0, 212, 170, 0.6);
+}
+
+.contact-card.packet-activity .contact-name {
+  color: var(--cyan);
+}
+
 /* Animations */
 @keyframes fade-in {
   0% {
@@ -4664,6 +4766,17 @@ body {
   }
   50% {
     box-shadow: 0 0 0 8px rgba(0, 212, 170, 0);
+  }
+}
+
+@keyframes packet-pulse {
+  0% {
+    box-shadow: 0 0 20px 8px rgba(0, 212, 170, 0.8);
+    transform: scale(1.05);
+  }
+  100% {
+    box-shadow: 0 0 12px 4px rgba(0, 212, 170, 0.6);
+    transform: scale(1);
   }
 }
 
@@ -6147,6 +6260,27 @@ body {
   overflow-y: auto;
 }
 
+/* Bio Card List - using BioCards for contacts */
+.contacts-list.bio-card-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-phi-sm);
+  padding: var(--spacing-phi-sm);
+}
+
+.bio-card-wrapper {
+  border-radius: 8px;
+  transition: box-shadow var(--transition-fast);
+}
+
+.bio-card-wrapper--selected {
+  box-shadow: 0 0 0 2px var(--cyan);
+}
+
+.bio-card-wrapper--selected .golden-card {
+  border-color: var(--cyan);
+}
+
 /* Contact Row */
 .contact-row {
   display: flex;
@@ -7136,13 +7270,13 @@ body {
 
 @media (max-width: 1024px) {
   .field-actions-bar {
-    padding: 0 2rem var(--space-4) 2rem;
+    padding: var(--page-content-top-padding) 2rem var(--space-4) 2rem;
   }
 }
 
 @media (max-width: 640px) {
   .field-actions-bar {
-    padding: 0 1.5rem var(--space-3) 1.5rem;
+    padding: var(--page-content-top-padding) 1.5rem var(--space-3) 1.5rem;
     flex-direction: column;
     gap: 1rem;
     align-items: stretch;
@@ -7815,6 +7949,165 @@ body {
 
 .packet-indicator .packet-pending {
   color: var(--gold);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════════
+   Packet Flow Section - Animated packet visualization
+   ═══════════════════════════════════════════════════════════════════════════════ */
+
+.packet-flow-section {
+  margin-top: var(--space-4);
+  padding: var(--space-3);
+  background: var(--void-darker);
+  border: 1px solid var(--void-border);
+  border-radius: var(--radius-lg);
+}
+
+.packet-flow-section .section-title {
+  font-family: var(--font-serif);
+  font-size: var(--text-sm);
+  color: var(--gold);
+  margin-bottom: var(--space-3);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
+
+.packet-flow-container {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-height: 120px;
+}
+
+.packet-flow-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100px;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+}
+
+.packet-flow-empty-icon {
+  font-size: 24px;
+  color: var(--text-muted);
+  margin-bottom: var(--space-2);
+  animation: pulse-dim 2s infinite;
+}
+
+@keyframes pulse-dim {
+  0%, 100% { opacity: 0.3; }
+  50% { opacity: 0.6; }
+}
+
+/* Individual packet entry */
+.packet-flow-entry {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  background: var(--void-black);
+  border: 1px solid var(--void-border);
+  border-radius: var(--radius-md);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  animation: packet-entry-appear 0.3s ease-out;
+}
+
+@keyframes packet-entry-appear {
+  0% {
+    opacity: 0;
+    transform: translateY(-10px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Sender (left side) */
+.packet-flow-sender {
+  flex: 0 0 100px;
+  text-align: left;
+}
+
+.packet-flow-sender .sender-glow {
+  color: var(--cyan);
+  animation: sender-glow-pulse 0.6s ease-out;
+  text-shadow: 0 0 10px rgba(0, 212, 170, 0.8);
+}
+
+@keyframes sender-glow-pulse {
+  0% {
+    text-shadow: 0 0 20px rgba(0, 212, 170, 1), 0 0 40px rgba(0, 212, 170, 0.6);
+    transform: scale(1.05);
+  }
+  100% {
+    text-shadow: 0 0 10px rgba(0, 212, 170, 0.8);
+    transform: scale(1);
+  }
+}
+
+/* Arrows */
+.packet-flow-arrow {
+  color: var(--text-dim);
+  font-size: var(--text-xs);
+  flex-shrink: 0;
+}
+
+/* Content (middle) */
+.packet-flow-content {
+  flex: 1;
+  text-align: center;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.packet-flow-content.encrypted {
+  color: var(--text-dim);
+  font-style: italic;
+}
+
+/* Destination (right side with delayed glow) */
+.packet-flow-destination {
+  flex: 0 0 100px;
+  text-align: right;
+}
+
+.packet-flow-destination .destination-glow {
+  color: var(--gold);
+  opacity: 0.5;
+  animation: destination-glow-pulse 0.6s ease-out 1s forwards;
+}
+
+@keyframes destination-glow-pulse {
+  0% {
+    opacity: 0.5;
+    text-shadow: none;
+  }
+  50% {
+    opacity: 1;
+    text-shadow: 0 0 20px rgba(212, 175, 55, 1), 0 0 40px rgba(212, 175, 55, 0.6);
+    transform: scale(1.05);
+  }
+  100% {
+    opacity: 1;
+    text-shadow: 0 0 10px rgba(212, 175, 55, 0.8);
+    transform: scale(1);
+  }
+}
+
+.packet-flow-name {
+  display: inline-block;
+  max-width: 100px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 "#;

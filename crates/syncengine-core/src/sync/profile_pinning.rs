@@ -120,6 +120,30 @@ pub enum ProfileGossipMessage {
         /// The packet envelope containing sender, sequence, signature, and payload
         envelope: PacketEnvelope,
     },
+
+    /// Mesh topology update - announces contact list changes
+    ///
+    /// Sent when a contact is finalized (added). Recipients use this to
+    /// update their `mutual_peers` fields for improved relay routing.
+    ///
+    /// # Mesh Formation Example
+    /// ```text
+    /// T1: Love <-> Joy connect     → mutual_peers = [] (no other contacts yet)
+    /// T2: Love <-> Peace connect   → Love broadcasts MeshUpdate to Joy: "I know Peace"
+    /// T3: Joy <-> Peace connect    → Joy broadcasts MeshUpdate to Love: "I know Peace"
+    ///                              → Love sees: Joy knows Peace, I know Peace → MATCH!
+    ///                              → Love updates mutual_peers for both contacts
+    /// ```
+    MeshUpdate {
+        /// DID of the sender (who is announcing their contacts)
+        sender_did: String,
+        /// DIDs of all contacts the sender has
+        contact_dids: Vec<String>,
+        /// Unix timestamp of this update (for ordering)
+        timestamp: i64,
+        /// Signature over (sender_did || contact_dids || timestamp) for authenticity
+        signature: Vec<u8>,
+    },
 }
 
 impl ProfileGossipMessage {
@@ -157,6 +181,23 @@ impl ProfileGossipMessage {
         Self::Packet { envelope }
     }
 
+    /// Create a mesh update message announcing contact list changes.
+    ///
+    /// The signature should cover: sender_did || contact_dids || timestamp
+    pub fn mesh_update(
+        sender_did: impl Into<String>,
+        contact_dids: Vec<String>,
+        timestamp: i64,
+        signature: Vec<u8>,
+    ) -> Self {
+        Self::MeshUpdate {
+            sender_did: sender_did.into(),
+            contact_dids,
+            timestamp,
+            signature,
+        }
+    }
+
     /// Serialize the message to bytes.
     pub fn to_bytes(&self) -> Result<Vec<u8>, crate::SyncError> {
         postcard::to_allocvec(self).map_err(|e| crate::SyncError::Serialization(e.to_string()))
@@ -167,11 +208,12 @@ impl ProfileGossipMessage {
         postcard::from_bytes(bytes).map_err(|e| crate::SyncError::Serialization(e.to_string()))
     }
 
-    /// Get the DID of the signer if this is an Announce or Packet message.
+    /// Get the DID of the signer if this is an Announce, Packet, or MeshUpdate message.
     pub fn signer_did(&self) -> Option<Did> {
         match self {
             Self::Announce { signed_profile, .. } => Some(signed_profile.did()),
             Self::Packet { envelope } => Some(envelope.sender.clone()),
+            Self::MeshUpdate { sender_did, .. } => Did::parse(sender_did).ok(),
             _ => None,
         }
     }
@@ -182,12 +224,14 @@ impl ProfileGossipMessage {
     /// - Request: Only if we might have the profile
     /// - Response: Only if we're the requester
     /// - Packet: Always relevant (we might mirror the sender's log)
+    /// - MeshUpdate: Always relevant (we update our mutual_peers if applicable)
     pub fn is_relevant_to(&self, our_did: &str) -> bool {
         match self {
             Self::Announce { .. } => true,  // Always process announcements
             Self::Request { .. } => true,   // We might have the profile
             Self::Response { requester_did, .. } => requester_did == our_did,
             Self::Packet { .. } => true,    // Always process packets (mirror if from contact)
+            Self::MeshUpdate { .. } => true, // Always process mesh updates (update mutual_peers)
         }
     }
 }
@@ -309,6 +353,18 @@ impl ProfileMessageHandler {
                     sender = %envelope.sender,
                     sequence = envelope.sequence,
                     "Packet message (handled by engine)"
+                );
+                ProfileAction::Ignore
+            }
+
+            ProfileGossipMessage::MeshUpdate { sender_did, contact_dids, .. } => {
+                // MeshUpdate messages are handled directly by spawn_contact_topic_listener
+                // (see contact_manager.rs) to update mutual_peers for relay routing.
+                // The ProfileMessageHandler only deals with profile metadata.
+                debug!(
+                    sender = %sender_did,
+                    contact_count = contact_dids.len(),
+                    "MeshUpdate message (handled by contact_manager)"
                 );
                 ProfileAction::Ignore
             }

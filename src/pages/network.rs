@@ -7,9 +7,9 @@
 use dioxus::prelude::*;
 use syncengine_core::{ContactEvent, Peer};
 
-use crate::components::images::AsyncImage;
+use crate::components::cards::BioCard;
 use crate::components::messages::{ChatBubbleMessage, ConversationView};
-use crate::components::{NavHeader, NavLocation};
+use crate::components::{NavHeader, NavLocation, PacketFlowSection};
 use crate::context::{use_engine, use_engine_ready, use_pending_chat_contact};
 
 /// Contact with conversation preview info
@@ -19,6 +19,8 @@ struct ContactWithPreview {
     last_message_time: Option<i64>,
     last_message_preview: Option<String>,
     unread_count: u32,
+    /// Mutual peers (computed dynamically to avoid stale data)
+    mutual_peers: Vec<String>,
 }
 
 /// Currently selected contact
@@ -26,23 +28,6 @@ struct ContactWithPreview {
 struct SelectedContact {
     did: String,
     name: String,
-}
-
-/// Format timestamp as relative time string (for milliseconds)
-fn format_relative_time(timestamp_ms: i64) -> String {
-    let now = chrono::Utc::now().timestamp_millis();
-    let elapsed_ms = now - timestamp_ms;
-    let elapsed_secs = (elapsed_ms / 1000) as u64;
-
-    if elapsed_secs < 60 {
-        "Just now".to_string()
-    } else if elapsed_secs < 3600 {
-        format!("{}m ago", elapsed_secs / 60)
-    } else if elapsed_secs < 86400 {
-        format!("{}h ago", elapsed_secs / 3600)
-    } else {
-        format!("{}d ago", elapsed_secs / 86400)
-    }
 }
 
 /// Network page - displays contacts with messaging capability.
@@ -97,11 +82,15 @@ pub fn Network() -> Element {
                                     Err(_) => (None, None),
                                 };
 
+                                // Compute mutual peers dynamically
+                                let mutual_peers = eng.compute_mutual_peers_with(did_str);
+
                                 contacts_with_preview.push(ContactWithPreview {
                                     peer: contact,
                                     last_message_time: last_time,
                                     last_message_preview: last_preview,
                                     unread_count: 0, // TODO: implement unread tracking
+                                    mutual_peers,
                                 });
                             }
                         }
@@ -129,52 +118,61 @@ pub fn Network() -> Element {
                             drop(guard);
 
                             while let Ok(event) = event_rx.recv().await {
-                                match event {
-                                    ContactEvent::ProfileUpdated { did: _did } => {
-                                        // Refresh contacts list
-                                        let shared = engine();
-                                        let guard = shared.read().await;
-                                        if let Some(ref eng) = *guard {
-                                            if let Ok(contact_list) = eng.list_peer_contacts() {
-                                                let mut contacts_with_preview = Vec::new();
+                                // Handle events that require refreshing the contacts list
+                                let should_refresh = matches!(
+                                    event,
+                                    ContactEvent::ProfileUpdated { .. } |
+                                    ContactEvent::ContactAccepted { .. } |
+                                    ContactEvent::ContactOnline { .. } |
+                                    ContactEvent::ContactOffline { .. }
+                                );
 
-                                                for contact in contact_list {
-                                                    if let Some(ref did_str) = contact.did {
-                                                        let (last_time, last_preview) = match eng.get_conversation(did_str) {
-                                                            Ok(convo) => {
-                                                                let last_msg = convo.messages().last();
-                                                                if let Some(msg) = last_msg {
-                                                                    let preview = if msg.content.len() > 50 {
-                                                                        format!("{}...", &msg.content[..47])
-                                                                    } else {
-                                                                        msg.content.clone()
-                                                                    };
-                                                                    (Some(msg.timestamp), Some(preview))
+                                if should_refresh {
+                                    // Refresh contacts list
+                                    let shared = engine();
+                                    let guard = shared.read().await;
+                                    if let Some(ref eng) = *guard {
+                                        if let Ok(contact_list) = eng.list_peer_contacts() {
+                                            let mut contacts_with_preview = Vec::new();
+
+                                            for contact in contact_list {
+                                                if let Some(ref did_str) = contact.did {
+                                                    let (last_time, last_preview) = match eng.get_conversation(did_str) {
+                                                        Ok(convo) => {
+                                                            let last_msg = convo.messages().last();
+                                                            if let Some(msg) = last_msg {
+                                                                let preview = if msg.content.len() > 50 {
+                                                                    format!("{}...", &msg.content[..47])
                                                                 } else {
-                                                                    (None, None)
-                                                                }
+                                                                    msg.content.clone()
+                                                                };
+                                                                (Some(msg.timestamp), Some(preview))
+                                                            } else {
+                                                                (None, None)
                                                             }
-                                                            Err(_) => (None, None),
-                                                        };
+                                                        }
+                                                        Err(_) => (None, None),
+                                                    };
 
-                                                        contacts_with_preview.push(ContactWithPreview {
-                                                            peer: contact,
-                                                            last_message_time: last_time,
-                                                            last_message_preview: last_preview,
-                                                            unread_count: 0,
-                                                        });
-                                                    }
+                                                    let mutual_peers = eng.compute_mutual_peers_with(did_str);
+
+                                                    contacts_with_preview.push(ContactWithPreview {
+                                                        peer: contact,
+                                                        last_message_time: last_time,
+                                                        last_message_preview: last_preview,
+                                                        unread_count: 0,
+                                                        mutual_peers,
+                                                    });
                                                 }
-
-                                                contacts_with_preview.sort_by(|a, b| {
-                                                    b.last_message_time.cmp(&a.last_message_time)
-                                                });
-
-                                                contacts.set(contacts_with_preview);
                                             }
+
+                                            contacts_with_preview.sort_by(|a, b| {
+                                                b.last_message_time.cmp(&a.last_message_time)
+                                            });
+
+                                            contacts.set(contacts_with_preview);
                                         }
                                     }
-                                    _ => {}
                                 }
                             }
                         }
@@ -352,11 +350,14 @@ pub fn Network() -> Element {
                                         Err(_) => (None, None),
                                     };
 
+                                    let mutual_peers = eng.compute_mutual_peers_with(did_str);
+
                                     contacts_with_preview.push(ContactWithPreview {
                                         peer: contact,
                                         last_message_time: last_time,
                                         last_message_preview: last_preview,
                                         unread_count: 0,
+                                        mutual_peers,
                                     });
                                 }
                             }
@@ -415,85 +416,38 @@ pub fn Network() -> Element {
                                     p { class: "empty-state-hint", "Add contacts to start messaging." }
                                 }
                             } else {
-                                div { class: "contacts-list",
+                                div { class: "contacts-list bio-card-list",
                                     for contact in contacts() {
                                         {
                                             let did = contact.peer.did.clone().unwrap_or_default();
-                                            let name = contact.peer.display_name();
                                             let is_selected = selected_contact()
                                                 .as_ref()
                                                 .map(|s| s.did == did)
                                                 .unwrap_or(false);
-                                            let has_unread = contact.unread_count > 0;
-                                            let did_clone = did.clone();
-                                            let name_clone = name.clone();
-                                            let avatar_blob_id = contact.peer.profile
-                                                .as_ref()
-                                                .and_then(|p| p.avatar_blob_id.clone());
-                                            let first_char = name.chars().next()
-                                                .unwrap_or('?')
-                                                .to_uppercase()
-                                                .to_string();
+                                            let peer_for_card = contact.peer.clone();
+                                            let mutual_peers = contact.mutual_peers.clone();
 
                                             rsx! {
                                                 div {
                                                     key: "{did}",
                                                     class: if is_selected {
-                                                        "contact-row contact-row-selected"
+                                                        "bio-card-wrapper bio-card-wrapper--selected"
                                                     } else {
-                                                        "contact-row"
-                                                    },
-                                                    onclick: move |_| {
-                                                        selected_contact.set(Some(SelectedContact {
-                                                            did: did_clone.clone(),
-                                                            name: name_clone.clone(),
-                                                        }));
+                                                        "bio-card-wrapper"
                                                     },
 
-                                                    // Avatar
-                                                    div { class: "contact-row-avatar",
-                                                        if let Some(ref blob_id) = avatar_blob_id {
-                                                            AsyncImage {
-                                                                blob_id: blob_id.clone(),
-                                                                alt: name.clone(),
-                                                                class: Some("avatar-image".to_string()),
-                                                            }
-                                                        } else {
-                                                            div { class: "avatar-placeholder",
-                                                                "{first_char}"
-                                                            }
-                                                        }
-                                                    }
-
-                                                    // Info
-                                                    div { class: "contact-row-info",
-                                                        div { class: "contact-row-header",
-                                                            span { class: "contact-row-name", "{name}" }
-                                                            if has_unread {
-                                                                span { class: "unread-dot" }
-                                                            }
-                                                            if let Some(time) = contact.last_message_time {
-                                                                span { class: "contact-row-time",
-                                                                    "{format_relative_time(time)}"
-                                                                }
-                                                            }
-                                                        }
-                                                        if let Some(ref preview) = contact.last_message_preview {
-                                                            p { class: "contact-row-preview", "{preview}" }
-                                                        }
-                                                    }
-
-                                                    // Chevron (mobile indicator)
-                                                    div { class: "contact-row-chevron",
-                                                        svg {
-                                                            width: "16",
-                                                            height: "16",
-                                                            view_box: "0 0 24 24",
-                                                            fill: "none",
-                                                            stroke: "currentColor",
-                                                            stroke_width: "2",
-                                                            polyline { points: "9 18 15 12 9 6" }
-                                                        }
+                                                    BioCard {
+                                                        peer: peer_for_card,
+                                                        interactive: true,
+                                                        mutual_peers: mutual_peers,
+                                                        onclick: move |peer: Peer| {
+                                                            let did = peer.did.clone().unwrap_or_default();
+                                                            let name = peer.display_name();
+                                                            selected_contact.set(Some(SelectedContact {
+                                                                did,
+                                                                name,
+                                                            }));
+                                                        },
                                                     }
                                                 }
                                             }
@@ -501,6 +455,9 @@ pub fn Network() -> Element {
                                     }
                                 }
                             }
+
+                            // Packet Flow Section - shows real-time packet transmission
+                            PacketFlowSection {}
                         }
 
                         // Conversation Panel

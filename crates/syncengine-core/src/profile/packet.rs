@@ -423,6 +423,24 @@ pub enum PacketPayload {
         /// Signature from old keys over new keys (proves continuity)
         old_key_signature: Vec<u8>,
     },
+
+    /// Relay message for store-and-forward delivery.
+    ///
+    /// When a sender can't reach the recipient directly (offline), they can
+    /// send the message through a mutual peer who will store and forward it.
+    RelayMessage {
+        /// The original sender's DID (for attribution)
+        original_sender: Did,
+        /// The final recipient's DID (who should receive this)
+        final_recipient: Did,
+        /// The actual message content (already encrypted for final_recipient)
+        /// This is the serialized PacketEnvelope that should be forwarded.
+        encrypted_payload: Vec<u8>,
+        /// Timestamp when relay was requested
+        relay_timestamp: i64,
+        /// Optional: unique ID to deduplicate relay attempts
+        relay_id: [u8; 16],
+    },
 }
 
 /// Addressing modes for packets.

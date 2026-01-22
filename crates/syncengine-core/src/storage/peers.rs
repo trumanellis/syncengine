@@ -590,6 +590,7 @@ mod tests {
             status: crate::types::contact::ContactStatus::Online,
             is_favorite: true,
             encryption_keys: None,
+            mutual_peers: vec!["did:sync:joy".to_string()],
         };
 
         let peer = Storage::contact_info_to_peer(&contact);

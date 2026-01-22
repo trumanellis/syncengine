@@ -24,6 +24,7 @@ chrono.workspace = true
 arboard = "3.4"
 gloo = "0.11"
 hex = "0.4"
+serde_json.workspace = true
 
 # Markdown rendering
 pulldown-cmark.workspace = true

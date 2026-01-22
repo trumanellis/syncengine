@@ -127,54 +127,76 @@ pub fn App() -> Element {
                             .unwrap_or_else(|| std::path::PathBuf::from("."))
                             .join("syncengine-bootstrap");
 
-                        // Small delay to let other instances write their invites
-                        tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                        // Track which peers we still need to connect to
+                        let mut pending_peers: std::collections::HashSet<String> = bootstrap_peers
+                            .iter()
+                            .map(|p| p.to_lowercase())
+                            .filter(|p| p != &our_name)
+                            .collect();
 
-                        // Read invites from other bootstrap peers and send contact requests
-                        for peer_name in &bootstrap_peers {
-                            let peer_name_lower = peer_name.to_lowercase();
-
-                            // Skip ourselves
-                            if peer_name_lower == our_name {
-                                continue;
+                        // Retry loop: try to connect to all peers over 5 seconds
+                        // This handles the race condition where instances start at different times
+                        for attempt in 0..10 {
+                            if pending_peers.is_empty() {
+                                break;
                             }
 
-                            let peer_invite_path = bootstrap_dir.join(format!("{}.invite", peer_name_lower));
+                            // Wait before each attempt (500ms)
+                            tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
-                            // Try to read the peer's invite file
-                            if let Ok(invite_str) = std::fs::read_to_string(&peer_invite_path) {
-                                // Decode and send contact request
-                                match eng.decode_contact_invite(&invite_str).await {
-                                    Ok(invite) => {
-                                        match eng.send_contact_request(invite).await {
-                                            Ok(()) => {
-                                                tracing::info!(
-                                                    "Bootstrap: sent contact request to '{}'",
-                                                    peer_name
-                                                );
-                                            }
-                                            Err(e) => {
-                                                // May fail if already connected or request pending
-                                                tracing::debug!(
-                                                    "Bootstrap: could not send request to '{}': {}",
-                                                    peer_name, e
-                                                );
+                            let mut connected_this_round = Vec::new();
+
+                            for peer_name in &pending_peers {
+                                let peer_invite_path = bootstrap_dir.join(format!("{}.invite", peer_name));
+
+                                // Try to read the peer's invite file
+                                if let Ok(invite_str) = std::fs::read_to_string(&peer_invite_path) {
+                                    // Decode and send contact request
+                                    match eng.decode_contact_invite(&invite_str).await {
+                                        Ok(invite) => {
+                                            match eng.send_contact_request(invite).await {
+                                                Ok(()) => {
+                                                    tracing::info!(
+                                                        "Bootstrap: sent contact request to '{}' (attempt {})",
+                                                        peer_name, attempt + 1
+                                                    );
+                                                    connected_this_round.push(peer_name.clone());
+                                                }
+                                                Err(e) => {
+                                                    // May fail if already connected or request pending
+                                                    tracing::debug!(
+                                                        "Bootstrap: could not send request to '{}': {}",
+                                                        peer_name, e
+                                                    );
+                                                    // Still mark as connected to avoid retrying
+                                                    connected_this_round.push(peer_name.clone());
+                                                }
                                             }
                                         }
+                                        Err(e) => {
+                                            tracing::debug!(
+                                                "Bootstrap: could not decode invite from '{}': {}",
+                                                peer_name, e
+                                            );
+                                        }
                                     }
-                                    Err(e) => {
-                                        tracing::debug!(
-                                            "Bootstrap: could not decode invite from '{}': {}",
-                                            peer_name, e
-                                        );
-                                    }
+                                } else if attempt == 9 {
+                                    // Final attempt, log warning
+                                    tracing::warn!(
+                                        "Bootstrap: no invite found for '{}' after {} attempts",
+                                        peer_name, attempt + 1
+                                    );
                                 }
-                            } else {
-                                tracing::debug!(
-                                    "Bootstrap: no invite found for '{}' (may not be running yet)",
-                                    peer_name
-                                );
                             }
+
+                            // Remove successfully connected peers from pending set
+                            for peer in connected_this_round {
+                                pending_peers.remove(&peer);
+                            }
+                        }
+
+                        if pending_peers.is_empty() {
+                            tracing::info!("Bootstrap: all peers connected successfully");
                         }
                     }
 

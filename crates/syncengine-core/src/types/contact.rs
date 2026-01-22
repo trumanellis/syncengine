@@ -203,6 +203,10 @@ pub struct ContactInfo {
     /// Obtained during contact exchange. None for legacy contacts.
     #[serde(default)]
     pub encryption_keys: Option<Vec<u8>>,
+    /// DIDs of contacts that both parties have in common.
+    /// These can be used as relay fallbacks when direct connection fails.
+    #[serde(default)]
+    pub mutual_peers: Vec<String>,
 }
 
 impl ContactInfo {
@@ -268,6 +272,10 @@ pub struct PendingContact {
     /// Obtained from ContactRequest/ContactAccept message. None for legacy contacts.
     #[serde(default)]
     pub encryption_keys: Option<Vec<u8>>,
+    /// DIDs of peer's existing contacts (for mutual peer discovery).
+    /// Received during contact exchange and used to compute mutual_peers.
+    #[serde(default)]
+    pub peer_contact_dids: Vec<String>,
 }
 
 impl PendingContact {
@@ -408,6 +416,7 @@ mod tests {
             status: ContactStatus::Online,
             is_favorite: false,
             encryption_keys: None,
+            mutual_peers: vec![],
         };
 
         assert!(contact.is_recently_active());
@@ -433,6 +442,7 @@ mod tests {
             state: ContactState::OutgoingPending,
             created_at: chrono::Utc::now().timestamp(),
             encryption_keys: None,
+            peer_contact_dids: vec![],
         };
 
         assert!(!pending.is_stale());

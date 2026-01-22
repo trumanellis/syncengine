@@ -266,8 +266,10 @@ pub fn create_context_table(
     ctx.set("instances", list_fn)?;
 
     // ctx.send_packet(from_node, to_node, content)
-    // Simulates sending a DirectMessage packet from one instance to another
-    // This writes a packet file that can be checked by check_received
+    // Sends a real message via the packet protocol.
+    // Writes a .sendmsg file to the bootstrap directory that the sender's
+    // message watcher will detect and process, resolving the recipient name
+    // to a DID and calling engine.send_message().
     let instances_clone = instances.clone();
     let send_packet_fn = lua.create_function(move |_, (from, to, content): (String, String, String)| {
         let instances = instances_clone.clone();
@@ -277,47 +279,32 @@ pub fn create_context_table(
             rt.block_on(async {
                 let mgr = instances.read().await;
 
-                // Verify from instance exists
+                // Verify sender instance exists
                 if !mgr.is_running(&from) {
                     return Err(mlua::Error::runtime(format!("Instance '{}' not running", from)));
                 }
 
-                // Get data directories
-                let from_data_dir = mgr.get_data_dir(&from)
-                    .ok_or_else(|| mlua::Error::runtime(format!("No data dir for '{}'", from)))?;
+                let bootstrap_dir = mgr.bootstrap_dir();
 
-                // Create "outbox" directory in sender's data dir
-                let outbox_dir = from_data_dir.join("outbox");
-                std::fs::create_dir_all(&outbox_dir)
-                    .map_err(|e| mlua::Error::runtime(format!("Failed to create outbox dir: {}", e)))?;
-
-                // Write packet file with timestamp to avoid collisions
-                let timestamp = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_err(|e| mlua::Error::runtime(e.to_string()))?
-                    .as_millis();
-
-                let packet_filename = format!("{}_{}_to_{}.packet", timestamp, from, to);
-                let packet_path = outbox_dir.join(&packet_filename);
-
-                // Write packet data (can be enhanced with actual packet serialization later)
-                let packet_data = format!("FROM: {}\nTO: {}\nTIMESTAMP: {}\nCONTENT: {}", from, to, timestamp, content);
-                std::fs::write(&packet_path, packet_data)
-                    .map_err(|e| mlua::Error::runtime(format!("Failed to write packet: {}", e)))?;
+                // Write message instruction file for the sender's watcher to process
+                let sendmsg_path = bootstrap_dir.join(format!("{}.sendmsg", from.to_lowercase()));
+                let payload = serde_json::json!({
+                    "to": to.to_lowercase(),
+                    "content": content
+                });
+                std::fs::write(&sendmsg_path, payload.to_string())
+                    .map_err(|e| mlua::Error::runtime(format!("Failed to write .sendmsg: {}", e)))?;
 
                 tracing::info!(
                     from = %from,
                     to = %to,
-                    content = %content,
-                    path = %packet_path.display(),
-                    "Packet written to outbox"
+                    "Wrote message instruction to {}.sendmsg",
+                    from.to_lowercase()
                 );
 
                 Ok::<_, mlua::Error>(())
             })
         })?;
-
-        tracing::info!(from = %from, to = %to, "send_packet: packet queued for delivery");
         Ok(())
     })?;
     ctx.set("send_packet", send_packet_fn)?;
@@ -423,5 +410,255 @@ fn capitalize(s: &str) -> String {
     match chars.next() {
         None => String::new(),
         Some(first) => first.to_uppercase().chain(chars).collect(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::instance::InstanceManager;
+    use crate::scheduler::create_shared_scheduler;
+    use std::sync::Arc;
+    use tempfile::TempDir;
+    use tokio::sync::RwLock;
+
+    /// Helper to create test infrastructure
+    fn setup_test_env() -> (TempDir, Arc<RwLock<InstanceManager>>) {
+        let temp_dir = TempDir::new().expect("Failed to create temp dir");
+        let data_base = temp_dir.path().join("data");
+        let bootstrap_base = temp_dir.path().join("bootstrap");
+
+        let manager = InstanceManager::new_for_testing(data_base, bootstrap_base)
+            .expect("Failed to create test manager");
+
+        (temp_dir, Arc::new(RwLock::new(manager)))
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_send_packet_writes_sendmsg_file() {
+        // Setup
+        let (temp_dir, instances) = setup_test_env();
+        let scheduler = create_shared_scheduler();
+
+        // Register a fake "love" instance
+        {
+            let mut mgr = instances.write().await;
+            mgr.register_fake_instance("love", "Love");
+        }
+
+        // Create Lua context
+        let lua = Lua::new();
+        let ctx = create_context_table(&lua, instances.clone(), scheduler)
+            .expect("Failed to create context");
+
+        // Set ctx as global
+        lua.globals().set("ctx", ctx).expect("Failed to set ctx");
+
+        // Call send_packet from Lua
+        lua.load(r#"ctx.send_packet("love", "peace", "Hello from test!")"#)
+            .exec()
+            .expect("Lua execution failed");
+
+        // Verify the .sendmsg file was created
+        let bootstrap_dir = temp_dir.path().join("bootstrap");
+        let sendmsg_path = bootstrap_dir.join("love.sendmsg");
+
+        assert!(
+            sendmsg_path.exists(),
+            "Expected love.sendmsg to exist at {:?}",
+            sendmsg_path
+        );
+
+        // Verify the content is correct JSON
+        let content = std::fs::read_to_string(&sendmsg_path).expect("Failed to read sendmsg file");
+        let payload: serde_json::Value =
+            serde_json::from_str(&content).expect("Failed to parse JSON");
+
+        assert_eq!(payload["to"], "peace", "Recipient should be 'peace'");
+        assert_eq!(
+            payload["content"], "Hello from test!",
+            "Content should match"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_send_packet_lowercases_names() {
+        // Setup
+        let (temp_dir, instances) = setup_test_env();
+        let scheduler = create_shared_scheduler();
+
+        // Register with uppercase name
+        {
+            let mut mgr = instances.write().await;
+            mgr.register_fake_instance("LOVE", "Love");
+        }
+
+        // Create Lua context
+        let lua = Lua::new();
+        let ctx = create_context_table(&lua, instances.clone(), scheduler)
+            .expect("Failed to create context");
+        lua.globals().set("ctx", ctx).expect("Failed to set ctx");
+
+        // Call with mixed case
+        lua.load(r#"ctx.send_packet("LOVE", "PEACE", "Test message")"#)
+            .exec()
+            .expect("Lua execution failed");
+
+        // Verify lowercase filename
+        let bootstrap_dir = temp_dir.path().join("bootstrap");
+        let sendmsg_path = bootstrap_dir.join("love.sendmsg");
+
+        assert!(sendmsg_path.exists(), "File should use lowercase name");
+
+        // Verify lowercase in payload
+        let content = std::fs::read_to_string(&sendmsg_path).unwrap();
+        let payload: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(payload["to"], "peace", "Recipient should be lowercased");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_send_packet_fails_for_nonexistent_instance() {
+        // Setup
+        let (_temp_dir, instances) = setup_test_env();
+        let scheduler = create_shared_scheduler();
+
+        // Don't register any instances
+
+        // Create Lua context
+        let lua = Lua::new();
+        let ctx = create_context_table(&lua, instances.clone(), scheduler)
+            .expect("Failed to create context");
+        lua.globals().set("ctx", ctx).expect("Failed to set ctx");
+
+        // Call should fail
+        let result = lua
+            .load(r#"ctx.send_packet("nonexistent", "peace", "Hello")"#)
+            .exec();
+
+        assert!(result.is_err(), "Should fail for nonexistent instance");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("not running"),
+            "Error should mention instance not running: {}",
+            err_msg
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_send_packet_json_format() {
+        // Setup
+        let (temp_dir, instances) = setup_test_env();
+        let scheduler = create_shared_scheduler();
+
+        {
+            let mut mgr = instances.write().await;
+            mgr.register_fake_instance("sender", "Sender");
+        }
+
+        let lua = Lua::new();
+        let ctx = create_context_table(&lua, instances.clone(), scheduler)
+            .expect("Failed to create context");
+        lua.globals().set("ctx", ctx).expect("Failed to set ctx");
+
+        // Send message with special characters
+        lua.load(r#"ctx.send_packet("sender", "receiver", "Hello \"world\" with\nnewline")"#)
+            .exec()
+            .expect("Lua execution failed");
+
+        // Verify JSON is properly escaped
+        let bootstrap_dir = temp_dir.path().join("bootstrap");
+        let sendmsg_path = bootstrap_dir.join("sender.sendmsg");
+        let content = std::fs::read_to_string(&sendmsg_path).unwrap();
+
+        // Should be valid JSON
+        let payload: serde_json::Value = serde_json::from_str(&content)
+            .expect("Content should be valid JSON even with special chars");
+
+        // Content should preserve the special characters
+        let msg = payload["content"].as_str().unwrap();
+        assert!(msg.contains("\"world\""), "Should preserve quotes");
+        assert!(msg.contains('\n'), "Should preserve newline");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_connect_writes_connect_file() {
+        // Setup
+        let (temp_dir, instances) = setup_test_env();
+        let scheduler = create_shared_scheduler();
+
+        // Register two instances
+        {
+            let mut mgr = instances.write().await;
+            mgr.register_fake_instance("love", "Love");
+            mgr.register_fake_instance("peace", "Peace");
+        }
+
+        // Create fake invite file for "love"
+        let bootstrap_dir = temp_dir.path().join("bootstrap");
+        let invite_path = bootstrap_dir.join("love.invite");
+        std::fs::write(&invite_path, "fake-invite-data").expect("Failed to write invite");
+
+        // Create Lua context
+        let lua = Lua::new();
+        let ctx = create_context_table(&lua, instances.clone(), scheduler)
+            .expect("Failed to create context");
+        lua.globals().set("ctx", ctx).expect("Failed to set ctx");
+
+        // Connect peace to love
+        lua.load(r#"ctx.connect("love", "peace")"#)
+            .exec()
+            .expect("Lua execution failed");
+
+        // Verify peace.connect was created
+        let connect_path = bootstrap_dir.join("peace.connect");
+        assert!(connect_path.exists(), "peace.connect should exist");
+
+        let content = std::fs::read_to_string(&connect_path).unwrap();
+        assert_eq!(content, "fake-invite-data", "Should copy invite content");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_launch_registers_instance() {
+        // Note: This test can't actually launch processes, but we can verify
+        // the instance tracking works with fake instances
+        let (_temp_dir, instances) = setup_test_env();
+
+        // Register and verify
+        {
+            let mut mgr = instances.write().await;
+            mgr.register_fake_instance("test", "Test");
+            assert!(mgr.is_running("test"), "Instance should be registered");
+            assert!(!mgr.is_running("other"), "Other instance should not exist");
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_instances_list() {
+        let (_temp_dir, instances) = setup_test_env();
+        let scheduler = create_shared_scheduler();
+
+        // Register some instances
+        {
+            let mut mgr = instances.write().await;
+            mgr.register_fake_instance("alpha", "Alpha");
+            mgr.register_fake_instance("beta", "Beta");
+            mgr.register_fake_instance("gamma", "Gamma");
+        }
+
+        // Create Lua context and call instances()
+        let lua = Lua::new();
+        let ctx = create_context_table(&lua, instances.clone(), scheduler)
+            .expect("Failed to create context");
+        lua.globals().set("ctx", ctx).expect("Failed to set ctx");
+
+        let result: Vec<String> = lua
+            .load(r#"return ctx.instances()"#)
+            .eval()
+            .expect("Failed to get instances");
+
+        assert_eq!(result.len(), 3, "Should have 3 instances");
+        assert!(result.contains(&"alpha".to_string()));
+        assert!(result.contains(&"beta".to_string()));
+        assert!(result.contains(&"gamma".to_string()));
     }
 }

@@ -2,7 +2,7 @@
 //!
 //! "Enter the Field" - The gateway to collective intention.
 //!
-//! If the user already has realms (returning user), auto-redirects to Field.
+//! If the user already has realms (returning user), auto-redirects to Network.
 
 use dioxus::prelude::*;
 
@@ -12,7 +12,7 @@ use crate::context::{use_engine, use_engine_ready};
 
 /// Landing page component.
 ///
-/// Auto-redirects to Field if user already has realms (returning user).
+/// Auto-redirects to Network if user already has realms (returning user).
 #[component]
 pub fn Landing() -> Element {
     let navigator = use_navigator();
@@ -30,10 +30,10 @@ pub fn Landing() -> Element {
                     if let Ok(realms) = eng.list_realms().await {
                         if !realms.is_empty() {
                             tracing::info!(
-                                "Returning user detected ({} realms), auto-navigating to Field",
+                                "Returning user detected ({} realms), auto-navigating to Network",
                                 realms.len()
                             );
-                            navigator.push(Route::Field {});
+                            navigator.push(Route::Network {});
                         }
                     }
                 }
@@ -42,7 +42,7 @@ pub fn Landing() -> Element {
     });
 
     let enter_field = move |_| {
-        navigator.push(Route::Field {});
+        navigator.push(Route::Network {});
     };
 
     rsx! {

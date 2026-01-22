@@ -70,18 +70,18 @@ if [[ "$1" == @* ]]; then
 
     # Build the scenario runner first
     echo -e "${CYAN}Building scenario runner...${NC}"
-    cargo build -p syncengine-scenarios --release 2>&1 | grep -E "(Compiling|Finished|error)" || true
+    cargo build -p syncengine-scenarios 2>&1 | grep -E "(Compiling|Finished|error)" || true
 
     # Also need to build the main desktop binary and CLI
     echo -e "${CYAN}Building Synchronicity Engine...${NC}"
-    cargo build --bin syncengine-desktop --release 2>&1 | grep -E "(Compiling|Finished|error)" || true
-    cargo build -p syncengine-cli --release 2>&1 | grep -E "(Compiling|Finished|error)" || true
+    cargo build --bin syncengine-desktop 2>&1 | grep -E "(Compiling|Finished|error)" || true
+    cargo build -p syncengine-cli 2>&1 | grep -E "(Compiling|Finished|error)" || true
 
-    SCENARIO_BIN="./target/release/syncengine-scenario"
+    SCENARIO_BIN="./target/debug/syncengine-scenario"
     if [ ! -f "$SCENARIO_BIN" ]; then
         echo "Scenario runner not found at $SCENARIO_BIN"
-        echo "Trying debug build..."
-        SCENARIO_BIN="./target/debug/syncengine-scenario"
+        echo "Trying release build..."
+        SCENARIO_BIN="./target/release/syncengine-scenario"
     fi
 
     if [ ! -f "$SCENARIO_BIN" ]; then
@@ -121,9 +121,9 @@ EOF
             sleep 0.5
             echo -e "${CYAN}Generating scenario log report...${NC}"
 
-            CLI_BIN="./target/release/syncengine"
+            CLI_BIN="./target/debug/syncengine"
             if [ ! -f "$CLI_BIN" ]; then
-                CLI_BIN="./target/debug/syncengine"
+                CLI_BIN="./target/release/syncengine"
             fi
 
             if [ -f "$CLI_BIN" ]; then
@@ -268,17 +268,17 @@ fi
 
 # Build first (only once)
 echo -e "${CYAN}Building Synchronicity Engine...${NC}"
-cargo build --bin syncengine-desktop --release 2>&1 | grep -E "(Compiling|Finished|error)" || true
+cargo build --bin syncengine-desktop 2>&1 | grep -E "(Compiling|Finished|error)" || true
 echo -e "${GREEN}Build complete.${NC}"
 echo ""
 
 # Get the binary path
-BINARY="./target/release/syncengine-desktop"
+BINARY="./target/debug/syncengine-desktop"
 
 if [ ! -f "$BINARY" ]; then
     echo "Binary not found at $BINARY"
-    echo "Trying debug build..."
-    BINARY="./target/debug/syncengine-desktop"
+    echo "Trying release build..."
+    BINARY="./target/release/syncengine-desktop"
 fi
 
 # Launch each instance
@@ -388,9 +388,9 @@ cleanup() {
         echo -e "${CYAN}Generating log report...${NC}"
 
         # Try to use pre-built CLI binary (faster than cargo run)
-        CLI_BIN="./target/release/syncengine"
+        CLI_BIN="./target/debug/syncengine"
         if [ ! -f "$CLI_BIN" ]; then
-            CLI_BIN="./target/debug/syncengine"
+            CLI_BIN="./target/release/syncengine"
         fi
 
         if [ -f "$CLI_BIN" ]; then
@@ -402,7 +402,7 @@ cleanup() {
         else
             # Fall back to cargo run
             echo -e "${CYAN}Building CLI for report generation...${NC}"
-            if cargo run -p syncengine-cli --release --quiet -- logs report --logs-dir "$LOGS_DIR" --output LOGS.md 2>/dev/null; then
+            if cargo run -p syncengine-cli --quiet -- logs report --logs-dir "$LOGS_DIR" --output LOGS.md 2>/dev/null; then
                 echo -e "${GREEN}Report saved to LOGS.md${NC}"
             else
                 echo -e "${YELLOW}Report generation skipped${NC}"

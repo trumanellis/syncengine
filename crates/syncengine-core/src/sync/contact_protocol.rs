@@ -84,6 +84,10 @@ pub enum ContactMessage {
         /// Serialized via ProfilePublicKeys::to_bytes()
         #[serde(default)]
         requester_encryption_keys: Option<Vec<u8>>,
+        /// DIDs of requester's existing contacts (for mutual peer discovery)
+        /// These are used to find common contacts who can serve as relay fallbacks
+        #[serde(default)]
+        requester_contact_dids: Vec<String>,
         /// Signature over all above fields (HybridSignature)
         requester_signature: Vec<u8>,
     },
@@ -108,6 +112,10 @@ pub enum ContactMessage {
         /// Serialized via ProfilePublicKeys::to_bytes()
         #[serde(default)]
         accepter_encryption_keys: Option<Vec<u8>>,
+        /// DIDs of accepter's existing contacts (for mutual peer discovery)
+        /// These are used to find common contacts who can serve as relay fallbacks
+        #[serde(default)]
+        accepter_contact_dids: Vec<String>,
         /// Signature over all above fields (HybridSignature)
         signature: Vec<u8>,
         // NOTE: contact_topic and contact_key are derived locally, not transmitted
@@ -311,6 +319,7 @@ mod tests {
             requester_signed_profile: signed_profile,
             requester_node_addr: vec![1, 2, 3, 4],
             requester_encryption_keys: Some(vec![0xAB; 32]), // Mock encryption keys
+            requester_contact_dids: vec!["did:key:friend1".to_string(), "did:key:friend2".to_string()],
             requester_signature: vec![5, 6, 7, 8],
         };
 
@@ -340,6 +349,7 @@ mod tests {
             accepter_signed_profile: signed_profile,
             accepter_node_addr: vec![5, 6, 7, 8],
             accepter_encryption_keys: Some(vec![0xCD; 32]), // Mock encryption keys
+            accepter_contact_dids: vec!["did:key:contact1".to_string()],
             signature: vec![9, 10, 11, 12],
         };
 
@@ -451,6 +461,7 @@ mod tests {
             requester_signed_profile: signed_profile.clone(),
             requester_node_addr: vec![],
             requester_encryption_keys: None,
+            requester_contact_dids: vec![],
             requester_signature: vec![],
         };
 
@@ -461,6 +472,7 @@ mod tests {
             accepter_signed_profile: signed_profile,
             accepter_node_addr: vec![],
             accepter_encryption_keys: None,
+            accepter_contact_dids: vec![],
             signature: vec![],
         };
 

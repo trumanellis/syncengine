@@ -527,6 +527,7 @@ impl ContactManager {
         // Save as pending (OutgoingPending)
         // Note: signed_profile is None for outgoing requests - we'll get it from the accept response
         // Note: encryption_keys is None initially - we'll get it from the ContactAccept response
+        // Note: peer_contact_dids is empty - we'll get it from ContactAccept for mutual peer computation
         let pending = PendingContact {
             invite_id: invite.invite_id,
             peer_did: invite.inviter_did.clone(),
@@ -536,6 +537,7 @@ impl ContactManager {
             state: ContactState::OutgoingPending,
             created_at: chrono::Utc::now().timestamp(),
             encryption_keys: None, // Will be populated from ContactAccept
+            peer_contact_dids: vec![], // Will be populated from ContactAccept
         };
 
         self.storage.save_pending(&pending)?;
@@ -702,6 +704,32 @@ impl ContactManager {
         let contact_topic = Self::derive_contact_topic(self.did.as_ref(), &pending.peer_did);
         let contact_key = Self::derive_contact_key(self.did.as_ref(), &pending.peer_did);
 
+        // Compute mutual peers: intersection of our contacts with their contacts
+        // These can be used as relay fallbacks when direct connection fails
+        let our_contact_dids: std::collections::HashSet<String> = self
+            .storage
+            .list_contacts()
+            .unwrap_or_default()
+            .iter()
+            .map(|c| c.peer_did.clone())
+            .collect();
+
+        let their_contact_dids: std::collections::HashSet<String> =
+            pending.peer_contact_dids.iter().cloned().collect();
+
+        let mutual_peers: Vec<String> = our_contact_dids
+            .intersection(&their_contact_dids)
+            .cloned()
+            .collect();
+
+        if !mutual_peers.is_empty() {
+            info!(
+                peer_did = %pending.peer_did,
+                mutual_count = mutual_peers.len(),
+                "Discovered mutual peers for relay fallback (accepter side)"
+            );
+        }
+
         // Create ContactInfo
         let contact = ContactInfo {
             peer_did: pending.peer_did.clone(),
@@ -715,6 +743,7 @@ impl ContactManager {
             status: ContactStatus::Online, // Online since we just communicated
             is_favorite: false,
             encryption_keys: pending.encryption_keys.clone(),
+            mutual_peers,
         };
 
         // Save to contacts table (legacy)
@@ -823,6 +852,20 @@ impl ContactManager {
         let _ = self.event_tx.send(ContactEvent::ContactOnline {
             did: contact.peer_did.clone(),
         });
+
+        // Broadcast MeshUpdate to all existing contacts (not the new one).
+        // This enables mesh topology awareness: other contacts learn that we now
+        // know this new contact, allowing them to update their mutual_peers fields.
+        // This is fire-and-forget; failure is non-fatal since relay routing has fallbacks.
+        let new_contact_did = contact.peer_did.clone();
+        let mesh_update_count = self.broadcast_mesh_update(Some(&new_contact_did)).await;
+        if mesh_update_count > 0 {
+            info!(
+                new_contact = %new_contact_did,
+                recipients = mesh_update_count,
+                "Broadcast MeshUpdate after contact finalization"
+            );
+        }
 
         Ok(())
     }
@@ -1035,6 +1078,46 @@ impl ContactManager {
             "Subscribed to contact gossip topic with profile listener"
         );
 
+        // MESH FORMATION FIX: Broadcast a profile announcement after subscribing.
+        // This triggers actual message sending on the topic, which helps iroh-gossip
+        // discover the peer and form a proper mesh. Without this, both sides may
+        // end up in separate "swarms of one" when they subscribe at nearly the same time.
+        {
+            let active = self.active_topics.read().await;
+            if let Some(topic_sender) = active.get(&contact.contact_topic) {
+                // Get our signed profile for the announcement
+                if let Ok(Some(keys)) = self.storage.load_profile_keys() {
+                    // Load our profile using DID as the peer_id (same pattern as get_own_profile)
+                    let did_string = keys.did().to_string();
+                    if let Ok(Some(profile)) = self.storage.load_profile(&did_string) {
+                        // Sign the existing profile (already has correct peer_id)
+                        let signed = crate::types::SignedProfile::sign(&profile, keys.signing_keypair());
+                        let announcement = crate::sync::ProfileGossipMessage::announce(signed, None);
+
+                        match announcement.to_bytes() {
+                            Ok(bytes) => {
+                                if let Err(e) = topic_sender.broadcast(bytes).await {
+                                    debug!(
+                                        peer_did = %contact.peer_did,
+                                        error = %e,
+                                        "Failed to send mesh formation announcement (non-fatal)"
+                                    );
+                                } else {
+                                    info!(
+                                        peer_did = %contact.peer_did,
+                                        "Sent mesh formation announcement to contact topic"
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                debug!(error = %e, "Failed to encode mesh formation announcement");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -1163,6 +1246,75 @@ impl ContactManager {
                         content_len = msg.content.len(),
                         "Processing gossip message content"
                     );
+
+                    // ═══════════════════════════════════════════════════════════════════════
+                    // RELAY MESSAGE DETECTION
+                    // ═══════════════════════════════════════════════════════════════════════
+                    // Check if this is a RelayWrapper (store-and-forward request).
+                    // RelayWrapper messages start with magic bytes "RELY" (0x52454C59).
+                    // If detected, parse the wrapped packet and store for later forwarding.
+                    if crate::sync::RelayWrapper::is_relay_message(&msg.content) {
+                        match crate::sync::RelayWrapper::from_bytes(&msg.content) {
+                            Ok(relay) => {
+                                info!(
+                                    from = %msg.from,
+                                    original_sender = %relay.original_sender,
+                                    final_recipient = %relay.final_recipient,
+                                    payload_len = relay.payload.len(),
+                                    relay_id = ?relay.relay_id,
+                                    "Received RELAY request - storing for forwarding"
+                                );
+
+                                // Parse the wrapped payload as a PacketEnvelope
+                                match crate::profile::PacketEnvelope::decode(&relay.payload) {
+                                    Ok(envelope) => {
+                                        // Store in MirrorStore - this auto-indexes by recipient
+                                        // for later forwarding via the NeighborUp handler
+                                        match crate::profile::MirrorStore::new(storage.db_handle()) {
+                                            Ok(mirror) => {
+                                                match mirror.store_packet(&envelope) {
+                                                    Ok(_) => {
+                                                        info!(
+                                                            original_sender = %relay.original_sender,
+                                                            final_recipient = %relay.final_recipient,
+                                                            sequence = envelope.sequence,
+                                                            "Stored relayed packet for forwarding when recipient comes online"
+                                                        );
+                                                    }
+                                                    Err(e) => {
+                                                        warn!(
+                                                            error = %e,
+                                                            "Failed to store relayed packet"
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                            Err(e) => {
+                                                warn!(error = %e, "Failed to create MirrorStore for relay storage");
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        warn!(
+                                            error = %e,
+                                            original_sender = %relay.original_sender,
+                                            final_recipient = %relay.final_recipient,
+                                            "Failed to parse relayed packet envelope"
+                                        );
+                                    }
+                                }
+                                // Skip normal message processing for relay requests
+                                continue;
+                            }
+                            Err(e) => {
+                                warn!(
+                                    error = %e,
+                                    "Message has RELY magic but failed to parse as RelayWrapper"
+                                );
+                                // Fall through to try normal parsing
+                            }
+                        }
+                    }
 
                     // Try to parse as profile gossip message
                     match crate::sync::ProfileGossipMessage::from_bytes(&msg.content) {
@@ -1381,6 +1533,178 @@ impl ContactManager {
                                 );
                             }
                         }
+                        Ok(crate::sync::ProfileGossipMessage::MeshUpdate {
+                            sender_did,
+                            contact_dids,
+                            timestamp,
+                            signature,
+                        }) => {
+                            // ═══════════════════════════════════════════════════════════════════════
+                            // MESH UPDATE HANDLING
+                            // ═══════════════════════════════════════════════════════════════════════
+                            // When a contact announces their contact list, we update mutual_peers
+                            // for any contacts we have in common. This enables relay routing even
+                            // when contacts were created simultaneously (mesh topology race condition).
+
+                            // Verify sender is actually our contact (contact topic implies this,
+                            // but verify anyway for defense in depth)
+                            if sender_did != peer_did {
+                                warn!(
+                                    expected = %peer_did,
+                                    actual = %sender_did,
+                                    "MeshUpdate sender doesn't match contact topic owner"
+                                );
+                                continue;
+                            }
+
+                            // Verify signature
+                            // Reconstruct signed data: sender_did || contact_dids || timestamp
+                            let mut sign_data = Vec::new();
+                            sign_data.extend_from_slice(sender_did.as_bytes());
+                            for did in &contact_dids {
+                                sign_data.extend_from_slice(did.as_bytes());
+                            }
+                            sign_data.extend_from_slice(&timestamp.to_le_bytes());
+
+                            // Load sender's profile to get their public keys for verification
+                            // We use their SignedProfile from storage for the verifying key
+                            let verified = match storage.load_pinned_profile(&sender_did) {
+                                Ok(Some(pin)) => {
+                                    // Deserialize the signature from bytes
+                                    match crate::identity::HybridSignature::from_bytes(&signature) {
+                                        Ok(hybrid_sig) => {
+                                            pin.signed_profile.public_key.verify(&sign_data, &hybrid_sig)
+                                        }
+                                        Err(e) => {
+                                            warn!(
+                                                sender = %sender_did,
+                                                error = %e,
+                                                "Failed to deserialize MeshUpdate signature"
+                                            );
+                                            false
+                                        }
+                                    }
+                                }
+                                _ => {
+                                    // No pinned profile - can't verify, but sender is on our
+                                    // contact topic so we trust them (defense in depth failed
+                                    // but contact exchange already authenticated them)
+                                    debug!(
+                                        sender = %sender_did,
+                                        "No pinned profile for MeshUpdate sender, trusting contact topic authentication"
+                                    );
+                                    true
+                                }
+                            };
+
+                            if !verified {
+                                warn!(
+                                    sender = %sender_did,
+                                    "MeshUpdate signature verification failed"
+                                );
+                                continue;
+                            }
+
+                            info!(
+                                sender = %sender_did,
+                                their_contact_count = contact_dids.len(),
+                                timestamp = timestamp,
+                                "Received MeshUpdate - updating mutual_peers"
+                            );
+
+                            // Get our contacts
+                            let our_contacts = match storage.list_contacts() {
+                                Ok(c) => c,
+                                Err(e) => {
+                                    warn!(error = %e, "Failed to list contacts for MeshUpdate processing");
+                                    continue;
+                                }
+                            };
+                            let our_contact_dids: std::collections::HashSet<String> =
+                                our_contacts.iter().map(|c| c.peer_did.clone()).collect();
+
+                            // For each contact they announce that we ALSO have:
+                            // - Add sender to that contact's mutual_peers
+                            // - Add that contact to sender's mutual_peers
+                            let their_contact_set: std::collections::HashSet<String> =
+                                contact_dids.iter().cloned().collect();
+
+                            let mutual_contacts: Vec<String> = our_contact_dids
+                                .intersection(&their_contact_set)
+                                .cloned()
+                                .collect();
+
+                            if mutual_contacts.is_empty() {
+                                debug!(
+                                    sender = %sender_did,
+                                    "No mutual contacts discovered from MeshUpdate"
+                                );
+                                continue;
+                            }
+
+                            info!(
+                                sender = %sender_did,
+                                mutual_count = mutual_contacts.len(),
+                                mutual_contacts = ?mutual_contacts,
+                                "Discovered mutual contacts from MeshUpdate"
+                            );
+
+                            // Update mutual_peers symmetrically
+                            for mutual_did in &mutual_contacts {
+                                // Skip if the mutual contact is the sender themselves
+                                // (they can't be a mutual peer between themselves and us)
+                                if mutual_did == &sender_did {
+                                    continue;
+                                }
+
+                                // Add sender to mutual contact's mutual_peers
+                                match storage.add_mutual_peer(mutual_did, &sender_did) {
+                                    Ok(true) => {
+                                        info!(
+                                            contact = %mutual_did,
+                                            added_peer = %sender_did,
+                                            "Added mutual peer to contact"
+                                        );
+                                    }
+                                    Ok(false) => {
+                                        // Already present, no action needed
+                                    }
+                                    Err(e) => {
+                                        warn!(
+                                            contact = %mutual_did,
+                                            error = %e,
+                                            "Failed to add mutual peer"
+                                        );
+                                    }
+                                }
+
+                                // Add mutual contact to sender's mutual_peers
+                                match storage.add_mutual_peer(&sender_did, mutual_did) {
+                                    Ok(true) => {
+                                        info!(
+                                            contact = %sender_did,
+                                            added_peer = %mutual_did,
+                                            "Added mutual peer to sender's contact"
+                                        );
+                                    }
+                                    Ok(false) => {
+                                        // Already present, no action needed
+                                    }
+                                    Err(e) => {
+                                        warn!(
+                                            contact = %sender_did,
+                                            error = %e,
+                                            "Failed to add mutual peer to sender"
+                                        );
+                                    }
+                                }
+                            }
+
+                            // Emit event so UI can update mutual contacts display
+                            let _ = event_tx.send(ContactEvent::ProfileUpdated {
+                                did: sender_did.clone(),
+                            });
+                        }
                         Ok(_) => {
                             // Ignore Request/Response messages on contact topics
                         }
@@ -1446,6 +1770,108 @@ impl ContactManager {
     /// Returns a receiver for ContactEvent broadcasts.
     pub fn subscribe_events(&self) -> broadcast::Receiver<ContactEvent> {
         self.event_tx.subscribe()
+    }
+
+    /// Broadcast a MeshUpdate to all contacts (except one, typically the newly added contact).
+    ///
+    /// This enables mesh topology awareness: when a new contact is added, we inform
+    /// all existing contacts about our updated contact list. Recipients use this to
+    /// update their `mutual_peers` fields for improved relay routing.
+    ///
+    /// # Arguments
+    ///
+    /// * `exclude_did` - Optional DID to exclude from broadcast (typically the new contact)
+    ///
+    /// # Returns
+    ///
+    /// The number of contacts the MeshUpdate was successfully broadcast to.
+    pub async fn broadcast_mesh_update(&self, exclude_did: Option<&str>) -> usize {
+        // Get all our contacts
+        let contacts = match self.storage.list_contacts() {
+            Ok(c) => c,
+            Err(e) => {
+                warn!(error = %e, "Failed to list contacts for MeshUpdate broadcast");
+                return 0;
+            }
+        };
+
+        if contacts.is_empty() {
+            return 0;
+        }
+
+        // Collect all contact DIDs (this is what we're announcing)
+        let contact_dids: Vec<String> = contacts.iter().map(|c| c.peer_did.clone()).collect();
+
+        // Create timestamp
+        let timestamp = chrono::Utc::now().timestamp();
+
+        // Create signature over: sender_did || contact_dids || timestamp
+        // We concatenate the data, then sign it
+        let mut sign_data = Vec::new();
+        sign_data.extend_from_slice(self.did.as_ref().as_bytes());
+        for did in &contact_dids {
+            sign_data.extend_from_slice(did.as_bytes());
+        }
+        sign_data.extend_from_slice(&timestamp.to_le_bytes());
+        let signature = self.keypair.sign(&sign_data);
+        let signature_bytes = signature.to_bytes();
+
+        // Create the MeshUpdate message
+        let mesh_update = crate::sync::ProfileGossipMessage::mesh_update(
+            self.did.as_ref(),
+            contact_dids.clone(),
+            timestamp,
+            signature_bytes,
+        );
+
+        let message_bytes = match mesh_update.to_bytes() {
+            Ok(b) => b,
+            Err(e) => {
+                warn!(error = %e, "Failed to serialize MeshUpdate message");
+                return 0;
+            }
+        };
+
+        // Broadcast to all contacts except the excluded one
+        let mut success_count = 0;
+        for contact in &contacts {
+            // Skip the excluded contact (typically the newly added one)
+            if let Some(exclude) = exclude_did {
+                if contact.peer_did == exclude {
+                    continue;
+                }
+            }
+
+            match self.send_packet_to_contact(&contact.peer_did, &message_bytes).await {
+                Ok(()) => {
+                    debug!(
+                        contact_did = %contact.peer_did,
+                        our_contact_count = contact_dids.len(),
+                        "Sent MeshUpdate to contact"
+                    );
+                    success_count += 1;
+                }
+                Err(e) => {
+                    // Non-fatal: contact may be offline or not yet connected
+                    debug!(
+                        contact_did = %contact.peer_did,
+                        error = %e,
+                        "Failed to send MeshUpdate to contact (may be offline)"
+                    );
+                }
+            }
+        }
+
+        if success_count > 0 {
+            info!(
+                broadcast_count = success_count,
+                total_contacts = contacts.len(),
+                our_contact_count = contact_dids.len(),
+                "Broadcast MeshUpdate to contacts"
+            );
+        }
+
+        success_count
     }
 
     /// Broadcast a profile announcement to all contacts via their 1:1 contact topics.
@@ -1844,6 +2270,21 @@ impl ContactManager {
             data_to_sign.extend_from_slice(enc_keys);
         }
 
+        // Collect our existing contact DIDs for mutual peer discovery
+        // This allows the other party to identify common contacts for relay fallback
+        let requester_contact_dids: Vec<String> = self
+            .storage
+            .list_contacts()
+            .unwrap_or_default()
+            .iter()
+            .map(|c| c.peer_did.clone())
+            .collect();
+
+        debug!(
+            contact_count = requester_contact_dids.len(),
+            "Including contact DIDs for mutual peer discovery"
+        );
+
         let signature = self.keypair.sign(&data_to_sign);
         let requester_signature = signature.to_bytes();
 
@@ -1854,6 +2295,7 @@ impl ContactManager {
             requester_signed_profile: signed_profile,
             requester_node_addr: our_node_addr_bytes,
             requester_encryption_keys,
+            requester_contact_dids,
             requester_signature,
         };
 
@@ -1970,6 +2412,21 @@ impl ContactManager {
             data_to_sign.extend_from_slice(enc_keys);
         }
 
+        // Collect our existing contact DIDs for mutual peer discovery
+        // This allows the other party to identify common contacts for relay fallback
+        let accepter_contact_dids: Vec<String> = self
+            .storage
+            .list_contacts()
+            .unwrap_or_default()
+            .iter()
+            .map(|c| c.peer_did.clone())
+            .collect();
+
+        debug!(
+            contact_count = accepter_contact_dids.len(),
+            "Including contact DIDs for mutual peer discovery in accept"
+        );
+
         // Sign with our hybrid keypair
         let sig = self.keypair.sign(&data_to_sign);
         let signature = sig.to_bytes();
@@ -1981,6 +2438,7 @@ impl ContactManager {
             accepter_signed_profile: signed_profile,
             accepter_node_addr,
             accepter_encryption_keys,
+            accepter_contact_dids,
             signature,
         };
 
@@ -2270,6 +2728,7 @@ mod tests {
             state: ContactState::OutgoingPending,
             created_at: chrono::Utc::now().timestamp(),
             encryption_keys: None,
+            peer_contact_dids: vec![],
         };
 
         // Save to storage (what send_contact_request does, without network operation)
@@ -2301,6 +2760,7 @@ mod tests {
             state: ContactState::IncomingPending,
             created_at: chrono::Utc::now().timestamp(),
             encryption_keys: None,
+            peer_contact_dids: vec![],
         };
 
         manager.storage.save_pending(&pending).unwrap();
@@ -2329,6 +2789,7 @@ mod tests {
             status: ContactStatus::Offline,
             is_favorite: false,
             encryption_keys: pending.encryption_keys.clone(),
+            mutual_peers: vec![],
         };
 
         // 3. Save contact to storage
@@ -2363,6 +2824,7 @@ mod tests {
             state: ContactState::IncomingPending,
             created_at: chrono::Utc::now().timestamp(),
             encryption_keys: None,
+            peer_contact_dids: vec![],
         };
 
         manager.storage.save_pending(&pending).unwrap();

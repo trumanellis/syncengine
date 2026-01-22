@@ -9,6 +9,7 @@ mod profile_card;
 mod quest_card;
 mod markdown_editor;
 mod vertical_artifact_card;
+mod bio_card;
 
 pub use golden_card::{CardOrientation, GoldenCard};
 pub use card_header::CardHeader;
@@ -17,3 +18,4 @@ pub use profile_card::ProfileCard;
 pub use quest_card::QuestCard;
 pub use markdown_editor::{MarkdownEditor, MarkdownRenderer};
 pub use vertical_artifact_card::VerticalArtifactCard;
+pub use bio_card::BioCard;

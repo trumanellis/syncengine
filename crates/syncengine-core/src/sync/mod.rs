@@ -74,6 +74,7 @@ pub mod packet_protocol;
 pub mod profile_pinning;
 pub mod profile_protocol;
 pub mod protocol;
+pub mod relay;
 
 pub use contact_handler::ContactProtocolHandler;
 pub use contact_manager::{ContactEvent, ContactManager};
@@ -94,3 +95,4 @@ pub use profile_pinning::{
 pub use profile_protocol::{ProfileMessage, ProfileProtocolHandler, PublicProfile, PROFILE_ALPN};
 pub use packet_protocol::{CombinedMessage, MessageType, PacketSyncMessage, PacketWireMessage};
 pub use protocol::{SyncMessage, WireMessage};
+pub use relay::{RelayStore, RelayWrapper, StoredRelay, RELAY_MAGIC};

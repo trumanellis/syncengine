@@ -138,6 +138,7 @@ mod tests {
             status: ContactStatus::Offline,
             is_favorite: false,
             encryption_keys: None,
+            mutual_peers: vec![],
         }
     }
 

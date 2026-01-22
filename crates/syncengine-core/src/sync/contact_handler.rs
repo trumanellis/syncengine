@@ -129,6 +129,7 @@ impl ContactProtocolHandler {
                 requester_signed_profile,
                 requester_node_addr,
                 requester_encryption_keys,
+                requester_contact_dids,
                 requester_signature,
             } => {
                 // Verify signature
@@ -196,8 +197,14 @@ impl ContactProtocolHandler {
                 let is_our_invite = storage.is_our_generated_invite(&invite_id).unwrap_or(false);
 
                 if is_our_invite {
-                    // Clean up the generated invite record since it's being used
-                    let _ = storage.delete_generated_invite(&invite_id);
+                    // NOTE: We intentionally do NOT delete the invite here.
+                    // In mesh topology scenarios (e.g., Love↔Joy↔Peace all connecting),
+                    // multiple peers read the same .invite file and send requests.
+                    // If we delete the invite on first request, subsequent peers'
+                    // requests won't auto-accept, breaking mesh formation.
+                    //
+                    // The invite will naturally expire after 24 hours (TTL enforced
+                    // by is_our_generated_invite check), so no cleanup is needed.
                     info!(
                         invite_id = ?invite_id,
                         requester_did = %requester_did,
@@ -223,6 +230,7 @@ impl ContactProtocolHandler {
                     state: ContactState::IncomingPending,
                     created_at: chrono::Utc::now().timestamp(),
                     encryption_keys: requester_encryption_keys,
+                    peer_contact_dids: requester_contact_dids,
                 };
 
                 storage.save_pending(&pending)?;
@@ -249,6 +257,7 @@ impl ContactProtocolHandler {
                 accepter_signed_profile,
                 accepter_node_addr,
                 accepter_encryption_keys,
+                accepter_contact_dids,
                 signature,
             } => {
                 // Verify signature
@@ -331,6 +340,31 @@ impl ContactProtocolHandler {
                             bio: accepter_signed_profile.profile.bio.clone(),
                         };
 
+                        // Compute mutual peers: intersection of our contacts with their contacts
+                        // These can be used as relay fallbacks when direct connection fails
+                        let our_contact_dids: std::collections::HashSet<String> = storage
+                            .list_contacts()
+                            .unwrap_or_default()
+                            .iter()
+                            .map(|c| c.peer_did.clone())
+                            .collect();
+
+                        let their_contact_dids: std::collections::HashSet<String> =
+                            accepter_contact_dids.into_iter().collect();
+
+                        let mutual_peers: Vec<String> = our_contact_dids
+                            .intersection(&their_contact_dids)
+                            .cloned()
+                            .collect();
+
+                        if !mutual_peers.is_empty() {
+                            info!(
+                                peer_did = %accepter_did,
+                                mutual_count = mutual_peers.len(),
+                                "Discovered mutual peers for relay fallback"
+                            );
+                        }
+
                         // Create ContactInfo and save to contacts table
                         use crate::types::contact::{ContactInfo, ContactStatus};
 
@@ -346,6 +380,7 @@ impl ContactProtocolHandler {
                             status: ContactStatus::Online, // Online since we just received their message
                             is_favorite: false,
                             encryption_keys: accepter_encryption_keys.clone(),
+                            mutual_peers,
                         };
 
                         // Save to legacy contacts table

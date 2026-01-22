@@ -42,6 +42,9 @@ pub fn ContactCard(
     /// Whether contact is currently online
     #[props(default = false)]
     is_online: bool,
+    /// Whether this contact has recent packet activity
+    #[props(default = false)]
+    has_activity: bool,
     /// Index for staggered animation
     #[props(default = 0)]
     index: usize,
@@ -50,6 +53,7 @@ pub fn ContactCard(
     on_click: Option<EventHandler<()>>,
 ) -> Element {
     let status_class = if is_online { "online" } else { "offline" };
+    let activity_class = if has_activity { "packet-activity" } else { "" };
 
     let handle_click = move |_| {
         if let Some(handler) = &on_click {
@@ -59,7 +63,7 @@ pub fn ContactCard(
 
     rsx! {
         div {
-            class: "contact-card {status_class}",
+            class: "contact-card {status_class} {activity_class}",
             style: "--index: {index}",
             onclick: handle_click,
 

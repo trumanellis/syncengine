@@ -122,6 +122,7 @@ async fn test_accept_contact_request_storage() {
         state: ContactState::IncomingPending,
         created_at: chrono::Utc::now().timestamp(),
         encryption_keys: None,
+        peer_contact_dids: vec![],
     };
     storage.save_pending(&pending).unwrap();
 
@@ -155,6 +156,7 @@ async fn test_accept_contact_request_storage() {
         status: ContactStatus::Offline,
         is_favorite: false,
         encryption_keys: None,
+        mutual_peers: vec![],
     };
 
     // 3. Save contact to storage
@@ -199,6 +201,7 @@ async fn test_decline_contact_request() {
         state: ContactState::IncomingPending,
         created_at: chrono::Utc::now().timestamp(),
         encryption_keys: None,
+        peer_contact_dids: vec![],
     };
     storage.save_pending(&pending).unwrap();
 
@@ -248,6 +251,7 @@ async fn test_list_contacts() {
         status: ContactStatus::Offline,
         is_favorite: false,
         encryption_keys: None,
+        mutual_peers: vec![],
     };
     storage.save_contact(&contact).unwrap();
 
