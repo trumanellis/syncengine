@@ -7,7 +7,7 @@ use mlua::{Lua, Table};
 use std::path::{Path, PathBuf};
 
 use crate::api::create_context_table;
-use crate::instance::{create_shared_manager, SharedInstanceManager};
+use crate::instance::{create_shared_manager_with_options, SharedInstanceManager};
 use crate::scheduler::{create_shared_scheduler, run_scheduler_loop, SharedScheduler};
 
 /// The scenario runtime that manages Lua execution
@@ -21,8 +21,17 @@ pub struct ScenarioRuntime {
 impl ScenarioRuntime {
     /// Create a new scenario runtime
     pub fn new(scenarios_dir: PathBuf) -> Result<Self> {
+        Self::new_with_options(scenarios_dir, false)
+    }
+
+    /// Create a new scenario runtime with options
+    ///
+    /// # Arguments
+    /// * `scenarios_dir` - Directory containing scenario Lua files
+    /// * `fresh` - If true, delete all existing instance data for a clean start
+    pub fn new_with_options(scenarios_dir: PathBuf, fresh: bool) -> Result<Self> {
         let lua = Lua::new();
-        let instances = create_shared_manager()?;
+        let instances = create_shared_manager_with_options(fresh)?;
         let scheduler = create_shared_scheduler();
 
         // Set up Lua package.path to find modules in scenarios directory

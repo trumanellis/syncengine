@@ -48,6 +48,14 @@ pub struct InstanceManager {
 impl InstanceManager {
     /// Create a new instance manager
     pub fn new() -> Result<Self> {
+        Self::new_with_options(false)
+    }
+
+    /// Create a new instance manager with options
+    ///
+    /// # Arguments
+    /// * `fresh` - If true, delete all existing data directories for a clean start
+    pub fn new_with_options(fresh: bool) -> Result<Self> {
         // Find the binary
         let binary_path = Self::find_binary()?;
 
@@ -60,6 +68,18 @@ impl InstanceManager {
         let bootstrap_base = dirs::data_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join("syncengine-bootstrap");
+
+        // If fresh start requested, delete existing data
+        if fresh {
+            if data_base.exists() {
+                tracing::info!(path = %data_base.display(), "Clearing scenario data directory");
+                std::fs::remove_dir_all(&data_base)?;
+            }
+            if bootstrap_base.exists() {
+                tracing::info!(path = %bootstrap_base.display(), "Clearing bootstrap directory");
+                std::fs::remove_dir_all(&bootstrap_base)?;
+            }
+        }
 
         // Ensure directories exist
         std::fs::create_dir_all(&data_base)?;
@@ -435,5 +455,9 @@ impl Drop for InstanceManager {
 pub type SharedInstanceManager = Arc<RwLock<InstanceManager>>;
 
 pub fn create_shared_manager() -> Result<SharedInstanceManager> {
-    Ok(Arc::new(RwLock::new(InstanceManager::new()?)))
+    create_shared_manager_with_options(false)
+}
+
+pub fn create_shared_manager_with_options(fresh: bool) -> Result<SharedInstanceManager> {
+    Ok(Arc::new(RwLock::new(InstanceManager::new_with_options(fresh)?)))
 }

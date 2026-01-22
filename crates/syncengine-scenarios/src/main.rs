@@ -5,7 +5,7 @@
 //! Usage:
 //!   syncengine-scenario <scenario-name>
 //!   syncengine-scenario mesh-3
-//!   syncengine-scenario chaos
+//!   syncengine-scenario --fresh offline-relay  # Clean start, delete old data
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -31,6 +31,11 @@ struct Args {
     /// Enable verbose logging
     #[arg(short, long)]
     verbose: bool,
+
+    /// Fresh start: delete all existing instance data before running
+    /// Use this for clean test runs without leftover contacts/messages
+    #[arg(short, long)]
+    fresh: bool,
 }
 
 #[tokio::main]
@@ -99,10 +104,13 @@ async fn main() -> Result<()> {
         );
     }
 
+    if args.fresh {
+        tracing::info!("Fresh start requested - will delete existing instance data");
+    }
     tracing::info!("Loading scenario: {}", args.scenario);
 
     // Create and run the scenario runtime
-    let mut runtime = ScenarioRuntime::new(scenarios_dir)?;
+    let mut runtime = ScenarioRuntime::new_with_options(scenarios_dir, args.fresh)?;
 
     // Load and execute the scenario
     runtime
