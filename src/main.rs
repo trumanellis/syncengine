@@ -156,12 +156,23 @@ fn main() {
     }
 
     // Determine data directory and display name
+    // Priority: CLI --data-dir > SYNCENGINE_DATA_DIR env var > --name > --instance > default
     let (data_dir, display_name) = if let Some(dir) = args.data_dir {
         (
             dir.clone(),
             dir.file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("custom")
+                .to_string(),
+        )
+    } else if let Ok(env_dir) = std::env::var("SYNCENGINE_DATA_DIR") {
+        // Used by scenario runner to place instances in syncengine-scenarios/
+        let dir = PathBuf::from(&env_dir);
+        (
+            dir.clone(),
+            dir.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("env")
                 .to_string(),
         )
     } else if let Some(ref name) = args.name {
