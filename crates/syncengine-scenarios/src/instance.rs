@@ -41,6 +41,7 @@ pub struct InstanceManager {
     instances: HashMap<String, InstanceInfo>,
     binary_path: PathBuf,
     data_base: PathBuf,
+    bootstrap_base: PathBuf,
     next_position: u8,
 }
 
@@ -55,15 +56,57 @@ impl InstanceManager {
             .unwrap_or_else(|| PathBuf::from("."))
             .join("syncengine-scenarios");
 
-        // Ensure base directory exists
+        // Bootstrap directory for cross-instance connections
+        let bootstrap_base = dirs::data_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("syncengine-bootstrap");
+
+        // Ensure directories exist
         std::fs::create_dir_all(&data_base)?;
+        std::fs::create_dir_all(&bootstrap_base)?;
 
         Ok(Self {
             instances: HashMap::new(),
             binary_path,
             data_base,
+            bootstrap_base,
             next_position: 0,
         })
+    }
+
+    /// Create a new instance manager for testing (doesn't require binary)
+    #[cfg(test)]
+    pub fn new_for_testing(data_base: PathBuf, bootstrap_base: PathBuf) -> Result<Self> {
+        std::fs::create_dir_all(&data_base)?;
+        std::fs::create_dir_all(&bootstrap_base)?;
+
+        Ok(Self {
+            instances: HashMap::new(),
+            binary_path: PathBuf::from("/fake/binary"),
+            data_base,
+            bootstrap_base,
+            next_position: 0,
+        })
+    }
+
+    /// Register a fake instance for testing (doesn't spawn a process)
+    #[cfg(test)]
+    pub fn register_fake_instance(&mut self, name: &str, profile: &str) {
+        let data_dir = self.data_base.join(format!("instance-{}", name));
+        let _ = std::fs::create_dir_all(&data_dir);
+
+        self.instances.insert(
+            name.to_string(),
+            InstanceInfo {
+                name: name.to_string(),
+                profile: profile.to_string(),
+                state: InstanceState::Running,
+                process: None,
+                data_dir,
+                position: self.next_position,
+            },
+        );
+        self.next_position += 1;
     }
 
     /// Find the SyncEngine binary
@@ -147,8 +190,22 @@ impl InstanceManager {
             .arg(total.to_string())
             .arg("--init-profile-name")
             .arg(profile)
-            .env("SYNCENGINE_DATA_DIR", &data_dir)
-            .stdout(Stdio::null())
+            .env("SYNCENGINE_DATA_DIR", &data_dir);
+
+        // Pass through JSONL logging environment variables if set
+        // This allows scenario-spawned instances to log to the same directory
+        if let Ok(logs_dir) = std::env::var("SYNCENGINE_LOGS_DIR") {
+            cmd.env("SYNCENGINE_LOGS_DIR", &logs_dir);
+            cmd.env("SYNCENGINE_INSTANCE", name);
+            tracing::debug!(name = %name, logs_dir = %logs_dir, "Passing JSONL logging to instance");
+        }
+
+        // Inherit RUST_LOG for consistent log levels
+        if let Ok(rust_log) = std::env::var("RUST_LOG") {
+            cmd.env("RUST_LOG", rust_log);
+        }
+
+        cmd.stdout(Stdio::null())
             .stderr(Stdio::null());
 
         // Add auto-connect peers if provided
@@ -157,6 +214,13 @@ impl InstanceManager {
                 cmd.arg("--init-connect").arg(peers.join(","));
             }
         }
+
+        tracing::debug!(
+            name = %name,
+            binary = %self.binary_path.display(),
+            data_dir = %data_dir.display(),
+            "Spawning instance process"
+        );
 
         let child = cmd.spawn().context("Failed to spawn instance")?;
 
@@ -319,12 +383,45 @@ impl InstanceManager {
         }
     }
 
+    /// Check if all instances have exited (manually quit or killed)
+    /// Updates state for any instances that have exited since last check
+    pub fn all_instances_exited(&mut self) -> bool {
+        if self.instances.is_empty() {
+            return false; // No instances launched yet
+        }
+
+        let mut all_exited = true;
+        for (name, info) in self.instances.iter_mut() {
+            if info.state == InstanceState::Running {
+                if let Some(ref mut child) = info.process {
+                    // Check if the process has exited without blocking
+                    match child.try_wait() {
+                        Ok(Some(status)) => {
+                            // Process has exited
+                            let exit_code = status.code().unwrap_or(-1);
+                            tracing::info!(name = %name, exit_code, "Instance exited");
+                            info.state = InstanceState::Exited(exit_code);
+                        }
+                        Ok(None) => {
+                            // Process is still running
+                            all_exited = false;
+                        }
+                        Err(e) => {
+                            tracing::warn!(name = %name, error = ?e, "Failed to check instance status");
+                            all_exited = false;
+                        }
+                    }
+                }
+            }
+        }
+
+        all_exited
+    }
+
     /// Get bootstrap directory for cross-instance connections
     /// This must match the path used in app.rs for invite file exchange
     pub fn bootstrap_dir(&self) -> PathBuf {
-        dirs::data_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("syncengine-bootstrap")
+        self.bootstrap_base.clone()
     }
 }
 

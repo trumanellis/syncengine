@@ -76,20 +76,37 @@ impl ScenarioRuntime {
             // Collect all instance names first (for mesh auto-connect)
             let mut all_instance_names: Vec<String> = Vec::new();
             if let Ok(instances_table) = config.get::<Table>("instances") {
+                tracing::debug!("Found instances table in scenario config");
                 for pair in instances_table.pairs::<i32, Table>() {
-                    if let Ok((_, instance)) = pair {
+                    if let Ok((idx, instance)) = pair {
                         let inst_name: String =
                             instance.get("name").unwrap_or_else(|_| "unknown".to_string());
+                        tracing::debug!(index = idx, name = %inst_name, "Collected instance name");
                         all_instance_names.push(inst_name);
+                    } else {
+                        tracing::warn!("Failed to parse instance entry in instances table");
                     }
                 }
+                tracing::info!(
+                    count = all_instance_names.len(),
+                    names = ?all_instance_names,
+                    "Parsed instance names from scenario"
+                );
+            } else {
+                tracing::warn!("No 'instances' table found in scenario config");
             }
 
             // Handle instances array if present
             if let Ok(instances_table) = config.get::<Table>("instances") {
                 // Calculate total expected instances for proper window tiling
                 let total_expected = Some(all_instance_names.len() as u8);
+                tracing::info!(
+                    total_expected = ?total_expected,
+                    is_mesh = is_mesh,
+                    "Starting instance launches"
+                );
 
+                let mut launch_count = 0;
                 for pair in instances_table.pairs::<i32, Table>() {
                     if let Ok((_, instance)) = pair {
                         let inst_name: String =
@@ -111,6 +128,13 @@ impl ScenarioRuntime {
                             None
                         };
 
+                        tracing::info!(
+                            name = %inst_name,
+                            profile = %profile,
+                            connect_peers = ?connect_peers,
+                            "Launching instance"
+                        );
+
                         // Launch instance with auto-connect and expected total for tiling
                         let instances_clone = instances.clone();
                         tokio::task::block_in_place(|| {
@@ -119,14 +143,21 @@ impl ScenarioRuntime {
                                 let mut mgr = instances_clone.write().await;
                                 if let Err(e) = mgr.launch_with_connect(&inst_name, &profile, connect_peers, total_expected) {
                                     tracing::error!(name = %inst_name, error = %e, "Failed to launch");
+                                } else {
+                                    tracing::info!(name = %inst_name, "Instance launch succeeded");
                                 }
                             });
                         });
+
+                        launch_count += 1;
 
                         // Small delay between launches
                         std::thread::sleep(std::time::Duration::from_millis(500));
                     }
                 }
+                tracing::info!(launched = launch_count, "Finished launching instances");
+            } else {
+                tracing::warn!("No instances table found - nothing to launch");
             }
 
             // Log topology info
@@ -180,14 +211,28 @@ impl ScenarioRuntime {
         run_scheduler_loop(&self.lua, self.scheduler.clone()).await?;
 
         // Wait a bit for instances to settle, then prompt user
-        tracing::info!("Scenario running. Press Ctrl+C to stop all instances.");
+        tracing::info!("Scenario running. Press Ctrl+C to stop, or quit all instances to exit.");
 
-        // Keep running until interrupted
-        tokio::signal::ctrl_c().await?;
+        // Keep running until interrupted OR all instances have exited
+        let instances_for_check = self.instances.clone();
+        loop {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {
+                    tracing::info!("Received Ctrl+C, shutting down scenario...");
+                    break;
+                }
+                _ = tokio::time::sleep(std::time::Duration::from_millis(500)) => {
+                    // Check if all instances have exited
+                    let mut mgr = instances_for_check.write().await;
+                    if mgr.all_instances_exited() {
+                        tracing::info!("All instances have exited, shutting down scenario...");
+                        return Ok(());
+                    }
+                }
+            }
+        }
 
-        tracing::info!("Shutting down scenario...");
-
-        // Kill all instances
+        // Kill all instances (only reached if Ctrl+C was pressed)
         {
             let mut mgr = self.instances.write().await;
             mgr.kill_all();

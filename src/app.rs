@@ -248,6 +248,55 @@ pub fn App() -> Element {
                                         }
                                     }
                                 }
+
+                                // Check for message send instructions (.sendmsg files)
+                                // This enables ctx.send_packet() in Lua scenarios to send real messages
+                                let sendmsg_file = bootstrap_dir.join(format!("{}.sendmsg", our_name));
+                                if sendmsg_file.exists() {
+                                    if let Ok(payload_str) = std::fs::read_to_string(&sendmsg_file) {
+                                        // Remove file first to prevent re-processing
+                                        let _ = std::fs::remove_file(&sendmsg_file);
+
+                                        // Parse the JSON payload
+                                        if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&payload_str) {
+                                            let to_name = payload["to"].as_str().unwrap_or("");
+                                            let content = payload["content"].as_str().unwrap_or("");
+
+                                            if !to_name.is_empty() && !content.is_empty() {
+                                                let mut eng = shared_engine.write().await;
+                                                if let Some(ref mut engine) = *eng {
+                                                    // Resolve recipient name to DID
+                                                    match resolve_name_to_did(engine, to_name) {
+                                                        Ok(did) => {
+                                                            match engine.send_message(&did, content).await {
+                                                                Ok(seq) => {
+                                                                    tracing::info!(
+                                                                        to = %to_name,
+                                                                        did = %did,
+                                                                        seq = %seq,
+                                                                        "Message watcher: sent message"
+                                                                    );
+                                                                }
+                                                                Err(e) => {
+                                                                    tracing::warn!(
+                                                                        "Message watcher: failed to send: {}",
+                                                                        e
+                                                                    );
+                                                                }
+                                                            }
+                                                        }
+                                                        Err(e) => {
+                                                            tracing::warn!(
+                                                                "Message watcher: could not resolve '{}': {}",
+                                                                to_name, e
+                                                            );
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         });
                     }
@@ -263,4 +312,30 @@ pub fn App() -> Element {
         style { {GLOBAL_STYLES} }
         Router::<Route> {}
     }
+}
+
+/// Resolve a display name to a DID by searching contacts.
+/// Used by the message watcher to convert friendly names (e.g., "peace")
+/// to the actual DID required by send_message().
+fn resolve_name_to_did(engine: &syncengine_core::SyncEngine, name: &str) -> Result<String, String> {
+    let contacts = engine.list_peer_contacts()
+        .map_err(|e| format!("Failed to list contacts: {}", e))?;
+
+    // Collect names for debugging - helps diagnose topology issues
+    let available_names: Vec<String> = contacts.iter()
+        .map(|c| c.display_name().to_string())
+        .collect();
+
+    for contact in contacts {
+        if contact.display_name().to_lowercase() == name.to_lowercase() {
+            if let Some(did) = contact.did {
+                return Ok(did);
+            }
+        }
+    }
+
+    Err(format!(
+        "No contact found with name '{}'. Available contacts: {:?}",
+        name, available_names
+    ))
 }
