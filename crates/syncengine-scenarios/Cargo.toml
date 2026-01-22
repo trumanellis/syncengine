@@ -9,6 +9,9 @@ name = "syncengine-scenario"
 path = "src/main.rs"
 
 [dependencies]
+# Core library (for logging)
+syncengine-core = { path = "../syncengine-core" }
+
 # Lua runtime
 mlua.workspace = true
 
@@ -27,3 +30,9 @@ dirs.workspace = true
 
 # For process management
 nix.workspace = true
+
+# Serialization (for message IPC)
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

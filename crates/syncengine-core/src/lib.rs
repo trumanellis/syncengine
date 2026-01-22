@@ -47,6 +47,7 @@ pub mod engine;
 pub mod error;
 pub mod identity;
 pub mod invite;
+pub mod logging;
 pub mod peers;
 pub mod profile;
 pub mod realm;

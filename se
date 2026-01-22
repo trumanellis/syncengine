@@ -1,14 +1,15 @@
 #!/bin/bash
-# Launch multiple Synchronicity Engine instances
+# Launch multiple Synchronicity Engine instances with JSONL logging
 # Usage: ./se [--no-logs] <name1> [name2] [name3] ...
 #        ./se @<scenario>     # Run a Lua scenario
 #
 # Each instance gets its own data directory and window title.
 # On clean launch (no existing databases), profile names are auto-set.
-# Logs are captured to LOGS.md by default (use --no-logs to disable).
+# Logs are captured to JSONL files in ./logs/ by default (use --no-logs to disable).
+# Generate human-readable reports with: syncengine-cli logs report
 #
 # Examples:
-#   ./se love           # Single instance (logs to LOGS.md)
+#   ./se love           # Single instance (logs to ./logs/raw/YYYY-MM-DD_love.jsonl)
 #   ./se love joy       # Two instances side by side
 #   ./se alice bob eve  # Three instances for testing sync
 #   ./se --no-logs love # Single instance without logging
@@ -29,6 +30,9 @@ DATA_BASE="${HOME}/Library/Application Support"
 # Default: logging is enabled
 ENABLE_LOGS=true
 
+# Logs directory (in project root)
+LOGS_DIR="./logs"
+
 # Process flags first (before checking for @scenario)
 while [[ "$1" == --* ]]; do
     case "$1" in
@@ -40,6 +44,10 @@ while [[ "$1" == --* ]]; do
             # Legacy flag, logs are now on by default
             ENABLE_LOGS=true
             shift
+            ;;
+        --logs-dir)
+            LOGS_DIR="$2"
+            shift 2
             ;;
         *)
             echo "Unknown option: $1"
@@ -57,9 +65,10 @@ if [[ "$1" == @* ]]; then
     echo -e "${CYAN}Building scenario runner...${NC}"
     cargo build -p syncengine-scenarios --release 2>&1 | grep -E "(Compiling|Finished|error)" || true
 
-    # Also need to build the main desktop binary
+    # Also need to build the main desktop binary and CLI
     echo -e "${CYAN}Building Synchronicity Engine...${NC}"
     cargo build --bin syncengine-desktop --release 2>&1 | grep -E "(Compiling|Finished|error)" || true
+    cargo build -p syncengine-cli --release 2>&1 | grep -E "(Compiling|Finished|error)" || true
 
     SCENARIO_BIN="./target/release/syncengine-scenario"
     if [ ! -f "$SCENARIO_BIN" ]; then
@@ -73,8 +82,77 @@ if [[ "$1" == @* ]]; then
         exit 1
     fi
 
-    # Run the scenario
-    exec "$SCENARIO_BIN" "$SCENARIO_NAME" --verbose
+    # Set up logging in scenario subdirectory
+    SCENARIO_LOGS_DIR="./scenarios/${SCENARIO_NAME}/logs"
+    SCENARIO_REPORT="./scenarios/${SCENARIO_NAME}/LOGS.md"
+
+    if [ "$ENABLE_LOGS" = true ]; then
+        # Clear old logs and create fresh directory
+        rm -rf "$SCENARIO_LOGS_DIR"
+        mkdir -p "$SCENARIO_LOGS_DIR/raw"
+        mkdir -p "$SCENARIO_LOGS_DIR/sessions"
+
+        SESSION_ID=$(date '+%Y-%m-%dT%H-%M-%S')
+        cat > "$SCENARIO_LOGS_DIR/sessions/${SESSION_ID}.json" << EOF
+{
+  "session_id": "$SESSION_ID",
+  "started_at": "$(date -u '+%Y-%m-%dT%H:%M:%SZ')",
+  "scenario": "$SCENARIO_NAME"
+}
+EOF
+
+        echo -e "${CYAN}JSONL logging enabled${NC}"
+        echo -e "  Logs dir: ${YELLOW}${SCENARIO_LOGS_DIR}${NC}"
+    fi
+
+    # Cleanup function for scenarios
+    scenario_cleanup() {
+        echo ""
+        echo -e "${YELLOW}Scenario ended.${NC}"
+
+        if [ "$ENABLE_LOGS" = true ]; then
+            sleep 0.5
+            echo -e "${CYAN}Generating scenario log report...${NC}"
+
+            CLI_BIN="./target/release/syncengine"
+            if [ ! -f "$CLI_BIN" ]; then
+                CLI_BIN="./target/debug/syncengine"
+            fi
+
+            if [ -f "$CLI_BIN" ]; then
+                if "$CLI_BIN" logs report --logs-dir "$SCENARIO_LOGS_DIR" --output "$SCENARIO_REPORT" 2>/dev/null; then
+                    echo -e "${GREEN}Report saved to ${SCENARIO_REPORT}${NC}"
+
+                    # Symlink to project root LOGS.md
+                    rm -f "./LOGS.md"
+                    ln -s "$SCENARIO_REPORT" "./LOGS.md"
+                    echo -e "${GREEN}Symlinked to ./LOGS.md${NC}"
+                else
+                    echo -e "${YELLOW}Report generation failed${NC}"
+                fi
+            fi
+
+            echo ""
+            echo -e "${CYAN}Raw logs available at:${NC}"
+            ls -la "$SCENARIO_LOGS_DIR/raw/"*.jsonl 2>/dev/null || echo "  (no logs found)"
+        fi
+
+        exit 0
+    }
+
+    trap scenario_cleanup SIGINT SIGTERM EXIT
+
+    # Run the scenario with logging environment variables
+    if [ "$ENABLE_LOGS" = true ]; then
+        SYNCENGINE_LOGS_DIR="$SCENARIO_LOGS_DIR" \
+        SYNCENGINE_INSTANCE="scenario-${SCENARIO_NAME}" \
+        RUST_LOG=syncengine=info,syncengine_core=info \
+        "$SCENARIO_BIN" "$SCENARIO_NAME" --verbose
+    else
+        "$SCENARIO_BIN" "$SCENARIO_NAME" --verbose
+    fi
+
+    exit 0
 fi
 
 # Show usage if no arguments
@@ -83,10 +161,11 @@ if [ $# -eq 0 ]; then
     echo "       ./se @<scenario>     # Run a Lua scenario"
     echo ""
     echo "Options:"
-    echo "  --no-logs           Disable log capture (logs to LOGS.md by default)"
+    echo "  --no-logs           Disable JSONL log capture"
+    echo "  --logs-dir <dir>    Set custom logs directory (default: ./logs)"
     echo ""
     echo "Examples:"
-    echo "  ./se love           # Single instance (with logging)"
+    echo "  ./se love           # Single instance (with JSONL logging)"
     echo "  ./se love joy       # Two instances"
     echo "  ./se alice bob eve  # Three instances"
     echo "  ./se --no-logs love # Without logging"
@@ -97,26 +176,39 @@ if [ $# -eq 0 ]; then
     echo "  ./se @staggered-join  # Nodes join at different times"
     echo "  ./se @chaos         # Random node failures for resilience testing"
     echo ""
+    echo "Logs:"
+    echo "  Logs are stored in $LOGS_DIR/raw/*.jsonl (one file per instance)"
+    echo "  Generate report: cargo run -p syncengine-cli -- logs report"
+    echo "  Query logs: jq 'select(.level == \"error\")' $LOGS_DIR/raw/*.jsonl"
+    echo ""
     echo "Each instance gets its own data directory:"
     echo "  ~/Library/Application Support/instance-<name>/"
     exit 1
 fi
 
-# Initialize LOGS.md if logging is enabled
+# Initialize logs directory if logging is enabled
+SESSION_ID=""
 if [ "$ENABLE_LOGS" = true ]; then
-    cat > LOGS.md << 'EOF'
-# Synchronicity Engine - Run Logs
+    # Clear old logs and create fresh directory structure
+    rm -rf "$LOGS_DIR"
+    mkdir -p "$LOGS_DIR/raw"
+    mkdir -p "$LOGS_DIR/sessions"
 
+    # Generate session ID
+    SESSION_ID=$(date '+%Y-%m-%dT%H-%M-%S')
+
+    # Write session metadata
+    cat > "$LOGS_DIR/sessions/${SESSION_ID}.json" << EOF
+{
+  "session_id": "$SESSION_ID",
+  "started_at": "$(date -u '+%Y-%m-%dT%H:%M:%SZ')",
+  "instances": [$(printf '"%s",' "$@" | sed 's/,$//')]
+}
 EOF
-    echo "**Started:** $(date '+%Y-%m-%d %H:%M:%S')" >> LOGS.md
-    echo "" >> LOGS.md
-    echo "## Session Info" >> LOGS.md
-    echo "" >> LOGS.md
-    echo "- **Instances:** \`$@\`" >> LOGS.md
-    echo "- **Log Level:** INFO" >> LOGS.md
-    echo "" >> LOGS.md
-    echo "---" >> LOGS.md
-    echo "" >> LOGS.md
+
+    echo -e "${CYAN}JSONL logging enabled (fresh session)${NC}"
+    echo -e "  Session: ${YELLOW}${SESSION_ID}${NC}"
+    echo -e "  Logs dir: ${YELLOW}${LOGS_DIR}${NC}"
 fi
 
 # Check if any instance needs initialization (for info message)
@@ -220,19 +312,15 @@ for name in "$@"; do
         INIT_ARGS="$INIT_ARGS --init-connect $CONNECT_NAMES"
     fi
 
-    # Launch in background with position and total count
+    # Launch in background with JSONL logging environment variables
     if [ "$ENABLE_LOGS" = true ]; then
-        # Add instance header to logs
-        echo "## Instance: \`$name\`" >> LOGS.md
-        echo "" >> LOGS.md
-        echo "<details>" >> LOGS.md
-        echo "<summary>Click to expand logs</summary>" >> LOGS.md
-        echo "" >> LOGS.md
-        echo "\`\`\`log" >> LOGS.md
-
-        # With logging enabled - Rust tracing already adds timestamps
-        RUST_LOG=syncengine=info,syncengine_core=info "$BINARY" --name "$name" --position "$POSITION" --total-windows "$TOTAL" $INIT_ARGS 2>&1 | tee -a LOGS.md &
+        # Set environment variables for JSONL logging
+        SYNCENGINE_LOGS_DIR="$LOGS_DIR" \
+        SYNCENGINE_INSTANCE="$name" \
+        RUST_LOG=syncengine=info,syncengine_core=info \
+        "$BINARY" --name "$name" --position "$POSITION" --total-windows "$TOTAL" $INIT_ARGS &
         PIDS+=($!)
+        echo -e "  ${CYAN}Logging to: ${YELLOW}${LOGS_DIR}/raw/$(date '+%Y-%m-%d')_${name}.jsonl${NC}"
     else
         # Normal mode (no logging)
         "$BINARY" --name "$name" --position "$POSITION" --total-windows "$TOTAL" $INIT_ARGS &
@@ -274,40 +362,46 @@ cleanup() {
     # Also kill any child processes by name (belt and suspenders)
     pkill -9 -f "syncengine-desktop" 2>/dev/null || true
 
-    # Close markdown sections if logging was enabled
+    # Generate report if logging was enabled
     if [ "$ENABLE_LOGS" = true ]; then
         # Give processes time to flush final logs
-        sleep 0.2
+        sleep 0.5
 
-        # Close the final code block and details
-        echo "\`\`\`" >> LOGS.md
-        echo "" >> LOGS.md
-        echo "</details>" >> LOGS.md
-        echo "" >> LOGS.md
+        echo -e "${CYAN}Generating log report...${NC}"
 
-        # Add session summary
-        echo "---" >> LOGS.md
-        echo "" >> LOGS.md
-        echo "## Session Summary" >> LOGS.md
-        echo "" >> LOGS.md
-        echo "- **Ended:** $(date '+%Y-%m-%d %H:%M:%S')" >> LOGS.md
-        echo "- **Duration:** ~$((SECONDS / 60)) minutes" >> LOGS.md
-        echo "" >> LOGS.md
+        # Try to use pre-built CLI binary (faster than cargo run)
+        CLI_BIN="./target/release/syncengine"
+        if [ ! -f "$CLI_BIN" ]; then
+            CLI_BIN="./target/debug/syncengine"
+        fi
 
-        # Count log entries by level
-        INFO_COUNT=$(grep -c "INFO" LOGS.md 2>/dev/null || echo "0")
-        WARN_COUNT=$(grep -c "WARN" LOGS.md 2>/dev/null || echo "0")
-        ERROR_COUNT=$(grep -c "ERROR" LOGS.md 2>/dev/null || echo "0")
+        if [ -f "$CLI_BIN" ]; then
+            if "$CLI_BIN" logs report --logs-dir "$LOGS_DIR" --output LOGS.md 2>/dev/null; then
+                echo -e "${GREEN}Report saved to LOGS.md${NC}"
+            else
+                echo -e "${YELLOW}Report generation failed${NC}"
+            fi
+        else
+            # Fall back to cargo run
+            echo -e "${CYAN}Building CLI for report generation...${NC}"
+            if cargo run -p syncengine-cli --release --quiet -- logs report --logs-dir "$LOGS_DIR" --output LOGS.md 2>/dev/null; then
+                echo -e "${GREEN}Report saved to LOGS.md${NC}"
+            else
+                echo -e "${YELLOW}Report generation skipped${NC}"
+                echo -e "Generate manually: cargo run -p syncengine-cli -- logs report"
+            fi
+        fi
 
-        echo "### Log Statistics" >> LOGS.md
-        echo "" >> LOGS.md
-        echo "| Level | Count |" >> LOGS.md
-        echo "|-------|-------|" >> LOGS.md
-        echo "| INFO  | $INFO_COUNT |" >> LOGS.md
-        echo "| WARN  | $WARN_COUNT |" >> LOGS.md
-        echo "| ERROR | $ERROR_COUNT |" >> LOGS.md
-
-        echo -e "${GREEN}Logs saved to LOGS.md${NC}"
+        echo ""
+        echo -e "${CYAN}Raw logs available at:${NC}"
+        ls -la "$LOGS_DIR/raw/"*.jsonl 2>/dev/null || echo "  (no logs found)"
+        echo ""
+        echo -e "${CYAN}Query examples:${NC}"
+        echo "  # Find all errors"
+        echo "  jq 'select(.level == \"error\")' $LOGS_DIR/raw/*.jsonl"
+        echo ""
+        echo "  # Get logs for specific instance"
+        echo "  jq 'select(.instance == \"love\")' $LOGS_DIR/raw/*.jsonl"
     fi
 
     echo -e "${GREEN}All instances stopped.${NC}"

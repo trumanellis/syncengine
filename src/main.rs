@@ -12,6 +12,7 @@ use std::sync::OnceLock;
 
 use clap::{Parser, ValueEnum};
 use dioxus::desktop::{Config, LogicalPosition, WindowBuilder};
+use tracing_subscriber::prelude::*;
 
 /// Get the primary screen dimensions on macOS
 fn get_screen_size() -> (f64, f64) {
@@ -110,9 +111,49 @@ struct Args {
 }
 
 fn main() {
-    tracing_subscriber::fmt::init();
-
     let args = Args::parse();
+
+    // Check for JSONL logging environment variables
+    let logs_dir = std::env::var("SYNCENGINE_LOGS_DIR").ok();
+    let instance_name = std::env::var("SYNCENGINE_INSTANCE")
+        .ok()
+        .or_else(|| args.name.clone())
+        .unwrap_or_else(|| "default".to_string());
+
+    // Set up tracing with optional JSONL layer
+    if let Some(ref logs_dir) = logs_dir {
+        // Use JSONL logging + console output
+        match syncengine_core::logging::JsonlLayer::new(logs_dir, &instance_name) {
+            Ok(jsonl_layer) => {
+                let subscriber = tracing_subscriber::registry()
+                    .with(jsonl_layer)
+                    .with(
+                        tracing_subscriber::fmt::layer()
+                            .with_target(true)
+                            .with_thread_names(false),
+                    )
+                    .with(
+                        tracing_subscriber::EnvFilter::try_from_default_env()
+                            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+                    );
+                tracing::subscriber::set_global_default(subscriber)
+                    .expect("Failed to set global subscriber");
+                tracing::info!(
+                    logs_dir = %logs_dir,
+                    instance = %instance_name,
+                    "JSONL logging enabled"
+                );
+            }
+            Err(e) => {
+                // Fall back to console-only logging
+                tracing_subscriber::fmt::init();
+                tracing::warn!("Failed to initialize JSONL logging: {}", e);
+            }
+        }
+    } else {
+        // Standard console logging
+        tracing_subscriber::fmt::init();
+    }
 
     // Determine data directory and display name
     let (data_dir, display_name) = if let Some(dir) = args.data_dir {

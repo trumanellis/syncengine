@@ -10,14 +10,10 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use std::path::PathBuf;
+use tracing_subscriber::prelude::*;
 use tracing_subscriber::EnvFilter;
 
-mod api;
-mod instance;
-mod runtime;
-mod scheduler;
-
-use runtime::ScenarioRuntime;
+use syncengine_scenarios::runtime::ScenarioRuntime;
 
 /// SyncEngine Scenario Runner
 #[derive(Parser, Debug)]
@@ -41,17 +37,53 @@ struct Args {
 async fn main() -> Result<()> {
     let args = Args::parse();
 
+    // Check for JSONL logging environment variables
+    let logs_dir = std::env::var("SYNCENGINE_LOGS_DIR").ok();
+    let instance_name = std::env::var("SYNCENGINE_INSTANCE")
+        .unwrap_or_else(|_| format!("scenario-{}", args.scenario));
+
     // Initialize tracing
     let filter = if args.verbose {
         EnvFilter::new("debug")
     } else {
-        EnvFilter::new("info")
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"))
     };
 
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_target(false)
-        .init();
+    // Set up tracing with optional JSONL layer
+    if let Some(ref logs_dir) = logs_dir {
+        match syncengine_core::logging::JsonlLayer::new(logs_dir, &instance_name) {
+            Ok(jsonl_layer) => {
+                let subscriber = tracing_subscriber::registry()
+                    .with(jsonl_layer)
+                    .with(
+                        tracing_subscriber::fmt::layer()
+                            .with_target(false),
+                    )
+                    .with(filter);
+                tracing::subscriber::set_global_default(subscriber)
+                    .expect("Failed to set global subscriber");
+                tracing::info!(
+                    logs_dir = %logs_dir,
+                    instance = %instance_name,
+                    "JSONL logging enabled for scenario"
+                );
+            }
+            Err(e) => {
+                // Fall back to console-only logging
+                tracing_subscriber::fmt()
+                    .with_env_filter(filter)
+                    .with_target(false)
+                    .init();
+                tracing::warn!("Failed to initialize JSONL logging: {}", e);
+            }
+        }
+    } else {
+        // Standard console logging
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_target(false)
+            .init();
+    }
 
     // Determine scenarios directory
     let scenarios_dir = args.scenarios_dir.unwrap_or_else(|| PathBuf::from("scenarios"));

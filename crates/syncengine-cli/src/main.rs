@@ -131,6 +131,12 @@ enum Commands {
         action: ChatAction,
     },
 
+    /// Log management and report generation
+    Logs {
+        #[command(subcommand)]
+        action: LogsAction,
+    },
+
     /// Start serving/syncing as a persistent P2P node
     Serve {
         /// Realm to sync (optional, can join/create realms via other commands)
@@ -380,6 +386,69 @@ enum ChatAction {
     Interactive {
         /// Contact's DID
         did: String,
+    },
+}
+
+/// Log management commands
+#[derive(Subcommand)]
+enum LogsAction {
+    /// Generate a markdown report from JSONL logs
+    Report {
+        /// Logs directory (default: ./logs)
+        #[arg(short, long)]
+        logs_dir: Option<PathBuf>,
+
+        /// Output file (default: LOGS.md)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+
+        /// Include debug-level logs
+        #[arg(long)]
+        debug: bool,
+
+        /// Include trace-level logs (very verbose)
+        #[arg(long)]
+        trace: bool,
+    },
+
+    /// Show a timeline view of recent logs
+    Timeline {
+        /// Logs directory (default: ./logs)
+        #[arg(long)]
+        logs_dir: Option<PathBuf>,
+
+        /// Number of entries to show (default: 50)
+        #[arg(short = 'n', long, default_value = "50")]
+        limit: usize,
+    },
+
+    /// Query logs for a specific instance
+    Query {
+        /// Logs directory (default: ./logs)
+        #[arg(long)]
+        logs_dir: Option<PathBuf>,
+
+        /// Instance name to filter by
+        instance: String,
+
+        /// Log level to filter by (error, warn, info, debug, trace)
+        #[arg(short = 'L', long)]
+        level: Option<String>,
+    },
+
+    /// Clean up old log files
+    Clean {
+        /// Logs directory (default: ./logs)
+        #[arg(long)]
+        logs_dir: Option<PathBuf>,
+
+        /// Keep logs from the last N days (default: 7)
+        #[arg(short = 'n', long, default_value = "7")]
+        keep_days: u32,
+
+        /// Actually delete files (without this flag, just shows what would be deleted)
+        #[arg(long)]
+        confirm: bool,
     },
 }
 
@@ -1321,6 +1390,167 @@ async fn main() -> Result<()> {
                 }
             }
         },
+
+        // ═══════════════════════════════════════════════════════════════════════
+        // Log Management Commands
+        // ═══════════════════════════════════════════════════════════════════════
+
+        Commands::Logs { action } => {
+            use syncengine_core::logging::{
+                generate_report, generate_timeline, read_all_entries, write_report, ReportOptions,
+            };
+
+            let default_logs_dir = PathBuf::from("./logs");
+
+            match action {
+                LogsAction::Report {
+                    logs_dir,
+                    output,
+                    debug,
+                    trace,
+                } => {
+                    let logs_dir = logs_dir.unwrap_or_else(|| default_logs_dir.clone());
+                    let output_path = output.unwrap_or_else(|| PathBuf::from("LOGS.md"));
+
+                    let options = ReportOptions {
+                        include_trace: trace,
+                        include_debug: debug,
+                        ..Default::default()
+                    };
+
+                    match write_report(&logs_dir, &output_path, &options) {
+                        Ok(()) => {
+                            println!("Report generated: {}", output_path.display());
+                        }
+                        Err(e) => {
+                            if e.kind() == std::io::ErrorKind::NotFound {
+                                println!("No logs found in {}", logs_dir.display());
+                                println!("Run the app with logging enabled to generate logs.");
+                            } else {
+                                anyhow::bail!("Failed to generate report: {}", e);
+                            }
+                        }
+                    }
+                }
+
+                LogsAction::Timeline { logs_dir, limit } => {
+                    let logs_dir = logs_dir.unwrap_or_else(|| default_logs_dir.clone());
+
+                    match generate_timeline(&logs_dir, Some(limit)) {
+                        Ok(output) => {
+                            println!("{}", output);
+                        }
+                        Err(e) => {
+                            if e.kind() == std::io::ErrorKind::NotFound {
+                                println!("No logs found in {}", logs_dir.display());
+                            } else {
+                                anyhow::bail!("Failed to read logs: {}", e);
+                            }
+                        }
+                    }
+                }
+
+                LogsAction::Query {
+                    logs_dir,
+                    instance,
+                    level,
+                } => {
+                    let logs_dir = logs_dir.unwrap_or_else(|| default_logs_dir.clone());
+
+                    match read_all_entries(&logs_dir) {
+                        Ok(entries) => {
+                            let filtered: Vec<_> = entries
+                                .iter()
+                                .filter(|e| e.instance == instance)
+                                .filter(|e| {
+                                    level.as_ref().map_or(true, |l| e.level == l.to_lowercase())
+                                })
+                                .collect();
+
+                            if filtered.is_empty() {
+                                println!("No entries found for instance '{}'", instance);
+                            } else {
+                                println!(
+                                    "Found {} entries for instance '{}':",
+                                    filtered.len(),
+                                    instance
+                                );
+                                println!();
+                                for entry in filtered {
+                                    println!(
+                                        "{} {} {} - {}",
+                                        entry.ts, entry.level.to_uppercase(), entry.target, entry.msg
+                                    );
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            if e.kind() == std::io::ErrorKind::NotFound {
+                                println!("No logs found in {}", logs_dir.display());
+                            } else {
+                                anyhow::bail!("Failed to read logs: {}", e);
+                            }
+                        }
+                    }
+                }
+
+                LogsAction::Clean {
+                    logs_dir,
+                    keep_days,
+                    confirm,
+                } => {
+                    let logs_dir = logs_dir.unwrap_or_else(|| default_logs_dir.clone());
+                    let raw_dir = logs_dir.join("raw");
+
+                    if !raw_dir.exists() {
+                        println!("No logs directory found at {}", raw_dir.display());
+                        return Ok(());
+                    }
+
+                    let cutoff = chrono::Local::now() - chrono::Duration::days(keep_days as i64);
+                    let cutoff_str = cutoff.format("%Y-%m-%d").to_string();
+
+                    let mut files_to_delete = Vec::new();
+
+                    for entry in std::fs::read_dir(&raw_dir)? {
+                        let entry = entry?;
+                        let path = entry.path();
+
+                        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                            // Filename format: YYYY-MM-DD_instance.jsonl
+                            if let Some(date_part) = name.split('_').next() {
+                                if date_part < cutoff_str.as_str() {
+                                    files_to_delete.push(path);
+                                }
+                            }
+                        }
+                    }
+
+                    if files_to_delete.is_empty() {
+                        println!("No log files older than {} days found.", keep_days);
+                    } else {
+                        println!(
+                            "Found {} log file(s) older than {} days:",
+                            files_to_delete.len(),
+                            keep_days
+                        );
+                        for path in &files_to_delete {
+                            println!("  {}", path.display());
+                        }
+
+                        if confirm {
+                            for path in &files_to_delete {
+                                std::fs::remove_file(path)?;
+                            }
+                            println!("Deleted {} file(s).", files_to_delete.len());
+                        } else {
+                            println!();
+                            println!("Use --confirm to actually delete these files.");
+                        }
+                    }
+                }
+            }
+        }
 
         Commands::Serve { realm } => {
             println!("Starting Synchronicity Engine...");
