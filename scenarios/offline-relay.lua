@@ -1,21 +1,24 @@
 -- offline-relay.lua
 -- Store-and-forward relay test with REAL offline behavior
 --
--- This scenario demonstrates true store-and-forward:
--- 1. All three nodes start and establish connections
+-- This scenario demonstrates message delivery when the recipient goes offline:
+-- 1. All three nodes start and establish connections (full mesh for direct messaging)
 -- 2. Peace goes OFFLINE (killed)
--- 3. Love sends a message to Peace (Joy stores it)
--- 4. Love goes OFFLINE too (killed) - sender is now gone!
+-- 3. Love sends a message to Peace (stored locally, waiting for delivery)
+-- 4. Love goes OFFLINE too (sender is now gone!)
 -- 5. Peace comes back ONLINE (restarted)
--- 6. Joy forwards the stored message to Peace (even though Love is gone)
+-- 6. Peace should receive Love's message (via sync or relay)
 --
--- Topology Timeline:
---   t=0s:   [love] ─── [joy] ─── [peace]  (all connected)
---   t=10s:  [love] ─── [joy]    [PEACE]   (peace killed)
---   t=14s:  Love sends message to Peace
---   t=16s:  [LOVE]     [joy]    [PEACE]   (love killed - sender gone!)
---   t=20s:  [LOVE]     [joy] ─── [peace]  (peace restarted)
---   t=27s:  Peace receives relayed message (from Joy, even though Love is gone)
+-- Topology: Full mesh (all connected to all) so Love can resolve Peace's name
+--
+-- Timeline:
+--   t=0s:   Launch all instances
+--   t=3s:   Start mesh connections (6 total: each pair connects bidirectionally)
+--   t=12s:  Kill Peace (goes offline)
+--   t=16s:  Love sends message to Peace
+--   t=18s:  Kill Love (sender goes offline)
+--   t=22s:  Peace restarts
+--   t=30s:  Test complete
 
 scenario {
     name = "offline-relay",
@@ -27,36 +30,30 @@ scenario {
         {name = "peace", profile = "Peace"},
     },
 
-    -- Manual topology - we orchestrate hub-and-spoke through Joy
-    topology = "none",
+    -- Use mesh topology for auto-connect - ensures all nodes know each other
+    topology = "mesh",
 
     on_start = function(ctx)
         ctx.log("=== Offline Relay Test ===")
         ctx.log("")
-        ctx.log("This test demonstrates TRUE store-and-forward:")
+        ctx.log("This test demonstrates message delivery with offline nodes:")
+        ctx.log("  - All nodes connect in a mesh (so Love knows Peace)")
         ctx.log("  - Peace goes offline")
-        ctx.log("  - Love sends a message (Joy stores it)")
+        ctx.log("  - Love sends a message to Peace")
         ctx.log("  - Love ALSO goes offline")
-        ctx.log("  - Peace comes back and receives the message from Joy")
-        ctx.log("  - (Even though Love is no longer online!)")
+        ctx.log("  - Peace comes back and receives the message")
         ctx.log("")
 
-        -- Phase 1: Establish connections (hub-and-spoke through Joy)
-        ctx.after(2.0, function()
-            ctx.log("Phase 1: Establishing connections...")
-            ctx.log("         Creating hub-and-spoke: Love <-> Joy <-> Peace")
-            ctx.connect("joy", "love")   -- Love connects to Joy
-            ctx.connect("joy", "peace")  -- Peace connects to Joy
-        end)
-
-        ctx.after(4.0, function()
-            -- Reverse connections for bidirectional contacts
-            ctx.connect("love", "joy")
-            ctx.connect("peace", "joy")
+        -- Phase 1: Wait for mesh connections to establish
+        -- topology = "mesh" handles auto-connect, but we need time for exchanges
+        ctx.after(10.0, function()
+            ctx.log("")
+            ctx.log("Phase 1: Connections should be established")
+            ctx.log("         Waiting 2 more seconds to ensure stability...")
         end)
 
         -- Phase 2: Kill Peace (simulate going offline)
-        ctx.after(10.0, function()
+        ctx.after(12.0, function()
             ctx.log("")
             ctx.log("Phase 2: Peace is going OFFLINE...")
             ctx.log("         (Killing Peace instance)")
@@ -64,24 +61,24 @@ scenario {
         end)
 
         -- Phase 3: Love sends message while Peace is offline
-        ctx.after(14.0, function()
+        ctx.after(16.0, function()
             ctx.log("")
             ctx.log("Phase 3: Love sending message to Peace...")
-            ctx.log("         (Peace is OFFLINE - Joy stores for relay)")
+            ctx.log("         (Peace is OFFLINE - message stored for later)")
             ctx.send_packet("love", "peace", "Hello Peace! You were offline when I sent this. ~Love")
         end)
 
         -- Phase 4: Kill Love too (sender goes offline!)
-        ctx.after(16.0, function()
+        ctx.after(18.0, function()
             ctx.log("")
             ctx.log("Phase 4: Love is ALSO going OFFLINE...")
             ctx.log("         (Killing Love instance - sender is now gone!)")
-            ctx.log("         Only Joy remains to relay the message.")
+            ctx.log("         Only Joy remains online.")
             ctx.kill("love")
         end)
 
         -- Phase 5: Peace comes back online
-        ctx.after(20.0, function()
+        ctx.after(22.0, function()
             ctx.log("")
             ctx.log("Phase 5: Peace is coming back ONLINE...")
             ctx.log("         (Restarting Peace instance)")
@@ -89,19 +86,18 @@ scenario {
             ctx.restart("peace")
         end)
 
-        -- Phase 6: Wait for relay and show results
-        ctx.after(27.0, function()
+        -- Phase 6: Wait for sync and show results
+        ctx.after(30.0, function()
             ctx.log("")
             ctx.log("=== Test Complete ===")
             ctx.log("")
             ctx.log("Expected result:")
             ctx.log("  1. Peace was offline when Love sent the message")
-            ctx.log("  2. Joy stored the message for relay")
+            ctx.log("  2. Message was stored (locally or on Joy)")
             ctx.log("  3. Love went offline BEFORE Peace came back")
-            ctx.log("  4. When Peace reconnected, Joy forwarded the message")
+            ctx.log("  4. When Peace reconnected and synced, it received the message")
             ctx.log("  5. Peace should see Love's message - even though Love is gone!")
             ctx.log("")
-            ctx.log("This demonstrates TRUE store-and-forward relay.")
             ctx.log("Check Peace's chat to verify!")
             ctx.log("")
             ctx.log("Press Ctrl+C to stop remaining instances")
